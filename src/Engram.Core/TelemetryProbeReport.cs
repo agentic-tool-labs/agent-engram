@@ -1,0 +1,274 @@
+using System.Globalization;
+using System.Text.Json.Serialization;
+
+namespace Engram.Core;
+
+public sealed record TelemetryDateRange(
+    [property: JsonPropertyName("from")] DateTimeOffset From,
+    [property: JsonPropertyName("to")] DateTimeOffset To);
+
+public sealed record TelemetryAdoptionStat(
+    [property: JsonPropertyName("count")] int Count,
+    [property: JsonPropertyName("percent")] double Percent);
+
+public sealed record TelemetryCoverageStat(
+    [property: JsonPropertyName("high_count")] int HighCount,
+    [property: JsonPropertyName("high_percent")] double HighPercent,
+    [property: JsonPropertyName("partial_count")] int PartialCount,
+    [property: JsonPropertyName("partial_percent")] double PartialPercent,
+    [property: JsonPropertyName("none_count")] int NoneCount,
+    [property: JsonPropertyName("none_percent")] double NonePercent);
+
+public sealed record TelemetryQueryCount(
+    [property: JsonPropertyName("query")] string Query,
+    [property: JsonPropertyName("count")] int Count);
+
+public sealed record TelemetryCompactionSurvivalStat(
+    [property: JsonPropertyName("events")] int Events,
+    [property: JsonPropertyName("sessions")] int Sessions,
+    [property: JsonPropertyName("note")] string Note);
+
+/// <param name="McpSessions">
+/// Distinct <c>Mcp-Session-Id</c> values seen. That header is minted by the transport and the
+/// record is written when a session first calls a memory tool, so this counts sessions that used
+/// memory — not sessions that could have.
+/// </param>
+/// <param name="HookSessions">
+/// Distinct Claude Code session ids seen by the <c>session-start</c> hook.
+/// </param>
+/// <param name="MemoryNeverReached">
+/// Every session started and not one reached the MCP server. The only conclusion these two counts
+/// support: they are disjoint id spaces — verified on a real instance, 23 hook ids and 9 MCP ids
+/// with no value in both — so their difference is not a number of anything. Subtracting them once
+/// produced "N session(s) ran without Engram's MCP server reachable; memory was unavailable",
+/// which was reported for every session where the model simply never asked for memory. A zero
+/// against a non-zero is the one comparison that survives, because it needs no correspondence
+/// between the spaces. What the hook space *can* now say on its own: <c>tool-observed</c> records
+/// carry the Claude Code session id per Engram tool call, so "which hook sessions called
+/// <c>remember</c>" is answerable there without any join — this report does not compute it yet
+/// (D73).
+/// </param>
+public sealed record TelemetryProbeReport(
+    [property: JsonPropertyName("date_range")] TelemetryDateRange DateRange,
+    [property: JsonPropertyName("total_records")] int TotalRecords,
+    [property: JsonPropertyName("skipped_lines")] int SkippedLines,
+    [property: JsonPropertyName("mcp_sessions")] int McpSessions,
+    [property: JsonPropertyName("hook_sessions")] int HookSessions,
+    [property: JsonPropertyName("memory_never_reached")] bool MemoryNeverReached,
+    [property: JsonPropertyName("sessions_with_recall")] TelemetryAdoptionStat SessionsWithRecall,
+    [property: JsonPropertyName("sessions_with_remember")] TelemetryAdoptionStat SessionsWithRemember,
+    [property: JsonPropertyName("sessions_with_digest")] TelemetryAdoptionStat SessionsWithDigest,
+    [property: JsonPropertyName("sessions_with_session_fact_write")] TelemetryAdoptionStat SessionsWithSessionFactWrite,
+    [property: JsonPropertyName("sessions_with_session_fact_recall")] TelemetryAdoptionStat SessionsWithSessionFactRecall,
+    [property: JsonPropertyName("sessions_with_prior_session_fact_recall")] TelemetryAdoptionStat SessionsWithPriorSessionFactRecall,
+    [property: JsonPropertyName("compaction_survival")] TelemetryCompactionSurvivalStat CompactionSurvival,
+    [property: JsonPropertyName("median_recalls_per_session")] double MedianRecallsPerSession,
+    [property: JsonPropertyName("max_recalls_per_session")] int MaxRecallsPerSession,
+    [property: JsonPropertyName("coverage")] TelemetryCoverageStat Coverage,
+    [property: JsonPropertyName("mean_tokens_per_recall")] double MeanTokensPerRecall,
+    [property: JsonPropertyName("median_tokens_per_recall")] double MedianTokensPerRecall,
+    [property: JsonPropertyName("top_queries")] IReadOnlyList<TelemetryQueryCount> TopQueries,
+    // Read from the store, not from these records, and null when there is no store to read.
+    // It rides along on the probe because this is the command that answers "what is this
+    // instance actually doing", and D16 is one of the questions that asks.
+    [property: JsonPropertyName("facts_per_session")] FactsPerSessionStat? FactsPerSession = null);
+
+public sealed record TelemetryProbeEmptyReport(
+    [property: JsonPropertyName("has_records")] bool HasRecords,
+    [property: JsonPropertyName("message")] string Message,
+    [property: JsonPropertyName("skipped_lines")] int SkippedLines,
+    // A store can hold facts before any telemetry exists — init imports them — so an empty
+    // probe still answers D16 rather than reporting nothing at all.
+    [property: JsonPropertyName("facts_per_session")] FactsPerSessionStat? FactsPerSession = null);
+
+[JsonSerializable(typeof(TelemetryProbeReport))]
+[JsonSerializable(typeof(TelemetryProbeEmptyReport))]
+public sealed partial class TelemetryProbeJsonContext : JsonSerializerContext;
+
+public static class TelemetrySummarizer
+{
+    public static TelemetryProbeReport? Summarize(
+        IReadOnlyList<TelemetryRecord> records,
+        int skippedLines,
+        FactsPerSessionStat? factsPerSession = null)
+    {
+        if (records.Count == 0)
+        {
+            return null;
+        }
+
+        var timestamps = records.Select(r => ParseTimestamp(r.Timestamp)).ToList();
+        var dateRange = new TelemetryDateRange(timestamps.Min(), timestamps.Max());
+
+        var mcpSessionIds = records
+            .Where(r => r.Kind == TelemetryEventKind.SessionOpen)
+            .Select(r => r.SessionId)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        var mcpSessionSet = new HashSet<string>(mcpSessionIds, StringComparer.Ordinal);
+        var mcpSessionCount = mcpSessionIds.Count;
+
+        var hookSessionCount = records
+            .Where(r => r.Kind == TelemetryEventKind.SessionStart)
+            .Select(r => r.SessionId)
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+        var recalls = records.Where(r => r.Kind == TelemetryEventKind.Recall).ToList();
+        var remembers = records.Where(r => r.Kind == TelemetryEventKind.Remember).ToList();
+        var digests = records.Where(r => r.Kind == TelemetryEventKind.Digest).ToList();
+
+        var recallsBySession = recalls
+            .GroupBy(r => r.SessionId, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
+
+        var recallCountsPerSession = mcpSessionIds
+            .Select(id => recallsBySession.TryGetValue(id, out var count) ? count : 0)
+            .ToList();
+
+        var coverageHigh = 0;
+        var coveragePartial = 0;
+        var coverageNone = 0;
+        foreach (var recall in recalls)
+        {
+            switch (recall.Coverage)
+            {
+                case "high":
+                    coverageHigh++;
+                    break;
+                case "partial":
+                    coveragePartial++;
+                    break;
+                case "none":
+                    coverageNone++;
+                    break;
+            }
+        }
+
+        var coverageTotal = coverageHigh + coveragePartial + coverageNone;
+
+        var tokenValues = recalls
+            .Where(r => r.TokensReturned.HasValue)
+            .Select(r => r.TokensReturned!.Value)
+            .ToList();
+
+        var topQueries = recalls
+            .Where(r => !string.IsNullOrEmpty(r.Query))
+            .GroupBy(r => r.Query!, StringComparer.Ordinal)
+            .Select(g => new TelemetryQueryCount(g.Key, g.Count()))
+            .OrderByDescending(q => q.Count)
+            .ThenBy(q => q.Query, StringComparer.Ordinal)
+            .Take(10)
+            .ToList();
+
+        // Not hookSessionCount > mcpSessionCount, which was the old test and is satisfied by the
+        // ordinary case: a session where the model never asked for memory writes a session-start
+        // and no session-open. Nothing about reachability is observable here — the tools are the
+        // only thing that records an MCP session, so the counts move with use, not with uptime.
+        var memoryNeverReached = mcpSessionCount == 0 && hookSessionCount > 0;
+
+        var sessionFactRecalls = recalls.Where(r => (r.SessionFactCount ?? 0) > 0).ToList();
+        var priorSessionFactRecalls = recalls.Where(r => (r.PriorSessionFactCount ?? 0) > 0).ToList();
+        var compactionSurvival = ComputeCompactionSurvival(records, remembers, recalls);
+
+        return new TelemetryProbeReport(
+            DateRange: dateRange,
+            TotalRecords: records.Count,
+            SkippedLines: skippedLines,
+            McpSessions: mcpSessionCount,
+            HookSessions: hookSessionCount,
+            MemoryNeverReached: memoryNeverReached,
+            SessionsWithRecall: AdoptionStat(recalls, mcpSessionSet, mcpSessionCount),
+            SessionsWithRemember: AdoptionStat(remembers, mcpSessionSet, mcpSessionCount),
+            SessionsWithDigest: AdoptionStat(digests, mcpSessionSet, mcpSessionCount),
+            SessionsWithSessionFactWrite: AdoptionStat(remembers, mcpSessionSet, mcpSessionCount),
+            SessionsWithSessionFactRecall: AdoptionStat(sessionFactRecalls, mcpSessionSet, mcpSessionCount),
+            SessionsWithPriorSessionFactRecall: AdoptionStat(priorSessionFactRecalls, mcpSessionSet, mcpSessionCount),
+            CompactionSurvival: compactionSurvival,
+            MedianRecallsPerSession: Median(recallCountsPerSession),
+            MaxRecallsPerSession: recallCountsPerSession.Count == 0 ? 0 : recallCountsPerSession.Max(),
+            Coverage: new TelemetryCoverageStat(
+                coverageHigh, Percent(coverageHigh, coverageTotal),
+                coveragePartial, Percent(coveragePartial, coverageTotal),
+                coverageNone, Percent(coverageNone, coverageTotal)),
+            MeanTokensPerRecall: tokenValues.Count == 0 ? 0 : Math.Round(tokenValues.Average(), 1, MidpointRounding.AwayFromZero),
+            MedianTokensPerRecall: Median(tokenValues),
+            TopQueries: topQueries,
+            FactsPerSession: factsPerSession);
+    }
+
+    private static TelemetryAdoptionStat AdoptionStat(List<TelemetryRecord> kindRecords, HashSet<string> mcpSessionIds, int mcpSessionCount)
+    {
+        var count = kindRecords
+            .Select(r => r.SessionId)
+            .Distinct(StringComparer.Ordinal)
+            .Count(mcpSessionIds.Contains);
+        return new TelemetryAdoptionStat(count, Percent(count, mcpSessionCount));
+    }
+
+    private const string CompactionSurvivalNote =
+        "Approximate: pre-compact events carry Claude Code's hook session id, a different id-space " +
+        "than MCP's, so a compaction moment is matched to a session's recalls by timestamp only, " +
+        "not by session identity.";
+
+    private static TelemetryCompactionSurvivalStat ComputeCompactionSurvival(
+        IReadOnlyList<TelemetryRecord> records,
+        List<TelemetryRecord> remembers,
+        List<TelemetryRecord> recalls)
+    {
+        var preCompactTimestamps = records
+            .Where(r => r.Kind == TelemetryEventKind.PreCompact)
+            .Select(r => ParseTimestamp(r.Timestamp))
+            .OrderBy(t => t)
+            .ToList();
+
+        var firstFactTimeBySession = remembers
+            .GroupBy(r => r.SessionId, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Min(r => ParseTimestamp(r.Timestamp)), StringComparer.Ordinal);
+
+        var events = 0;
+        var sessions = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var recall in recalls)
+        {
+            if ((recall.SessionFactCount ?? 0) <= 0)
+            {
+                continue;
+            }
+
+            if (!firstFactTimeBySession.TryGetValue(recall.SessionId, out var firstFactTime))
+            {
+                continue;
+            }
+
+            var recallTime = ParseTimestamp(recall.Timestamp);
+            var survivedACompaction = preCompactTimestamps.Any(t => t > firstFactTime && t < recallTime);
+            if (survivedACompaction)
+            {
+                events++;
+                sessions.Add(recall.SessionId);
+            }
+        }
+
+        return new TelemetryCompactionSurvivalStat(events, sessions.Count, CompactionSurvivalNote);
+    }
+
+    private static double Percent(int part, int whole) =>
+        whole == 0 ? 0 : Math.Round(part * 100.0 / whole, 1, MidpointRounding.AwayFromZero);
+
+    private static double Median(List<int> values)
+    {
+        if (values.Count == 0)
+        {
+            return 0;
+        }
+
+        var sorted = values.OrderBy(v => v).ToList();
+        var mid = sorted.Count / 2;
+        var median = sorted.Count % 2 == 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0;
+        return Math.Round(median, 1, MidpointRounding.AwayFromZero);
+    }
+
+    private static DateTimeOffset ParseTimestamp(string timestamp) =>
+        DateTimeOffset.Parse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+}

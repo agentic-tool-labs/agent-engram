@@ -1,0 +1,103 @@
+using System.ComponentModel;
+using System.Reflection;
+using Engram.Cli;
+using ModelContextProtocol.Server;
+
+namespace Engram.Integration.Tests;
+
+/// <summary>
+/// D17: tool definitions are serialized into every session whether or not memory is ever
+/// used, so the surface is a budget rather than a free channel. Nothing here judges the
+/// prose — only that its cost stays where it was last agreed.
+/// </summary>
+public class McpToolSurfaceBudgetTests
+{
+    // Measured 6,263 characters across the eleven tools in EngramMcpTools on 2026-08-24, when
+    // engram_navigate joined for code navigation (docs/code-navigation-spec.md §3.4): defined_at
+    // and imports are a deterministic lookup RecallRanker cannot answer (navigation is not a
+    // relevance question), so they need their own tool rather than a parameter on engram_recall.
+    // This is the deliberate-feature-addition case the ceiling exists to let through, not the
+    // silent-drift case it otherwise guards against, so it is re-baselined off this measured
+    // actual rather than carrying forward unspent headroom. Re-baselined again same day, 6,263 ->
+    // 6,281, after a reviewer fixup pass folded `limit`'s clamp range into its own description.
+    // EngramServerTools's three tools (start/status/stop) are argued as cost in D17 but are
+    // not reflected over by ToolMethods() and are not counted in this figure — a separate,
+    // unmeasured gap. Raising this number is a deliberate edit that needs a reason in the
+    // commit message, not a knob to turn when a description outgrows it.
+    //
+    // Re-baselined 6,281 -> 6,443 when engram_navigate gained implements/implementers/members
+    // (docs/specs/close-graph-query-gap.md §2/§8): three new relations answering questions
+    // Grep gets wrong (inheritance, interface implementation, type members) are worth the
+    // description cost the same way defined_at/imports were.
+    //
+    // Re-baselined 6,443 -> 6,550 (§11.1, Architect ruling): the nested-type-drop caveat moved
+    // out of a per-result note that fired on ~100% of implements/implementers/members results
+    // (a constant, not a discriminator — D37 says a banner is read as noise) and into this
+    // static description instead, which is sent once per turn rather than once per matching
+    // result. Net cost per session goes down; this ceiling only measures the one-time cost.
+    private const int MaxDefinitionChars = 6550;
+
+    // 10 -> 11 when engram_navigate joined for code navigation (docs/code-navigation-spec.md
+    // §3.4): defined_at/imports read entity and fact tables directly rather than going through
+    // RecallRanker, so it cannot ride an existing tool's contract either.
+    private const int ExpectedToolCount = 11;
+
+    [Fact]
+    public void ToolDefinitions_StayUnderCharacterCeiling()
+    {
+        var total = 0;
+        var breakdown = new List<string>();
+
+        foreach (var method in ToolMethods())
+        {
+            var description = DescriptionLength(method.GetCustomAttribute<DescriptionAttribute>());
+            var parameters = method.GetParameters()
+                .Sum(p => DescriptionLength(p.GetCustomAttribute<DescriptionAttribute>()));
+
+            total += description + parameters;
+            breakdown.Add($"  {ToolName(method)}: {description} description + {parameters} parameter(s)");
+        }
+
+        Assert.True(
+            total <= MaxDefinitionChars,
+            $"Tool definitions total {total} chars against a ceiling of {MaxDefinitionChars}.\n"
+                + string.Join('\n', breakdown)
+                + "\nRaise the ceiling only with a rationale, or make the descriptions carry their cost.");
+    }
+
+    // A new tool is the most expensive thing that can happen to this budget, so it should
+    // not be possible to add one incidentally. D17 requires arguing a new tool's cost
+    // against putting a parameter on an existing one; failing here is that argument's cue.
+    [Fact]
+    public void ToolCount_IsDeliberate()
+    {
+        var names = ToolMethods().Select(ToolName).OrderBy(n => n, StringComparer.Ordinal).ToList();
+
+        Assert.True(
+            names.Count == ExpectedToolCount,
+            $"Expected {ExpectedToolCount} tools, found {names.Count}: {string.Join(", ", names)}");
+    }
+
+    // The ceiling only means something if every tool actually declares its cost here.
+    [Fact]
+    public void EveryTool_HasADescription()
+    {
+        var undescribed = ToolMethods()
+            .Where(m => string.IsNullOrWhiteSpace(m.GetCustomAttribute<DescriptionAttribute>()?.Description))
+            .Select(ToolName)
+            .ToList();
+
+        Assert.True(undescribed.Count == 0, "Tools with no description: " + string.Join(", ", undescribed));
+    }
+
+    private static int DescriptionLength(DescriptionAttribute? attribute) =>
+        attribute?.Description?.Length ?? 0;
+
+    private static string ToolName(MethodInfo method) =>
+        method.GetCustomAttribute<McpServerToolAttribute>()?.Name ?? method.Name;
+
+    private static IEnumerable<MethodInfo> ToolMethods() =>
+        typeof(EngramMcpTools)
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null);
+}

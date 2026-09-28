@@ -1,0 +1,1332 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/install.sh [options]
+  --dry-run            Print the whole plan and change nothing
+  --apply              Accepted and ignored; installing is the default
+  --prefix DIR         Install directory (default: $HOME/.local/bin)
+  --binary PATH        Install this prebuilt binary instead of building one
+  --roslyn-dir DIR     With --binary: install this prebuilt engram-roslyn publish
+                       directory as the tier-2 C# analyzer (built from source, the
+                       analyzer ships automatically)
+  --sdk-dir DIR        Where a bootstrapped .NET SDK lives (default: <repo>/.dotnet)
+  --dotnet-install PATH
+                       Use this local copy of Microsoft's dotnet-install.sh instead of
+                       downloading it (air-gapped machines)
+  --no-path            Do not modify any shell startup file
+  --no-plugin          Skip registering the Claude Code marketplace and plugin
+  --no-tree-sitter     Skip compiling the tree-sitter grammars (tier-1 TS/JS analysis)
+  --no-sqlite-vec      Skip the sqlite-vec vector-search extension
+  --embedding-provider P
+                       Configure embeddings without asking: none, local, ollama,
+                       openai-compat, or openai
+  --embedding-model M  With local: which model ('engram model list' names them)
+  --embedding-endpoint URL
+                       With an endpoint provider: where it answers
+  --embedding-dim N    Vector width, for an endpoint that cannot be asked
+  --embedding-api-key-env VAR
+                       Environment variable holding the endpoint's API key
+  --no-embeddings      Skip embedding setup entirely
+  --memory-precedence P
+                       What the session primer says about preferring Engram over another
+                       memory system: engram-first (default), engram-only, or off
+  --grant-permissions  Allow Claude Code to call Engram's memory tools without prompting
+  --no-grant-permissions
+                       Never grant them, and do not ask
+  --no-start           Leave the Engram server stopped when the install finishes
+  -h, --help           Show usage
+
+Every optional component installs by default. An interactive run asks one question up
+front — take those defaults, or decide each step at its turn; the --no-* flags pin a
+step off without being asked, and the --with-* spellings still pin one on. Embeddings
+are the one step that stays interactive in both modes — provider and model are real
+tradeoffs — unless --embedding-provider or --no-embeddings answers for it.
+
+Running this installs. --dry-run is the brake, and it prints the same plan the
+installation would carry out.
+
+No .NET SDK is required up front: when none of the right version is found, one is
+downloaded privately into the SDK directory, and nothing outside it is touched.
+EOF
+}
+
+# Installing is what someone running the installer asked for, so it is the default; the
+# rest of Engram's destructive verbs are dry-run-first because they remove or rewrite
+# what is already there, which is not what this does. --apply is still accepted so the
+# invocation people already have in their shell history keeps working.
+apply=true
+prefix="$HOME/.local/bin"
+binary_override=""
+roslyn_override=""
+sdk_dir=""
+dotnet_install_override=""
+no_path=false
+# Optional components: empty means undecided — auto mode resolves it to true, "each"
+# mode asks at the step itself, and a flag pins it here so nobody is asked about it.
+with_plugin=""
+with_tree_sitter=""
+with_sqlite_vec=""
+with_start=""
+no_embeddings=false
+embedding_provider=""
+embedding_model=""
+embedding_endpoint=""
+embedding_dim=""
+embedding_api_key_env=""
+memory_precedence=""
+# ask | yes | no. "ask" only ever asks a terminal; a non-interactive run declines, because
+# silence from a pipe is not consent to edit somebody's settings file.
+grant_permissions=ask
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run)
+            apply=false
+            shift
+            ;;
+        --apply)
+            shift
+            ;;
+        --prefix)
+            if [ $# -lt 2 ]; then
+                echo "error: --prefix requires a value" >&2
+                exit 1
+            fi
+            prefix="$2"
+            shift 2
+            ;;
+        --binary)
+            if [ $# -lt 2 ]; then
+                echo "error: --binary requires a value" >&2
+                exit 1
+            fi
+            binary_override="$2"
+            shift 2
+            ;;
+        --roslyn-dir)
+            if [ $# -lt 2 ]; then
+                echo "error: --roslyn-dir requires a value" >&2
+                exit 1
+            fi
+            roslyn_override="$2"
+            shift 2
+            ;;
+        --sdk-dir)
+            if [ $# -lt 2 ]; then
+                echo "error: --sdk-dir requires a value" >&2
+                exit 1
+            fi
+            sdk_dir="$2"
+            shift 2
+            ;;
+        --dotnet-install)
+            if [ $# -lt 2 ]; then
+                echo "error: --dotnet-install requires a value" >&2
+                exit 1
+            fi
+            dotnet_install_override="$2"
+            shift 2
+            ;;
+        --no-path)
+            no_path=true
+            shift
+            ;;
+        --with-plugin)
+            with_plugin=true
+            shift
+            ;;
+        --no-plugin)
+            with_plugin=false
+            shift
+            ;;
+        --with-tree-sitter)
+            with_tree_sitter=true
+            shift
+            ;;
+        --no-tree-sitter)
+            with_tree_sitter=false
+            shift
+            ;;
+        --with-sqlite-vec)
+            with_sqlite_vec=true
+            shift
+            ;;
+        --no-sqlite-vec)
+            with_sqlite_vec=false
+            shift
+            ;;
+        --with-start)
+            with_start=true
+            shift
+            ;;
+        --no-start)
+            with_start=false
+            shift
+            ;;
+        --embedding-provider)
+            if [ $# -lt 2 ]; then
+                echo "error: --embedding-provider requires a value" >&2
+                exit 1
+            fi
+            embedding_provider="$2"
+            shift 2
+            ;;
+        --embedding-model)
+            if [ $# -lt 2 ]; then
+                echo "error: --embedding-model requires a value" >&2
+                exit 1
+            fi
+            embedding_model="$2"
+            shift 2
+            ;;
+        --embedding-endpoint)
+            if [ $# -lt 2 ]; then
+                echo "error: --embedding-endpoint requires a value" >&2
+                exit 1
+            fi
+            embedding_endpoint="$2"
+            shift 2
+            ;;
+        --embedding-dim)
+            if [ $# -lt 2 ]; then
+                echo "error: --embedding-dim requires a value" >&2
+                exit 1
+            fi
+            embedding_dim="$2"
+            shift 2
+            ;;
+        --embedding-api-key-env)
+            if [ $# -lt 2 ]; then
+                echo "error: --embedding-api-key-env requires a value" >&2
+                exit 1
+            fi
+            embedding_api_key_env="$2"
+            shift 2
+            ;;
+        --no-embeddings)
+            no_embeddings=true
+            shift
+            ;;
+        --memory-precedence)
+            if [ $# -lt 2 ]; then
+                echo "error: --memory-precedence requires a value" >&2
+                exit 2
+            fi
+            memory_precedence="$2"
+            shift 2
+            ;;
+        --grant-permissions)
+            grant_permissions=yes
+            shift
+            ;;
+        --no-grant-permissions)
+            grant_permissions=no
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "error: unrecognized argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd "$script_dir/.." && pwd)
+target="$prefix/engram"
+if [ -z "$sdk_dir" ]; then
+    sdk_dir="$repo_root/.dotnet"
+fi
+if [ -n "$dotnet_install_override" ] && [ ! -f "$dotnet_install_override" ]; then
+    echo "error: --dotnet-install path not found: $dotnet_install_override" >&2
+    exit 1
+fi
+
+say() {
+    echo "$@"
+}
+
+would() {
+    echo "would: $*"
+}
+
+# Styling: only a real terminal gets it. A piped run — every test, every curl|bash —
+# reads plain bytes, which is also what keeps the e2e assertions byte-stable.
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
+    T_BOLD=$'\033[1m'; T_DIM=$'\033[2m'; T_CYAN=$'\033[36m'; T_RESET=$'\033[0m'
+else
+    T_BOLD=""; T_DIM=""; T_CYAN=""; T_RESET=""
+fi
+
+step() {
+    echo
+    echo "${T_CYAN}${T_BOLD}── $*${T_RESET}"
+}
+
+if [ -n "$T_CYAN" ]; then
+    echo "${T_CYAN}╭──────────────────╮${T_RESET}"
+    echo "${T_CYAN}│${T_RESET} ${T_BOLD}Engram installer${T_RESET} ${T_CYAN}│${T_RESET}"
+    echo "${T_CYAN}╰──────────────────╯${T_RESET}"
+else
+    echo "Engram installer"
+fi
+if ! $apply; then
+    echo "${T_DIM}dry run — nothing will be changed${T_RESET}"
+fi
+
+cleanup_dirs=()
+cleanup() {
+    local d
+    for d in "${cleanup_dirs[@]+"${cleanup_dirs[@]}"}"; do
+        [ -n "$d" ] && [ -d "$d" ] && rm -rf "$d"
+    done
+}
+trap cleanup EXIT
+
+detect_rid() {
+    local os arch
+    os=$(uname -s)
+    arch=$(uname -m)
+
+    case "$os" in
+        Darwin)
+            case "$arch" in
+                arm64) echo "osx-arm64" ;;
+                x86_64) echo "osx-x64" ;;
+                *)
+                    echo "error: unsupported Darwin architecture: $arch" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        Linux)
+            case "$arch" in
+                x86_64) echo "linux-x64" ;;
+                aarch64|arm64) echo "linux-arm64" ;;
+                *)
+                    echo "error: unsupported Linux architecture: $arch" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        *)
+            echo "error: unsupported OS: $os" >&2
+            exit 1
+            ;;
+    esac
+}
+
+# Writes (or replaces) the delimited PATH block in rc_file. If the markers
+# already exist, only the lines between them are replaced, so re-running the
+# installer never appends a second block.
+install_path_block() {
+    local rc_file="$1" block="$2" tmp start_line rel_end_line end_line link_dir hops
+
+    # Follow a symlinked rc file to the file it actually names. Dotfile managers
+    # (stow, chezmoi, yadm) symlink ~/.zshrc into a repository, and mv'ing over
+    # the link would replace it with a regular file — silently detaching the
+    # user's config from the repo that manages it. Writing through the link, as
+    # a plain redirect would, is the behaviour to preserve; the atomic replace
+    # just has to happen at the other end of it. readlink is used without -f
+    # because BSD readlink has not always had it.
+    hops=0
+    while [ -L "$rc_file" ] && [ "$hops" -lt 16 ]; do
+        link_dir=$(dirname "$rc_file")
+        rc_file=$(readlink "$rc_file")
+        case "$rc_file" in
+            /*) ;;
+            *) rc_file="$link_dir/$rc_file" ;;
+        esac
+        hops=$((hops + 1))
+    done
+
+    # tmp lives next to rc_file (not under mktemp's /tmp) so the final mv is
+    # a same-filesystem rename, and is seeded via cp -p so truncating and
+    # rewriting it in place with >/>> preserves rc_file's original mode.
+    tmp="$rc_file.engram-tmp-$$"
+    if [ -f "$rc_file" ]; then
+        cp -p "$rc_file" "$tmp"
+    else
+        : > "$tmp"
+    fi
+
+    if [ -f "$rc_file" ] && grep -qxF '# >>> engram >>>' "$rc_file"; then
+        start_line=$(grep -nxF '# >>> engram >>>' "$rc_file" | head -1 | cut -d: -f1)
+        rel_end_line=$(tail -n "+$start_line" "$rc_file" | grep -nxF '# <<< engram <<<' | head -1 | cut -d: -f1)
+        end_line=$((start_line + rel_end_line - 1))
+
+        # A block that starts at line 1 means this installer created the file; BSD head
+        # rejects -n 0, so an empty prefix is written as truncation, not as head.
+        if [ "$start_line" -gt 1 ]; then
+            head -n "$((start_line - 1))" "$rc_file" > "$tmp"
+        else
+            : > "$tmp"
+        fi
+        printf '%s\n' "$block" >> "$tmp"
+        tail -n "+$((end_line + 1))" "$rc_file" >> "$tmp"
+    elif [ -f "$rc_file" ]; then
+        cat "$rc_file" > "$tmp"
+        printf '\n' >> "$tmp"
+        printf '%s\n' "$block" >> "$tmp"
+    else
+        printf '%s\n' "$block" >> "$tmp"
+    fi
+
+    mv "$tmp" "$rc_file"
+}
+
+# Deliberately excluded from PATH-symlink candidates: Homebrew manages the
+# symlinks in its own prefix, and an unbrewed one there makes `brew doctor`
+# complain and can be silently clobbered by Homebrew's own link/unlink.
+is_homebrew_prefix_dir() {
+    local dir="$1" brew_prefix
+    case "$dir" in
+        /opt/homebrew|/opt/homebrew/*) return 0 ;;
+        /usr/local/Homebrew|/usr/local/Homebrew/*) return 0 ;;
+    esac
+    if command -v brew >/dev/null 2>&1; then
+        brew_prefix=$(brew --prefix 2>/dev/null || true)
+        if [ -n "$brew_prefix" ]; then
+            case "$dir" in
+                "$brew_prefix"|"$brew_prefix"/*) return 0 ;;
+            esac
+        fi
+    fi
+    return 1
+}
+
+# True when this dotnet can build this repo. Matched against the SDK list rather than
+# `--version`, which answers with whatever global.json or the newest install says and
+# proves nothing about 10.x being present.
+has_net10_sdk() {
+    "$1" --list-sdks 2>/dev/null | grep -q '^10\.'
+}
+
+download_to() {
+    local url="$1" dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" -o "$dest"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$url" -O "$dest"
+    else
+        echo "error: neither curl nor wget is available to download $url" >&2
+        return 1
+    fi
+}
+
+# AOT publish drives a platform linker that no SDK carries. Checked before the SDK is
+# resolved so a machine that would fail an hour of download-and-build hears about the
+# missing 30-second fix first. Fatal on a real run; --dry-run reports and keeps going,
+# because its job is to show the whole plan.
+toolchain_problem() {
+    case "$(uname -s)" in
+        Darwin)
+            if ! xcode-select -p >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
+                echo "the Xcode command line tools are not installed; run: xcode-select --install"
+            fi
+            ;;
+        Linux)
+            local missing=""
+            command -v clang >/dev/null 2>&1 || missing="clang"
+            [ -f /usr/include/zlib.h ] || missing="$missing zlib-headers"
+            if [ -n "$missing" ]; then
+                local fix="install clang and the zlib development headers with your package manager"
+                if command -v apt-get >/dev/null 2>&1; then
+                    fix="run: sudo apt-get install clang zlib1g-dev"
+                elif command -v dnf >/dev/null 2>&1; then
+                    fix="run: sudo dnf install clang zlib-devel"
+                elif command -v zypper >/dev/null 2>&1; then
+                    fix="run: sudo zypper install clang zlib-devel"
+                elif command -v pacman >/dev/null 2>&1; then
+                    fix="run: sudo pacman -S clang zlib"
+                fi
+                echo "building needs$( for m in $missing; do printf ' %s' "$m"; done ) — $fix"
+            fi
+            ;;
+    esac
+}
+
+# --- 0. Install mode ---
+
+# Clone to running with one script and no thinking: every optional component defaults to
+# on, and the one question an interactive run asks up front is whether to take those
+# defaults or decide each step at its turn. A piped run takes the defaults unasked — with
+# one deliberate exception, the MCP permission grant, which edits a file Engram does not
+# own and keeps section 10's rule that silence from a pipe is not consent. That exception
+# carries more weight now that installing is the default: a run with no terminal installs
+# everything Engram owns without being asked, and still never edits what it does not.
+install_mode=auto
+if $apply && [ -t 0 ] && [ -r /dev/tty ]; then
+    if [ -z "$with_plugin" ] || [ -z "$with_tree_sitter" ] || [ -z "$with_sqlite_vec" ] || [ -z "$with_start" ]; then
+        echo
+        echo "${T_BOLD}Optional components${T_RESET}, all installed by default: the Claude Code plugin,"
+        echo "tree-sitter grammars (TypeScript/JavaScript indexing), sqlite-vec (vector"
+        echo "search), Claude Code tool permissions, and starting the server at the end."
+        echo "${T_DIM}Embeddings are chosen interactively after the install either way; pin with"
+        echo "--embedding-provider or --no-embeddings to skip those questions.${T_RESET}"
+        printf '%s' "${T_BOLD}Install everything with the defaults, or ask about each step? [E]verything/[a]sk: ${T_RESET}"
+        mode_reply=""
+        read -r mode_reply < /dev/tty || true
+        case "$mode_reply" in
+            [aA]*) install_mode=each ;;
+        esac
+    fi
+fi
+
+# "each" mode only: one [Y/n] question, asked at the step it concerns, defaulting to yes.
+ask_step() {
+    printf '%s [Y/n] ' "$1"
+    local reply=""
+    read -r reply < /dev/tty || true
+    case "$reply" in
+        [nN]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+if [ "$install_mode" = auto ]; then
+    [ -n "$with_plugin" ] || with_plugin=true
+    [ -n "$with_tree_sitter" ] || with_tree_sitter=true
+    [ -n "$with_sqlite_vec" ] || with_sqlite_vec=true
+    [ -n "$with_start" ] || with_start=true
+    # Choosing "everything" at a terminal is the consent the grant needs, given once up
+    # front. A piped run never reaches this: grant_permissions stays "ask" and section 10
+    # declines it, exactly as before.
+    if $apply && [ -t 0 ] && [ -r /dev/tty ] && [ "$grant_permissions" = ask ]; then
+        grant_permissions=yes
+    fi
+fi
+
+# --- 1. Preflight ---
+step "Preflight"
+
+dotnet_cmd=""
+bootstrap_sdk=false
+
+if [ -z "$binary_override" ]; then
+    rid=$(detect_rid)
+    say "Detected runtime identifier: $rid"
+
+    problem=$(toolchain_problem)
+    if [ -n "$problem" ]; then
+        if $apply; then
+            echo "error: $problem" >&2
+            exit 1
+        fi
+        say "warning: $problem (a real run will stop here until it is fixed)"
+    fi
+
+    if command -v dotnet >/dev/null 2>&1 && has_net10_sdk dotnet; then
+        dotnet_cmd=dotnet
+    elif [ -x "$sdk_dir/dotnet" ] && has_net10_sdk "$sdk_dir/dotnet"; then
+        dotnet_cmd="$sdk_dir/dotnet"
+        say "Using the .NET SDK previously bootstrapped into $sdk_dir"
+    else
+        bootstrap_sdk=true
+        dotnet_cmd="$sdk_dir/dotnet"
+    fi
+else
+    if [ ! -f "$binary_override" ]; then
+        echo "error: --binary path not found: $binary_override" >&2
+        exit 1
+    fi
+    # Only used to find runtimes/<rid>/native beside the binary. A platform this
+    # cannot name still installs — it just carries no llama natives, which is the
+    # sidecar rule: absent is not an error.
+    rid=$(detect_rid 2>/dev/null || true)
+fi
+
+# --- 2. Stop a running daemon before replacing the binary ---
+
+if [ -x "$target" ]; then
+    if $apply; then
+        say "Stopping existing daemon at $target ..."
+        "$target" stop || true
+    else
+        would "stop the existing daemon at $target (ignoring failure)"
+    fi
+fi
+
+# --- 3. Bootstrap a .NET SDK, when no usable one exists ---
+
+# Private on purpose: --install-dir plus --no-path means nothing outside $sdk_dir is
+# created or edited, so there is nothing here for uninstall to undo and nothing that
+# can fight an SDK the user installs later — the PATH one wins the next run's
+# resolution the moment it exists.
+if [ -z "$binary_override" ] && $bootstrap_sdk; then
+    if $apply; then
+        say "No .NET 10 SDK found; installing one privately into $sdk_dir (a few hundred MB; PATH is not touched) ..."
+        if [ -n "$dotnet_install_override" ]; then
+            dotnet_install_script="$dotnet_install_override"
+        else
+            dotnet_install_script=$(mktemp)
+            trap 'rm -f "$dotnet_install_script"; cleanup' EXIT
+            download_to "https://dot.net/v1/dotnet-install.sh" "$dotnet_install_script"
+        fi
+        bash "$dotnet_install_script" --channel 10.0 --install-dir "$sdk_dir" --no-path
+        if ! has_net10_sdk "$dotnet_cmd"; then
+            echo "error: the SDK bootstrap finished but $dotnet_cmd reports no .NET 10 SDK" >&2
+            exit 1
+        fi
+    else
+        would "download dotnet-install.sh and install the .NET 10 SDK into $sdk_dir (private to that directory; no PATH changes)"
+    fi
+fi
+
+# --- 4. Build, unless --binary was given ---
+step "Binary"
+
+if [ -n "$binary_override" ]; then
+    binary_path="$binary_override"
+    say "Using prebuilt binary: $binary_path"
+elif $apply; then
+    staging_dir=$(mktemp -d)
+    cleanup_dirs+=("$staging_dir")
+    say "Building engram for $rid into $staging_dir ..."
+    DOTNET_NOLOGO=1 \
+    "$dotnet_cmd" publish "$repo_root/src/Engram.Cli" \
+        -c Release \
+        -r "$rid" \
+        -o "$staging_dir"
+
+    binary_path="$staging_dir/engram"
+    if [ ! -x "$binary_path" ]; then
+        echo "error: expected published binary not found at $binary_path" >&2
+        exit 1
+    fi
+
+    # The tier-2 C# analyzer, published framework-dependent (D45's size lesson does not
+    # apply — it is a separate process, so its 16 MB never touches hook latency), no RID
+    # because framework-dependent output is portable and the SDK building this is the
+    # superset runtime it needs.
+    say "Building engram-roslyn into $staging_dir/roslyn ..."
+    DOTNET_NOLOGO=1 \
+    "$dotnet_cmd" publish "$repo_root/src/Engram.Sidecar.Roslyn" \
+        -c Release \
+        -o "$staging_dir/roslyn"
+    if [ ! -x "$staging_dir/roslyn/engram-roslyn" ]; then
+        echo "error: expected published sidecar not found at $staging_dir/roslyn/engram-roslyn" >&2
+        exit 1
+    fi
+
+    size_before=$(du -sh "$staging_dir" | cut -f1)
+    say "Removing debug symbols from $staging_dir ..."
+    find "$staging_dir" -maxdepth 1 -type f -name '*.pdb' -delete
+    find "$staging_dir" -maxdepth 1 -type d -name '*.dSYM' -exec rm -rf {} +
+    find "$staging_dir/roslyn" -type f -name '*.pdb' -delete
+    size_after=$(du -sh "$staging_dir" | cut -f1)
+    say "Staging size before symbol cleanup: $size_before"
+    say "Staging size after symbol cleanup:  $size_after"
+else
+    would "$dotnet_cmd publish $repo_root/src/Engram.Cli -c Release -r $rid -o <temp staging dir>"
+    would "$dotnet_cmd publish $repo_root/src/Engram.Sidecar.Roslyn -c Release -o <temp staging dir>/roslyn"
+    would "remove .pdb files and .dSYM directories from the staging dir"
+    binary_path="<built binary>"
+fi
+
+# The name is fixed rather than discovered by globbing the source directory: a bin
+# directory should receive exactly the files this installer meant to put there, and
+# uninstall has to be able to name what it removes. If the set ever grows, the
+# in-prefix verification in step 6 is what reports the omission.
+case "$(uname -s)" in
+    Darwin) sidecar_name="libe_sqlite3.dylib" ;;
+    *) sidecar_name="libe_sqlite3.so" ;;
+esac
+sidecar_source="$(dirname "$binary_path")/$sidecar_name"
+sidecar_target="$prefix/$sidecar_name"
+
+# llama.cpp's natives are the one part of the publish that keeps its runtimes/ tree
+# (D45), and LLamaSharp finds them by that layout relative to the executable — so the
+# tree is replicated under the prefix exactly, nested CPU-variant directories and all.
+# The fixed-name rule above still holds through the manifest: install records every
+# file it copies, and uninstall removes exactly that list, so a foreign file that
+# ends up in runtimes/ is never collateral.
+natives_source=""
+if [ -n "$rid" ]; then
+    natives_source="$(dirname "$binary_path")/runtimes/$rid/native"
+fi
+natives_target="$prefix/runtimes"
+
+# The tier-2 C# analyzer, optional at every stage: built from source it always ships;
+# with --binary it ships only when --roslyn-dir names a prebuilt publish of it, because
+# a prebuilt engram says nothing about where its analyzer might be. Installing nothing
+# is not an error — the binary indexes C# at tier 0 and doctor says so.
+roslyn_target="$prefix/roslyn"
+if [ -n "$roslyn_override" ]; then
+    if [ ! -x "$roslyn_override/engram-roslyn" ]; then
+        echo "error: --roslyn-dir has no executable engram-roslyn in it: $roslyn_override" >&2
+        exit 1
+    fi
+    roslyn_source="$roslyn_override"
+elif [ -n "$binary_override" ]; then
+    roslyn_source=""
+elif $apply; then
+    roslyn_source="$staging_dir/roslyn"
+else
+    roslyn_source="<built engram-roslyn>"
+fi
+
+# Shared shape with uninstall.sh: removes only what a previous install recorded, then
+# prunes directories that emptying left behind.
+remove_manifest_files() {
+    local root="$1" rel
+    [ -f "$root/.engram-manifest" ] || return 0
+    while IFS= read -r rel; do
+        case "$rel" in
+            ""|*..*|/*) continue ;;
+        esac
+        rm -f "$root/$rel"
+    done < "$root/.engram-manifest"
+    rm -f "$root/.engram-manifest"
+    [ -d "$root" ] && find "$root" -type d -empty -delete 2>/dev/null || true
+}
+
+# --- 5. Verify the built binary runs before installing it ---
+
+# 'init' rather than 'home': home only prints paths, so it exits 0 on a binary that
+# cannot open a database at all. A check that never touches SQLite cannot notice the
+# one dependency this binary loads at runtime.
+if $apply; then
+    verify_home=$(mktemp -d)
+    cleanup_dirs+=("$verify_home")
+    say "Verifying the binary runs (ENGRAM_HOME=$verify_home) ..."
+    if ! ENGRAM_HOME="$verify_home" "$binary_path" init >/dev/null; then
+        echo "error: '$binary_path init' did not exit 0 — refusing to install an unverified binary" >&2
+        exit 1
+    fi
+else
+    would "verify the binary runs (engram init) against a throwaway ENGRAM_HOME"
+fi
+
+# --- 6. Install ---
+step "Install"
+
+if $apply; then
+    mkdir -p "$prefix"
+
+    # engram is a single file everywhere except SQLite. SQLitePCLRaw ships a static
+    # e_sqlite3 only for browser-wasm, so on every RID engram actually targets the
+    # P/Invoke is resolved by dlopen against a library beside the executable, and
+    # installing the binary on its own yields something that runs right up until it
+    # opens the database. Measured: a lone copy dies with DllNotFoundException on
+    # 'e_sqlite3'. Absent is not an error — a statically linked build has no sidecar
+    # to carry, and the verification below is what decides whether the install works.
+    if [ -f "$sidecar_source" ]; then
+        tmp_sidecar="$sidecar_target.new-$$"
+        cp "$sidecar_source" "$tmp_sidecar"
+        chmod 644 "$tmp_sidecar"
+        mv "$tmp_sidecar" "$sidecar_target"
+        say "Installed $sidecar_target"
+    fi
+
+    if [ -n "$natives_source" ] && [ -d "$natives_source" ]; then
+        # A reinstall clears what the previous install recorded before copying, so a
+        # native that stopped shipping does not linger and get loaded over its successor.
+        remove_manifest_files "$natives_target"
+        mkdir -p "$natives_target/$rid/native"
+        cp -R "$natives_source/." "$natives_target/$rid/native/"
+        (cd "$natives_target" && find "$rid/native" -type f) > "$natives_target/.engram-manifest"
+        say "Installed $natives_target/$rid/native ($(wc -l < "$natives_target/.engram-manifest" | tr -d ' ') files, recorded for uninstall)"
+    fi
+
+    if [ -n "$roslyn_source" ]; then
+        # Same manifest discipline as runtimes/: record every file copied, remove exactly
+        # that list next time, never claim a file somebody else put under roslyn/.
+        remove_manifest_files "$roslyn_target"
+        mkdir -p "$roslyn_target"
+        cp -R "$roslyn_source/." "$roslyn_target/"
+        chmod 755 "$roslyn_target/engram-roslyn"
+        (cd "$roslyn_target" && find . -type f ! -name '.engram-manifest' | sed 's|^\./||') > "$roslyn_target/.engram-manifest"
+        say "Installed $roslyn_target ($(wc -l < "$roslyn_target/.engram-manifest" | tr -d ' ') files, recorded for uninstall)"
+    fi
+
+    # cp rewrites $target in place; on macOS this succeeds even if a daemon
+    # is still running from that path, so its pages would change underneath
+    # it. Install to a sibling file and mv over the destination instead — mv
+    # swaps the directory entry, leaving any running process on its old inode.
+    tmp_target="$target.new-$$"
+    cp "$binary_path" "$tmp_target"
+    chmod 755 "$tmp_target"
+
+    # Verify the copy, from inside $prefix, before it becomes $target. Step 4 runs the
+    # binary where it was built, with every native dependency sitting beside it, so it
+    # passes whether or not the install carried those across — which is precisely how
+    # a binary that could not open its own database once got installed. Running the
+    # staged file from its final directory is the only check that sees what the user
+    # will get. Failing here leaves the previous $target untouched.
+    installed_home=$(mktemp -d)
+    cleanup_dirs+=("$installed_home")
+    if ! ENGRAM_HOME="$installed_home" "$tmp_target" init >/dev/null; then
+        rm -f "$tmp_target"
+        echo "error: the staged binary could not initialise a home from $prefix — a native dependency did not survive the install; leaving $target as it was" >&2
+        exit 1
+    fi
+
+    mv "$tmp_target" "$target"
+    say "Installed $target"
+else
+    would "mkdir -p $prefix"
+    if [ -f "$sidecar_source" ]; then
+        would "install $(basename "$sidecar_source") to $sidecar_target (mode 644, via atomic replace)"
+    fi
+    if [ -n "$natives_source" ] && [ -d "$natives_source" ]; then
+        would "install runtimes/$rid/native (llama.cpp) to $natives_target, recording a manifest for uninstall"
+    fi
+    if [ -n "$roslyn_source" ]; then
+        would "install engram-roslyn (tier-2 C# analyzer) to $roslyn_target, recording a manifest for uninstall"
+    fi
+    would "install binary to $target (mode 755, via atomic replace)"
+    would "run the staged binary from $prefix against a throwaway ENGRAM_HOME, and abort the install if it cannot open a database"
+fi
+
+# --- 7. PATH ---
+step "PATH"
+
+path_changed=false
+path_backup=""
+path_rc_file=""
+path_advice=""
+symlink_path=""
+symlink_blocked=""
+
+if $no_path; then
+    say "Skipping PATH setup (--no-path)."
+else
+    case ":$PATH:" in
+        *":$prefix:"*)
+            say "$prefix is already on \$PATH; not touching any startup file."
+            ;;
+        *)
+            # Prefer symlinking from a directory already on PATH over editing
+            # a shell startup file: editing .zshrc is the most invasive thing
+            # this installer does, so it is the last resort, not the first.
+            for candidate_dir in "$HOME/bin" "/usr/local/bin"; do
+                case ":$PATH:" in
+                    *":$candidate_dir:"*) ;;
+                    *) continue ;;
+                esac
+                [ -d "$candidate_dir" ] || continue
+                [ -w "$candidate_dir" ] || continue
+                if is_homebrew_prefix_dir "$candidate_dir"; then
+                    continue
+                fi
+
+                candidate_link="$candidate_dir/engram"
+                if [ -e "$candidate_link" ] || [ -L "$candidate_link" ]; then
+                    if [ -L "$candidate_link" ] && [ "$(readlink "$candidate_link")" = "$target" ]; then
+                        symlink_path="$candidate_link"
+                        say "$candidate_link already links to $target; nothing to do."
+                        break
+                    else
+                        symlink_blocked="$symlink_blocked$candidate_link "
+                        say "Not using $candidate_link for \$PATH: something else already exists there; leaving it untouched."
+                        continue
+                    fi
+                fi
+
+                if $apply; then
+                    ln -s "$target" "$candidate_link"
+                    say "Symlinked $candidate_link -> $target"
+                else
+                    would "symlink $candidate_link -> $target"
+                fi
+                symlink_path="$candidate_link"
+                break
+            done
+
+            if [ -z "$symlink_path" ]; then
+                if [[ "$prefix" == "$HOME"/* ]]; then
+                    prefix_repr="\$HOME${prefix#"$HOME"}"
+                else
+                    prefix_repr="$prefix"
+                fi
+
+                shell_name=$(basename "${SHELL:-}")
+                rc_file=""
+                case "$shell_name" in
+                    zsh)
+                        rc_file="$HOME/.zshrc"
+                        ;;
+                    bash)
+                        if [ -f "$HOME/.bashrc" ]; then
+                            rc_file="$HOME/.bashrc"
+                        else
+                            rc_file="$HOME/.bash_profile"
+                        fi
+                        ;;
+                esac
+
+                if [ -z "$rc_file" ]; then
+                    if [ "$shell_name" = "fish" ]; then
+                        path_advice="set -gx PATH $prefix_repr \$PATH"
+                    else
+                        path_advice="export PATH=\"$prefix_repr:\$PATH\""
+                    fi
+                    say "Shell '$shell_name' is not zsh or bash; not editing any startup file."
+                    say "Add this line to your shell's startup file yourself:"
+                    say "  $path_advice"
+                else
+                    # Written to a temp file rather than captured directly via
+                    # $(cat <<'EOF' ...) — macOS's stock /bin/bash (3.2) mishandles
+                    # a heredoc containing case-statement syntax when it's nested
+                    # inside a command substitution inside a case statement.
+                    block_template_file=$(mktemp)
+                    cat <<'BLOCKEOF' > "$block_template_file"
+# >>> engram >>>
+# Added by engram's installer. Remove with scripts/uninstall.sh.
+case ":$PATH:" in
+  *":@@PREFIX@@:"*) ;;
+  *) export PATH="@@PREFIX@@:$PATH" ;;
+esac
+# <<< engram <<<
+BLOCKEOF
+                    block_template=$(cat "$block_template_file")
+                    rm -f "$block_template_file"
+                    block_content="${block_template//@@PREFIX@@/$prefix_repr}"
+                    path_rc_file="$rc_file"
+
+                    if $apply; then
+                        if [ -f "$rc_file" ]; then
+                            timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+                            path_backup="${rc_file}.engram-backup-${timestamp}"
+                            cp -p "$rc_file" "$path_backup"
+                            say "Backed up $rc_file to $path_backup"
+                        fi
+
+                        install_path_block "$rc_file" "$block_content"
+                        say "Updated $rc_file to add $prefix to \$PATH"
+                        path_changed=true
+                    else
+                        would "back up $rc_file (if it exists) to ${rc_file}.engram-backup-<UTC timestamp>"
+                        if [ -f "$rc_file" ] && grep -qxF '# >>> engram >>>' "$rc_file"; then
+                            would "replace the existing engram PATH block in $rc_file"
+                        else
+                            would "append an engram PATH block to $rc_file"
+                        fi
+                    fi
+                fi
+            fi
+            ;;
+    esac
+fi
+
+# --- 8. Initialise the home ---
+step "Home"
+
+if $apply; then
+    say "Initialising the Engram home ..."
+    "$target" init
+else
+    would "run $target init to initialise the Engram home (idempotent, will not overwrite an existing config)"
+fi
+
+# --- 8b. Embeddings ---
+
+# configured | skipped | manual | failed. Embeddings stay interactive even when the mode
+# answer was "everything": which provider — and which model, if local — are real choices
+# with real costs (disk, download size, memory), and the binary's picker presents those
+# tradeoffs itself. Flags pin the answer for unattended runs; with neither flags nor a
+# terminal the step defers and the summary says how to finish, because a prompt that
+# reads EOF as an answer would pick on the user's behalf.
+embedding_result=manual
+if $no_embeddings; then
+    embedding_result=skipped
+elif ! $apply; then
+    if [ -n "$embedding_provider" ]; then
+        would "configure embeddings: engram init --provider $embedding_provider"
+    else
+        would "ask which embedding provider and model to use (engram init --with-embeddings)"
+    fi
+elif [ -n "$embedding_provider" ]; then
+    step "Embeddings"
+    embed_args=(--provider "$embedding_provider")
+    if [ -n "$embedding_model" ]; then embed_args+=(--model "$embedding_model"); fi
+    if [ -n "$embedding_endpoint" ]; then embed_args+=(--endpoint "$embedding_endpoint"); fi
+    if [ -n "$embedding_dim" ]; then embed_args+=(--dim "$embedding_dim"); fi
+    if [ -n "$embedding_api_key_env" ]; then embed_args+=(--api-key-env "$embedding_api_key_env"); fi
+    if "$target" init "${embed_args[@]}"; then
+        embedding_result=configured
+    else
+        embedding_result=failed
+        say "the embedding step failed; run it yourself to finish it:"
+        say "  engram init --with-embeddings"
+    fi
+elif [ -t 0 ] && [ -r /dev/tty ]; then
+    step "Embeddings"
+    if "$target" init --with-embeddings < /dev/tty; then
+        embedding_result=configured
+    else
+        embedding_result=failed
+        say "the embedding step failed; run it yourself to finish it:"
+        say "  engram init --with-embeddings"
+    fi
+fi
+
+# --- 8c. Memory precedence ---
+
+# unchanged | set | failed. Unlike every other optional step there is nothing to install
+# here: the shipped config already says engram-first, so a run that asks nothing still
+# lands the default and this step exists only to say something else. That is also why
+# "everything" mode does not prompt — taking the defaults is already the answer, and a
+# question whose recommended reply changes nothing is a question not worth asking.
+memory_result=unchanged
+if [ -n "$memory_precedence" ]; then
+    if ! $apply; then
+        would "set memory precedence: engram init --memory-precedence $memory_precedence"
+    else
+        step "Memory"
+        # Same set -e shape as the other optional steps: a rejected value must not abort an
+        # install that has already put the binary, the PATH entry and the home in place.
+        if "$target" init --memory-precedence "$memory_precedence"; then
+            memory_result=set
+        else
+            memory_result=failed
+            say "could not set memory precedence; do it yourself with:"
+            say "  engram init --memory-precedence $memory_precedence"
+        fi
+    fi
+elif $apply && [ "$install_mode" = each ] && [ -t 0 ] && [ -r /dev/tty ]; then
+    step "Memory"
+    say "Agents often arrive carrying another memory system, described somewhere Engram"
+    say "cannot see. This is what the session primer says about which one wins:"
+    say "  1) engram-first  Engram is primary; the other store still exists   (default)"
+    say "  2) engram-only   Engram is the only durable store"
+    say "  3) off           say nothing; Engram competes on its tool descriptions alone"
+    printf '  Which? [1] '
+    memory_answer=""
+    read -r memory_answer < /dev/tty || true
+    case "$memory_answer" in
+        2) memory_precedence=engram-only ;;
+        3) memory_precedence=off ;;
+        *) memory_precedence=engram-first ;;
+    esac
+    if "$target" init --memory-precedence "$memory_precedence"; then
+        memory_result=set
+    else
+        memory_result=failed
+        say "could not set memory precedence; do it yourself with:"
+        say "  engram init --memory-precedence $memory_precedence"
+    fi
+fi
+
+# --- 9. Claude Code plugin ---
+
+# installed | no-claude | failed. Only read when the step runs.
+plugin_result=no-claude
+if [ "$install_mode" = each ] && [ -z "$with_plugin" ]; then
+    if ask_step "Register the Claude Code marketplace and install the plugin?"; then
+        with_plugin=true
+    else
+        with_plugin=false
+    fi
+fi
+if $with_plugin; then
+    if $apply; then
+        if command -v claude >/dev/null 2>&1; then
+            say "Registering the Claude Code marketplace and installing the plugin ..."
+            # Under set -e a non-zero claude would abort the script here. By this point the
+            # binary, the PATH entry and the home are all installed and durable, and granting
+            # MCP permissions is the step after this one — so aborting would discard the summary
+            # and skip something that has nothing to do with the plugin. Commands in an if
+            # condition are exempt from set -e, which is what makes the failure reportable.
+            if claude plugin marketplace add "$repo_root" && claude plugin install engram@engram; then
+                plugin_result=installed
+            else
+                plugin_result=failed
+                say "the plugin step failed; run these commands yourself to finish it:"
+                say "  claude plugin marketplace add $repo_root"
+                say "  claude plugin install engram@engram"
+            fi
+        else
+            say "claude is not on PATH; run these commands yourself to install the plugin:"
+            say "  claude plugin marketplace add $repo_root"
+            say "  claude plugin install engram@engram"
+        fi
+    else
+        would "claude plugin marketplace add $repo_root"
+        would "claude plugin install engram@engram"
+    fi
+fi
+
+# --- 9b. tree-sitter grammars ---
+
+# installed | no-cc | failed. Only read when the step runs. Same set -e shape as the
+# plugin step: by now the install proper is durable, so a failed optional step reports
+# through the summary instead of aborting it.
+tree_sitter_result=no-cc
+if [ "$install_mode" = each ] && [ -z "$with_tree_sitter" ]; then
+    if ask_step "Compile the tree-sitter grammars for TypeScript/JavaScript indexing?"; then
+        with_tree_sitter=true
+    else
+        with_tree_sitter=false
+    fi
+fi
+if $with_tree_sitter; then
+    if $apply; then
+        if command -v cc >/dev/null 2>&1; then
+            say "Compiling the tree-sitter core and grammars ..."
+            if "$script_dir/fetch-tree-sitter.sh"; then
+                tree_sitter_result=installed
+            else
+                tree_sitter_result=failed
+                say "the tree-sitter step failed; run it yourself to finish it:"
+                say "  $script_dir/fetch-tree-sitter.sh"
+            fi
+        else
+            say "cc is not on PATH; install a C compiler, then run:"
+            say "  $script_dir/fetch-tree-sitter.sh"
+        fi
+    else
+        would "compile the tree-sitter core and grammars via $script_dir/fetch-tree-sitter.sh"
+    fi
+fi
+
+# --- 9c. sqlite-vec ---
+
+# installed | failed. Only read when the step runs; same set -e shape as 9 and 9b.
+sqlite_vec_result=failed
+if [ "$install_mode" = each ] && [ -z "$with_sqlite_vec" ]; then
+    if ask_step "Install the sqlite-vec vector-search extension?"; then
+        with_sqlite_vec=true
+    else
+        with_sqlite_vec=false
+    fi
+fi
+if $with_sqlite_vec; then
+    if $apply; then
+        say "Installing the sqlite-vec extension ..."
+        if "$script_dir/fetch-vec0.sh"; then
+            sqlite_vec_result=installed
+        else
+            sqlite_vec_result=failed
+            say "the sqlite-vec step failed; run it yourself to finish it:"
+            say "  $script_dir/fetch-vec0.sh"
+        fi
+    else
+        would "install the sqlite-vec extension via $script_dir/fetch-vec0.sh"
+    fi
+fi
+
+# --- 10. MCP tool permissions ---
+
+# Without this, Claude Code asks before every engram_recall. That is not just friction: M0
+# measures whether the model reaches for memory at all, and a dialog in front of each call
+# makes the number a measurement of the dialog. Still opt-in — it edits a file we do not own.
+
+grant_result=skipped
+if [ "$grant_permissions" != no ]; then
+    if ! $apply; then
+        would "offer to add Engram's memory tools to permissions.allow in Claude Code's user settings"
+        if [ -x "$target" ]; then
+            "$target" permissions || true
+        fi
+    elif [ "$grant_permissions" = yes ]; then
+        "$target" permissions --apply && grant_result=granted
+    elif [ -t 0 ] && [ -r /dev/tty ]; then
+        echo
+        "$target" permissions || true
+        printf 'Grant these now? [Y/n] '
+        reply=""
+        read -r reply < /dev/tty || true
+        case "$reply" in
+            [nN]*)
+                grant_result=declined
+                say "Left Claude Code's settings alone. Grant later with: engram permissions --apply"
+                ;;
+            *)
+                "$target" permissions --apply && grant_result=granted
+                ;;
+        esac
+    else
+        grant_result=declined
+        say "Not a terminal, so not asking about tool permissions. Grant with: engram permissions --apply"
+    fi
+fi
+
+# --- 10b. Start the server ---
+
+# running | failed. Only read when the step runs. Last on purpose, and the order is load
+# bearing in both directions: section 2 stopped whatever daemon was serving the binary
+# being replaced, so without this an upgrade ends with the server down; and a server holds
+# the embedder it built at *its* startup (D38), so starting before section 8b configured
+# embeddings would pin it to the setting the user just moved away from.
+server_result=failed
+if [ "$install_mode" = each ] && [ -z "$with_start" ]; then
+    if ask_step "Start the Engram server now?"; then
+        with_start=true
+    else
+        with_start=false
+    fi
+fi
+if $with_start; then
+    if $apply; then
+        step "Server"
+        # Same set -e shape as 9, 9b and 9c, and it matters most here: this is the last
+        # step before the summary, so an abort would take the whole report with it.
+        if "$target" start; then
+            # Not a retry of the health check start already did. `start` does not return 0
+            # until the server vouched for itself, so this is a second and independent
+            # process asking through the pid file the way every later consumer does — a
+            # hook, a Claude Code session, doctor — and by D42 that is a different question
+            # than the launching process answering about itself. Deliberately no polling
+            # loop: given start's guarantee, a status that disagrees is news rather than a
+            # race to wait out, and a tolerance here would convert a real failure into an
+            # intermittent one.
+            if "$target" status; then
+                server_result=running
+            else
+                server_result=failed
+                say "the server started but does not report running; look at:"
+                say "  engram status"
+                say "  engram doctor"
+            fi
+        else
+            server_result=failed
+            say "the server did not start; run it yourself to finish it:"
+            say "  engram start"
+        fi
+    else
+        would "$target start, then confirm with $target status that the server reports running"
+    fi
+fi
+
+# --- 11. Summary ---
+
+echo
+if $apply; then
+    echo "${T_BOLD}Summary:${T_RESET}"
+    echo "  Installed engram to: $target"
+    if $no_path; then
+        echo "  PATH: not modified (--no-path)"
+    elif [ -n "$symlink_path" ]; then
+        echo "  PATH: symlinked $symlink_path -> $target (no shell startup file touched)"
+    elif $path_changed; then
+        if [ -n "$path_backup" ]; then
+            echo "  PATH: added $prefix to $path_rc_file (backup: $path_backup)"
+        else
+            echo "  PATH: added $prefix to $path_rc_file (newly created, no backup needed)"
+        fi
+        if [ -n "$symlink_blocked" ]; then
+            echo "  PATH: symlink candidates skipped (already occupied by something else): $symlink_blocked"
+        fi
+    elif [ -n "$path_advice" ]; then
+        echo "  PATH: not modified automatically (unsupported shell); add this line yourself:"
+        echo "    $path_advice"
+    else
+        echo "  PATH: $prefix was already on \$PATH; nothing changed"
+    fi
+    if [ -n "$roslyn_source" ]; then
+        echo "  Tier-2 C# analysis: engram-roslyn installed to $roslyn_target"
+    else
+        echo "  Tier-2 C# analysis: not installed (prebuilt binary without --roslyn-dir); C# indexes at tier 0"
+    fi
+    if $with_plugin; then
+        case "$plugin_result" in
+            installed)
+                echo "  Claude Code plugin: registered and installed"
+                ;;
+            no-claude)
+                echo "  Claude Code plugin: NOT installed (claude was not on PATH); run the commands printed above"
+                ;;
+            failed)
+                echo "  Claude Code plugin: NOT installed (claude reported an error); run the commands printed above"
+                ;;
+        esac
+    else
+        echo "  Claude Code plugin: skipped"
+    fi
+    if $with_tree_sitter; then
+        case "$tree_sitter_result" in
+            installed)
+                echo "  Tier-1 TS/JS analysis: tree-sitter core and grammars compiled into place"
+                ;;
+            no-cc)
+                echo "  Tier-1 TS/JS analysis: NOT installed (no C compiler on PATH); run scripts/fetch-tree-sitter.sh after installing one"
+                ;;
+            failed)
+                echo "  Tier-1 TS/JS analysis: NOT installed (fetch or compile failed); run scripts/fetch-tree-sitter.sh to retry"
+                ;;
+        esac
+    else
+        echo "  Tier-1 TS/JS analysis: skipped"
+    fi
+    if $with_sqlite_vec; then
+        case "$sqlite_vec_result" in
+            installed)
+                echo "  Vector search (sqlite-vec): extension installed"
+                ;;
+            failed)
+                echo "  Vector search (sqlite-vec): NOT installed (fetch failed); run scripts/fetch-vec0.sh to retry"
+                ;;
+        esac
+    else
+        echo "  Vector search (sqlite-vec): skipped"
+    fi
+    case "$memory_result" in
+        set)
+            echo "  Memory precedence: $memory_precedence"
+            ;;
+        failed)
+            echo "  Memory precedence: NOT set (init reported an error above); run: engram init --memory-precedence $memory_precedence"
+            ;;
+        *)
+            echo "  Memory precedence: engram-first (the shipped default)"
+            ;;
+    esac
+    case "$embedding_result" in
+        configured)
+            echo "  Embeddings: configured (details above)"
+            ;;
+        skipped)
+            echo "  Embeddings: skipped"
+            ;;
+        manual)
+            echo "  Embeddings: not configured (no terminal to ask); run: engram init --with-embeddings"
+            ;;
+        failed)
+            echo "  Embeddings: NOT configured (init reported an error above); run: engram init --with-embeddings"
+            ;;
+    esac
+    case "$grant_result" in
+        granted)
+            echo "  MCP tool permissions: granted (recall, remember, digest, status)"
+            ;;
+        declined)
+            echo "  MCP tool permissions: not granted; run 'engram permissions --apply' to change that"
+            ;;
+        skipped)
+            echo "  MCP tool permissions: not touched (--no-grant-permissions)"
+            ;;
+    esac
+    if $with_start; then
+        case "$server_result" in
+            running)
+                echo "  Server: running (confirmed by engram status)"
+                ;;
+            failed)
+                echo "  Server: NOT running; start it with 'engram start', then check 'engram doctor'"
+                ;;
+        esac
+    else
+        echo "  Server: not started; start it with 'engram start'"
+    fi
+    echo
+    echo "Next steps:"
+    if $path_changed; then
+        echo "  Open a new shell, or run: source $path_rc_file"
+    fi
+    if $with_plugin && [ "$plugin_result" = installed ]; then
+        echo "  In a running Claude Code session, run: /reload-plugins"
+    fi
+    if [ "$grant_result" = granted ]; then
+        echo "  Nothing to restart: Claude Code watches its settings file and reloads permissions"
+    fi
+else
+    echo "Dry run only — nothing was changed. Re-run without --dry-run to perform this installation."
+fi

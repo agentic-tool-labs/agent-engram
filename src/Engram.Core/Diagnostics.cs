@@ -1,0 +1,1364 @@
+using System.Globalization;
+using System.Runtime.InteropServices;
+using Microsoft.Data.Sqlite;
+
+namespace Engram.Core;
+
+/// <summary>How one part of an instance is doing.</summary>
+public enum DiagnosisState
+{
+    /// <summary>Working.</summary>
+    Ok,
+
+    /// <summary>Deliberately not on. A supported configuration, never a fault (D18).</summary>
+    Off,
+
+    /// <summary>Working, and something here is worth knowing.</summary>
+    Warn,
+
+    /// <summary>Asked for, and not working. The only state that fails the exit code.</summary>
+    Broken,
+}
+
+/// <summary>One check, what it found, and what to type about it.</summary>
+public sealed record Diagnosis(string Name, DiagnosisState State, string Detail, string? Fix = null);
+
+public sealed record DiagnosticReport(IReadOnlyList<Diagnosis> Checks)
+{
+    /// <summary>
+    /// True unless something is <see cref="DiagnosisState.Broken"/>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="DiagnosisState.Off"/> is deliberately not a failure. An instance with
+    /// <c>provider = "none"</c> is fully supported (D18), and a doctor that reports a fault for a
+    /// choice the user made is one people learn to ignore — which costs the real faults their
+    /// audience.
+    /// </remarks>
+    public bool Healthy => !Checks.Any(check => check.State is DiagnosisState.Broken);
+
+    public int Broken => Checks.Count(check => check.State is DiagnosisState.Broken);
+
+    public int Warnings => Checks.Count(check => check.State is DiagnosisState.Warn);
+}
+
+/// <summary>
+/// Reads an instance and reports what is wrong with it — the reader for every <c>Problems</c>
+/// list and every <see cref="EmbedderResolution.Reason"/> the rest of the system produces.
+/// </summary>
+/// <remarks>
+/// <para><b>It opens the store, and must never initialize it.</b>
+/// <see cref="EngramDatabase.OpenInitialized(EngramHome)"/> migrates an out-of-date schema on
+/// open, and D31 makes that migration snapshot first. Running it here would mean a command whose
+/// entire purpose is to describe the instance had rewritten the instance before it printed a
+/// word — and specifically that "your store is one schema version behind" becomes an
+/// unreportable state, because asking the question performs the answer. So this uses
+/// <see cref="EngramDatabase.Open(EngramHome)"/>, which configures a connection and nothing
+/// else.</para>
+///
+/// <para><b>No check may take the report down with it.</b> Every check runs inside
+/// <see cref="Try"/>, and one that throws becomes a broken row naming its own exception while the
+/// rest still run. This is not defensive habit: a diagnostic is reached for when something is
+/// already wrong, so the state most likely to make a check throw is exactly the state someone is
+/// running it in.</para>
+///
+/// <para><b>The only network call is the embedding endpoint, on a deadline of its own.</b>
+/// <see cref="ProbeDeadline"/> replaces the configured timeout rather than honouring it, because
+/// those two numbers answer different questions: an indexing run should wait a configured 30
+/// seconds for a busy endpoint, and a person asking what is broken should not. A provider that is
+/// merely slow reports as unreachable here, which is the correct answer to "is it answering right
+/// now" and is why the fix line names <c>engram embed --probe</c> — the command that waits.</para>
+/// </remarks>
+public static class Diagnostics
+{
+    /// <summary>How long the endpoint gets to answer before doctor calls it unreachable.</summary>
+    public static TimeSpan ProbeDeadline => TimeSpan.FromSeconds(3);
+
+    /// <summary>How long the server gets to answer its health check.</summary>
+    public static TimeSpan HealthDeadline => TimeSpan.FromSeconds(2);
+
+    /// <param name="repoRoot">
+    /// Where to report indexing coverage from, or <c>null</c> to leave that check out entirely.
+    /// </param>
+    /// <param name="reachOut">
+    /// Whether the embedding endpoint may be contacted. False in tests that have no endpoint, so
+    /// they assert configuration rather than the network.
+    /// </param>
+    /// <param name="executablePath">
+    /// This binary, which the server check compares against the running process to tell a live
+    /// server from a recycled pid. Defaults to the current process, which is right for every
+    /// caller except a test standing one in.
+    /// </param>
+    /// <param name="claudeSettingsPath">
+    /// Which settings file the Claude Code check reads. It defaults to
+    /// <see cref="EngramHome.ClaudeSettingsPath"/>, which is correctly outside the Engram home —
+    /// Claude Code's settings live in the user profile no matter where Engram does. That makes it
+    /// the one check a sandboxed home cannot sandbox, so it is overridable: a test that asserted
+    /// against the real file would be asserting on whoever ran it.
+    /// </param>
+    public static DiagnosticReport Run(
+        EngramHome home,
+        Func<string, string?> environment,
+        string? repoRoot = null,
+        ServerLifecycle? lifecycle = null,
+        bool reachOut = true,
+        HttpClient? client = null,
+        string? executablePath = null,
+        string? claudeSettingsPath = null)
+    {
+        ArgumentNullException.ThrowIfNull(home);
+        ArgumentNullException.ThrowIfNull(environment);
+
+        var checks = new List<Diagnosis>();
+        var config = ConfigFile.Load(home.ConfigPath);
+        var embedding = EmbeddingSettings.Read(config);
+
+        Try(checks, "home", list => list.Add(CheckHome(home, config)));
+
+        using var connection = OpenStore(home, checks);
+
+        Try(checks, "store", list => list.Add(CheckStore(home, connection)));
+        Try(checks, "server", list => list.Add(CheckServer(home, lifecycle, executablePath)));
+        Try(checks, "claude code", list => list.Add(CheckClaudeCode(claudeSettingsPath ?? home.ClaudeSettingsPath)));
+        Try(checks, "memory", list => list.Add(CheckMemory(config)));
+        Try(checks, "tool profile", list => list.Add(CheckToolProfile(config)));
+        Try(checks, "review", list => list.Add(CheckReview(connection, DateTimeOffset.UtcNow)));
+        Try(checks, "embedding", list => CheckEmbedding(home, embedding, environment, reachOut, client, list));
+        Try(checks, "vector index", list => list.Add(CheckIndex(home, connection, embedding)));
+        Try(checks, "token index", list => list.Add(CheckTokenIndex(connection)));
+        Try(checks, "metal", list => CheckMetal(home, embedding, list));
+        Try(checks, "backups", list => list.Add(CheckBackups(home, connection, config)));
+        Try(checks, "sync", list => list.Add(CheckSync(home, connection, config)));
+        Try(checks, "edit queue", list => list.Add(CheckQueue(home)));
+        Try(checks, "webhook", list => CheckWebhook(config, list));
+        Try(checks, "code analysis", list => list.Add(CheckRoslyn(environment)));
+        Try(checks, "tree-sitter", list => list.Add(CheckTreeSitter(environment, home)));
+        Try(checks, "indexing config", list => CheckIndexingConfig(IndexingSettings.Read(config), list));
+        Try(checks, "indexing/enrollment", list => list.AddRange(CheckEnrolledRepos(home, connection, DateTimeOffset.UtcNow, config)));
+
+        if (repoRoot is not null)
+        {
+            Try(checks, "indexing", list => list.Add(CheckRepo(repoRoot, config, connection)));
+        }
+
+        return new DiagnosticReport(checks);
+    }
+
+    /// <summary>Where events are delivered as they are recorded, if anywhere.</summary>
+    /// <remarks>
+    /// <para>No subscriber is <c>Off</c>, not a fault: delivery is opt-in and the overwhelming
+    /// majority of instances want none (D37).</para>
+    /// <para>A URL that will not parse is <c>Broken</c>, matching how a bad embedding endpoint is
+    /// reported and for the same reason: nothing degrades, delivery simply does not happen, and
+    /// the person who typed a URL is waiting on the other end of it. A misfiled <c>kinds</c> entry
+    /// is only a warning — it delivers less rather than nothing, and it is the failure mode that
+    /// shows up nowhere else, since a filter matching no events looks exactly like a quiet
+    /// instance.</para>
+    /// <para>This reports the configuration, never whether anything arrived. Reaching the
+    /// subscriber to find out would make <c>doctor</c> emit an event of its own, and a check whose
+    /// observation is indistinguishable from the thing observed is the trap D42 records.</para>
+    /// </remarks>
+    private static void CheckWebhook(ConfigFile config, List<Diagnosis> checks)
+    {
+        var settings = WebhookSettings.Read(config);
+
+        foreach (var problem in settings.Problems)
+        {
+            checks.Add(new Diagnosis(
+                "webhook", DiagnosisState.Broken, problem, "fix or comment out url in config.toml"));
+        }
+
+        if (settings.Problems.Count == 0)
+        {
+            checks.Add(settings.Urls.Count == 0
+                ? new Diagnosis("webhook", DiagnosisState.Off, "no subscriber configured")
+                : new Diagnosis(
+                    "webhook",
+                    DiagnosisState.Ok,
+                    $"{string.Join(", ", settings.Urls)} — "
+                    + (settings.Kinds.Contains(WebhookSettings.EveryKind)
+                        ? "every event"
+                        : string.Join(", ", settings.Kinds))));
+        }
+
+        foreach (var unknown in settings.Unknown)
+        {
+            checks.Add(new Diagnosis(
+                "webhook",
+                DiagnosisState.Warn,
+                $"[webhook] {unknown}",
+                $"one of: {string.Join(", ", TelemetryEventKind.All)}"));
+        }
+    }
+
+    /// <summary>What the primer tells the agent about where its durable memory lives.</summary>
+    /// <remarks>
+    /// <c>off</c> is a supported answer and reports as such rather than as a fault (D37) — an
+    /// agent with no competing memory system needs nothing said. A value that will not parse is a
+    /// warning rather than broken: recall, capture and the primer all still work, and the only
+    /// consequence is that the line says what the default says instead of what was typed.
+    /// </remarks>
+    private static Diagnosis CheckMemory(ConfigFile config)
+    {
+        var settings = MemorySettings.Read(config);
+
+        if (settings.Problems.Count > 0)
+        {
+            return new Diagnosis(
+                "memory",
+                DiagnosisState.Warn,
+                settings.Problems[0],
+                $"engram init --memory-precedence {string.Join('|', MemorySettings.Names)}");
+        }
+
+        return settings.Precedence switch
+        {
+            MemoryPrecedence.Off => new Diagnosis(
+                "memory",
+                DiagnosisState.Off,
+                "precedence off — the primer says nothing about which memory store to prefer"),
+            _ => new Diagnosis(
+                "memory",
+                DiagnosisState.Ok,
+                $"precedence {MemorySettings.ToText(settings.Precedence)}"),
+        };
+    }
+
+    /// <summary>
+    /// Which MCP tools a server connection advertises (docs/memory-expansion/03-tool-profiles-spec.md).
+    /// </summary>
+    /// <remarks>
+    /// Reads config directly and nothing else — no live connection is opened, so this reports
+    /// what the next <c>engram start</c> would register rather than what a running server already
+    /// did (D37). A malformed value warns the same way <see cref="CheckMemory"/> does, since the
+    /// fallback to <c>default</c> is silent otherwise. <c>default</c> and <c>full</c> are both
+    /// <see cref="DiagnosisState.Ok"/> — unlike an enabled/disabled axis such as sync or memory
+    /// precedence, neither profile is a deviation from a norm to flag: both are fully-supported,
+    /// deliberately-chosen configurations, and a diagnostic that reports a choice as a fault is
+    /// one people stop reading (D37).
+    /// </remarks>
+    private static Diagnosis CheckToolProfile(ConfigFile config)
+    {
+        var settings = ToolProfileSettings.Read(config);
+
+        if (settings.Problems.Count > 0)
+        {
+            return new Diagnosis(
+                "tool profile",
+                DiagnosisState.Warn,
+                settings.Problems[0],
+                $"engram profile set {string.Join('|', ToolProfileSettings.Names)}");
+        }
+
+        return settings.Profile == ToolProfile.Full
+            ? new Diagnosis(
+                "tool profile",
+                DiagnosisState.Ok,
+                "full — the MCP server also registers engram_start/engram_status/engram_stop")
+            : new Diagnosis(
+                "tool profile",
+                DiagnosisState.Ok,
+                "default — 8 tools; lifecycle tools (start/status/stop) are not registered");
+    }
+
+    /// <summary>
+    /// Overdue review markers (docs/memory-expansion/04-lifecycle-spec.md). A deferred review is
+    /// a choice, not a fault (D37), so a non-zero due count is <see cref="DiagnosisState.Warn"/>,
+    /// never <see cref="DiagnosisState.Broken"/> — mirroring <see cref="CheckToolProfile"/>.
+    /// </summary>
+    private static Diagnosis CheckReview(SqliteConnection? connection, DateTimeOffset now)
+    {
+        if (connection is null)
+        {
+            return new Diagnosis("review", DiagnosisState.Warn, "no store to hold review markers yet");
+        }
+
+        var due = FactReview.CountDue(connection, now.ToUnixTimeSeconds());
+
+        return due == 0
+            ? new Diagnosis("review", DiagnosisState.Ok, "nothing due")
+            : new Diagnosis(
+                "review",
+                DiagnosisState.Warn,
+                $"{due} fact{(due == 1 ? string.Empty : "s")} past its review date",
+                "engram review list");
+    }
+
+    /// <summary>
+    /// Presence only, never a launch — running the sidecar to ask about it would need the
+    /// runtime whose absence is one of the answers. Absent is a supported configuration
+    /// (C# indexes at tier 0), so it reports Ok; the one Broken state is an override that
+    /// points at nothing, because an explicit configuration that lies is a fault and a
+    /// silent fallback would hide it (D37). Public for the same reason Corroborated is:
+    /// the tier-0 branch needs a base directory no test process can supply through Run.
+    /// </summary>
+    public static Diagnosis CheckRoslyn(Func<string, string?> environment, string? baseDirectory = null)
+    {
+        if (environment(RoslynSidecar.EnvironmentOverride) is { Length: > 0 } overridePath
+            && !File.Exists(overridePath))
+        {
+            return new Diagnosis(
+                "code analysis",
+                DiagnosisState.Broken,
+                $"{RoslynSidecar.EnvironmentOverride} points at {overridePath}, which is not there",
+                "unset it, or point it at an engram-roslyn binary");
+        }
+
+        var sidecar = RoslynSidecar.Locate(environment, baseDirectory);
+        return sidecar is null
+            ? new Diagnosis(
+                "code analysis",
+                DiagnosisState.Ok,
+                "tier 0 only — engram-roslyn is not installed, so C# indexes without Roslyn")
+            : new Diagnosis("code analysis", DiagnosisState.Ok, $"tier 2: {sidecar}");
+    }
+
+    /// <summary>
+    /// Presence only, never a load — the sidecar row's rule (D37), and here it is cheaper
+    /// to break: asking dlopen "is this installed" pays for a native library staying
+    /// resident in the doctor's process. Absent is a supported configuration (TS/JS index
+    /// at tier 0, reported Ok); an override that points at nothing is Broken for the same
+    /// reason the sidecar's is; and a core with a registry-named grammar missing beside it
+    /// warns, because a half-finished install looks exactly like a working one at index
+    /// time — the affected language just quietly takes tier 0.
+    /// </summary>
+    public static Diagnosis CheckTreeSitter(Func<string, string?> environment, EngramHome home)
+    {
+        if (environment(TreeSitter.EnvironmentOverride) is { Length: > 0 } overridePath
+            && !File.Exists(Path.Combine(overridePath, TreeSitter.CoreLibraryFile)))
+        {
+            return new Diagnosis(
+                "tree-sitter",
+                DiagnosisState.Broken,
+                $"{TreeSitter.EnvironmentOverride} points at {overridePath}, which has no {TreeSitter.CoreLibraryFile}",
+                "unset it, or point it at a directory holding the compiled grammars");
+        }
+
+        var directory = TreeSitter.Locate(environment, home);
+        if (directory is null)
+        {
+            return new Diagnosis(
+                "tree-sitter",
+                DiagnosisState.Ok,
+                "tier 0 only — the grammars are not installed, so TypeScript and JavaScript index without them");
+        }
+
+        var missing = LanguageRegistry.All
+            .Where(language => language.Grammars is not null)
+            .SelectMany(language => language.Grammars!)
+            .Select(grammar => TreeSitter.GrammarLibraryFile(grammar.Library))
+            .Distinct(StringComparer.Ordinal)
+            .Where(file => !File.Exists(Path.Combine(directory, file)))
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        return missing.Count == 0
+            ? new Diagnosis("tree-sitter", DiagnosisState.Ok, $"tier 1: {directory}")
+            : new Diagnosis(
+                "tree-sitter",
+                DiagnosisState.Warn,
+                $"tier 1 core is installed but {string.Join(", ", missing)} {(missing.Count == 1 ? "is" : "are")} not — the languages they parse take tier 0",
+                "re-run scripts/fetch-tree-sitter.sh (a reinstall also compiles them by default)");
+    }
+
+    private static void Try(List<Diagnosis> checks, string name, Action<List<Diagnosis>> check)
+    {
+        try
+        {
+            check(checks);
+        }
+#pragma warning disable CA1031 // A check that throws must still leave the other checks readable.
+        catch (Exception exception)
+#pragma warning restore CA1031
+        {
+            checks.Add(new Diagnosis(
+                name,
+                DiagnosisState.Broken,
+                $"this check could not run: {exception.GetType().Name}: {exception.Message}"));
+        }
+    }
+
+    /// <summary>
+    /// Opens the store if there is one, reporting rather than throwing when there is one and it
+    /// will not open.
+    /// </summary>
+    private static SqliteConnection? OpenStore(EngramHome home, List<Diagnosis> checks)
+    {
+        if (!File.Exists(home.DatabasePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            return EngramDatabase.Open(home);
+        }
+#pragma warning disable CA1031 // The point of the check is to survive whatever a bad file throws.
+        catch (Exception exception)
+#pragma warning restore CA1031
+        {
+            checks.Add(new Diagnosis(
+                "store",
+                DiagnosisState.Broken,
+                $"{home.DatabasePath} will not open: {exception.Message}",
+                "engram backup restore"));
+            return null;
+        }
+    }
+
+    private static Diagnosis CheckHome(EngramHome home, ConfigFile config)
+    {
+        if (!Directory.Exists(home.Root))
+        {
+            return new Diagnosis("home", DiagnosisState.Broken, $"{home.Root} does not exist", "engram init");
+        }
+
+        if (!File.Exists(home.ConfigPath))
+        {
+            return new Diagnosis(
+                "home",
+                DiagnosisState.Broken,
+                $"{home.Root} — no config.toml, so every setting is a default",
+                "engram init");
+        }
+
+        if (config.Errors.Count > 0)
+        {
+            return new Diagnosis(
+                "home",
+                DiagnosisState.Broken,
+                $"{home.Root} — config.toml has {Plural(config.Errors.Count, "unreadable line")}: {config.Errors[0]}",
+                "fix that line — an unreadable one is skipped, so the setting on it is silently a default");
+        }
+
+        return new Diagnosis("home", DiagnosisState.Ok, home.Root);
+    }
+
+    private static Diagnosis CheckStore(EngramHome home, SqliteConnection? connection)
+    {
+        if (connection is null)
+        {
+            return File.Exists(home.DatabasePath)
+                ? new Diagnosis("store", DiagnosisState.Broken, "unreadable — see above")
+                : new Diagnosis(
+                    "store",
+                    DiagnosisState.Warn,
+                    "no engram.db yet — nothing has been remembered here",
+                    "it is created by the first write; start a session, or run engram serve");
+        }
+
+        int version;
+        try
+        {
+            version = EngramDatabase.ReadSchemaVersion(connection);
+        }
+        catch (SqliteException)
+        {
+            // The shape a WAL database copied with cp leaves behind: the file opens and holds
+            // nothing, because everything real was still in the log (D31).
+            return new Diagnosis(
+                "store",
+                DiagnosisState.Broken,
+                $"{home.DatabasePath} opens but has no schema — it is not an Engram store, or it was "
+                    + "copied from a live one with cp rather than snapshotted",
+                "engram backup restore, or move the file aside and let Engram make a new one");
+        }
+
+        if (version > EngramDatabase.SchemaVersion)
+        {
+            return new Diagnosis(
+                "store",
+                DiagnosisState.Broken,
+                $"schema {version}, and this binary knows {EngramDatabase.SchemaVersion} — it was written "
+                    + "by a newer Engram than this one",
+                "upgrade Engram; an older binary must not write to a newer store");
+        }
+
+        // BackupFingerprint now counts authored facts only (backup-fingerprint-semantics.md
+        // §3) — narrower than "every live/closed fact", so the label says so rather than
+        // silently changing what it means (the D43 mistake). Entity count is unrelated to the
+        // fingerprint's belief-content scope (entities are addressing metadata, D2) and is read
+        // directly here rather than through it.
+        var facts = BackupFingerprint.Read(connection);
+        using var entityCountCommand = connection.CreateCommand();
+        entityCountCommand.CommandText = "SELECT COUNT(*) FROM entity;";
+        var entityCount = (long)entityCountCommand.ExecuteScalar()!;
+        var detail =
+            $"schema {version}, {Plural(facts.Facts, "authored fact")}, {facts.ClosedFacts} closed, "
+            + $"{entityCount} entities, {Bytes(new FileInfo(home.DatabasePath).Length)}";
+
+        return version < EngramDatabase.SchemaVersion
+            ? new Diagnosis(
+                "store",
+                DiagnosisState.Warn,
+                $"{detail} — schema {version} is behind this binary's {EngramDatabase.SchemaVersion}",
+                "the next command that opens it will migrate, snapshotting first; doctor deliberately does not")
+            : new Diagnosis("store", DiagnosisState.Ok, detail);
+    }
+
+    private static Diagnosis CheckServer(EngramHome home, ServerLifecycle? lifecycle, string? executablePath)
+    {
+        lifecycle ??= new ServerLifecycle(new ProcessInspector(), new HttpServerHealthChecker(), new ProcessServerLauncher());
+        var status = lifecycle.Status(home, EngramVersion.Current, HealthDeadline);
+        var asking = executablePath ?? Environment.ProcessPath ?? string.Empty;
+
+        // Only worth a word when it is not the binary being asked — then it explains a surprising
+        // row, and most often it is a working copy asking about the installed server.
+        var from = status.LaunchedFrom is { Length: > 0 } launched
+            && !string.Equals(launched, asking, StringComparison.Ordinal)
+                ? $", started from {launched}"
+                : string.Empty;
+
+        return status.Kind switch
+        {
+            ServerStatusKind.Running => new Diagnosis(
+                "server",
+                DiagnosisState.Ok,
+                $"pid {status.Health!.Pid} on port {status.Health.Port}, version {status.Health.Version}{from}"),
+
+            // Up and answering correctly, just not this build. Warn rather than Broken: nothing is
+            // wrong with it, and calling a working server broken is how a doctor stops being read.
+            ServerStatusKind.VersionMismatch => new Diagnosis(
+                "server",
+                DiagnosisState.Warn,
+                $"running version {status.Health!.Version}, but this engram is {EngramVersion.Current}{from}",
+                "engram stop, then engram start"),
+
+            // Not a fault: the hooks and the whole CLI work without it, and the plugin starts it
+            // on demand. Only the MCP tools need it up.
+            ServerStatusKind.NotRunning => new Diagnosis(
+                "server",
+                DiagnosisState.Off,
+                "not running — hooks and the CLI do not need it, the MCP tools do",
+                "engram start"),
+
+            ServerStatusKind.Wedged => new Diagnosis(
+                "server",
+                DiagnosisState.Broken,
+                $"pid {status.Recorded!.Pid} is alive and not answering its health check",
+                "engram stop, then engram start"),
+
+            ServerStatusKind.Stale => new Diagnosis(
+                "server",
+                DiagnosisState.Warn,
+                "not running, and a pid file was left behind",
+                "engram start clears it"),
+
+            ServerStatusKind.Reused => new Diagnosis(
+                "server",
+                DiagnosisState.Warn,
+                "not running — the recorded pid now belongs to something else",
+                "engram start clears it"),
+
+            _ => new Diagnosis("server", DiagnosisState.Warn, "in a state this check does not name"),
+        };
+    }
+
+    private static Diagnosis CheckClaudeCode(string settingsPath)
+    {
+        var plan = ClaudePermissions.PlanGrant(settingsPath);
+
+        if (!plan.SettingsFileExisted)
+        {
+            return new Diagnosis(
+                "claude code",
+                DiagnosisState.Warn,
+                $"no settings file at {plan.SettingsPath} — Engram's tools will ask for approval every session",
+                "engram permissions --apply");
+        }
+
+        return plan.ToAdd.Count == 0
+            ? new Diagnosis(
+                "claude code",
+                DiagnosisState.Ok,
+                $"{Plural(plan.AlreadyPresent.Count, "tool")} pre-approved")
+            : new Diagnosis(
+                "claude code",
+                DiagnosisState.Warn,
+                $"{plan.ToAdd.Count} of {ClaudePermissions.GrantedTools.Count} tools are not pre-approved, "
+                    + "so the model is prompted before it can remember or recall",
+                "engram permissions --apply");
+    }
+
+    /// <summary>
+    /// Reports the embedding configuration, and for a local model its ingredients — without
+    /// starting anything.
+    /// </summary>
+    /// <remarks>
+    /// <c>provider = "local"</c> is checked by looking for the weights and the server binary
+    /// rather than by resolving an embedder, because resolving one means launching llama.cpp
+    /// (D35). A diagnostic that starts a model process to find out whether a model process would
+    /// start has both answered the question and changed it, and leaves several hundred megabytes
+    /// resident behind a command the user expected to be read-only.
+    /// </remarks>
+    private static void CheckEmbedding(
+        EngramHome home,
+        EmbeddingSettings settings,
+        Func<string, string?> environment,
+        bool reachOut,
+        HttpClient? client,
+        List<Diagnosis> checks)
+    {
+        foreach (var problem in settings.Problems)
+        {
+            checks.Add(new Diagnosis("embedding", DiagnosisState.Broken, problem, "edit [embedding] in config.toml"));
+        }
+
+        // Ahead of every early return below, so it is reported whatever the provider is — a config
+        // that predates a key's retirement is no more likely to be one with embeddings switched on.
+        // Warn rather than Broken: the lines do nothing, which is untidy rather than wrong, and D37
+        // reserves exit 1 for what is actually broken.
+        foreach (var stale in settings.Ignored)
+        {
+            checks.Add(new Diagnosis(
+                "embedding",
+                DiagnosisState.Warn,
+                $"[embedding] {stale}; the line is ignored",
+                "delete it from config.toml"));
+        }
+
+        if (settings.Provider == EmbeddingProvider.None)
+        {
+            checks.Add(new Diagnosis(
+                "embedding",
+                DiagnosisState.Off,
+                "provider = \"none\" — recall runs on term overlap and bm25, with no vector lane",
+                "engram init --with-embeddings"));
+            return;
+        }
+
+        if (settings.Provider == EmbeddingProvider.Local)
+        {
+            CheckLocalIngredients(home, settings, checks);
+            return;
+        }
+
+        var resolution = EmbedderFactory.Create(settings, environment, client);
+
+        // The factory hands back an owner of an HttpClient. Nothing else on this path would ever
+        // dispose it, and a caller-supplied client is left alone because HttpEmbedder only owns
+        // the one it made itself.
+        using var owned = resolution.Embedder as IDisposable;
+
+        if (!resolution.Resolved)
+        {
+            checks.Add(new Diagnosis("embedding", DiagnosisState.Broken, resolution.Reason, "engram embed --probe"));
+            return;
+        }
+
+        if (!reachOut)
+        {
+            checks.Add(new Diagnosis("embedding", DiagnosisState.Ok, resolution.Reason));
+            return;
+        }
+
+        var probe = EmbeddingProbe.Run(settings with { Timeout = ProbeDeadline }, environment);
+
+        if (!probe.Answered)
+        {
+            checks.Add(new Diagnosis(
+                "embedding",
+                DiagnosisState.Broken,
+                $"{settings.Endpoint} did not answer within {ProbeDeadline.TotalSeconds:0} s: {probe.Reason}",
+                "engram embed --probe waits the configured timeout instead of this one"));
+            return;
+        }
+
+        if (settings.Dimensions is { } stated && stated != probe.Dimensions)
+        {
+            // D34's silent failure, and the reason doctor reaches the endpoint at all: a wrong
+            // width errors nowhere. It stores vectors that rank like noise.
+            checks.Add(new Diagnosis(
+                "embedding",
+                DiagnosisState.Broken,
+                $"config says dim = {stated} and {settings.Endpoint} returns {probe.Dimensions} — "
+                    + "a wrong width does not error anywhere, it just stores vectors no query matches",
+                "engram embed --probe --use-it, then rebuild the index"));
+            return;
+        }
+
+        checks.Add(new Diagnosis(
+            "embedding",
+            DiagnosisState.Ok,
+            $"{resolution.Embedder!.Space} — endpoint answered in "
+                + $"{probe.Elapsed.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture)} ms"));
+    }
+
+    private static void CheckLocalIngredients(EngramHome home, EmbeddingSettings settings, List<Diagnosis> checks)
+    {
+        var model = EmbeddingModels.Find(settings.Model);
+        if (model is null)
+        {
+            checks.Add(new Diagnosis(
+                "embedding",
+                DiagnosisState.Broken,
+                $"model = \"{settings.Model}\" is not one this build knows",
+                "engram model list"));
+            return;
+        }
+
+        // The weights are the whole prerequisite. There is deliberately no second check for a
+        // runtime: llama.cpp ships with the binary now, so "is the engine here" cannot be false
+        // in a way a user could fix, and a row that is always green is a row people stop reading
+        // (D45). Pooling is printed because it is the one remaining setting on this path that
+        // fails silently — a wrong one embeds successfully and ranks like noise.
+        var weights = Path.Combine(home.ModelsDir, model.FileName);
+        checks.Add(File.Exists(weights)
+            ? new Diagnosis(
+                "embedding",
+                DiagnosisState.Ok,
+                $"local {model.Id}/{model.Dimensions}, {model.Pooling.ToString().ToLowerInvariant()} "
+                    + $"pooling, weights in {home.ModelsDir}")
+            : new Diagnosis(
+                "embedding",
+                DiagnosisState.Broken,
+                $"local {model.Id}, and {weights} is not there",
+                $"engram model install {model.Id}"));
+    }
+
+    private static Diagnosis CheckIndex(EngramHome home, SqliteConnection? connection, EmbeddingSettings settings)
+    {
+        if (settings.Provider == EmbeddingProvider.None)
+        {
+            return new Diagnosis("vector index", DiagnosisState.Off, "no provider, so nothing to index into");
+        }
+
+        if (connection is null)
+        {
+            return new Diagnosis("vector index", DiagnosisState.Warn, "no store to hold one yet");
+        }
+
+        var extension = VectorExtension.Load(connection, home.LibDir);
+        if (extension is VectorExtensionState.NotInstalled)
+        {
+            return new Diagnosis(
+                "vector index",
+                DiagnosisState.Broken,
+                $"embeddings are configured and sqlite-vec is not in {home.LibDir}, so no vector query can run",
+                "engram init --with-embeddings fetches it");
+        }
+
+        if (extension is VectorExtensionState.Failed)
+        {
+            return new Diagnosis(
+                "vector index",
+                DiagnosisState.Broken,
+                $"{VectorExtension.PathIn(home.LibDir)} is there and will not load — wrong architecture, or truncated",
+                "delete it and run engram init --with-embeddings");
+        }
+
+        if (!VectorIndex.Exists(connection) || VectorIndex.ReadSpace(connection) is not { } indexed)
+        {
+            return new Diagnosis(
+                "vector index",
+                DiagnosisState.Warn,
+                "sqlite-vec loads, and this store has no index yet",
+                "it is created with the first embedding written");
+        }
+
+        var pending = VectorIndex.CountPending(connection);
+        var rows = VectorIndex.Count(connection, liveOnly: true);
+
+        if (settings.Model is { } configured
+            && settings.Dimensions is { } width
+            && indexed != new EmbeddingSpace(configured, width))
+        {
+            // Distances between two spaces are real numbers and mean nothing, so the lane declines
+            // to run rather than ranking on them (D18). Nothing errors; recall just quietly loses
+            // a lane.
+            return new Diagnosis(
+                "vector index",
+                DiagnosisState.Broken,
+                $"the index holds {indexed} and the config asks for {configured}/{width} — vectors from "
+                    + "two spaces are not comparable, so recall skips the vector lane entirely",
+                "rebuild the index against the configured model");
+        }
+
+        var detail = $"{indexed}, {Plural(rows, "vector")}";
+        return pending == 0
+            ? new Diagnosis("vector index", DiagnosisState.Ok, detail)
+            : new Diagnosis("vector index", DiagnosisState.Ok, $"{detail}, {pending} facts waiting to be embedded");
+    }
+
+    /// <summary>
+    /// Never <see cref="DiagnosisState.Broken"/> (D37): an unbuilt or stale index costs the
+    /// overlap lane and nothing else — recall still answers from the lexical and vector lanes,
+    /// per spec ruling 3 (no scanning fallback).
+    /// </summary>
+    private static Diagnosis CheckTokenIndex(SqliteConnection? connection)
+    {
+        if (connection is null)
+        {
+            return new Diagnosis("token index", DiagnosisState.Warn, "no store to hold one yet");
+        }
+
+        return FactTokenIndex.ReadState(connection) switch
+        {
+            FactTokenIndexState.Ready => new Diagnosis("token index", DiagnosisState.Ok, "built and current"),
+            FactTokenIndexState.VersionMismatch => new Diagnosis(
+                "token index",
+                DiagnosisState.Warn,
+                "stamped with an older tokenizer version — the overlap lane is unavailable until it rebuilds",
+                "engram repair --apply rebuilds it"),
+            _ => new Diagnosis(
+                "token index",
+                DiagnosisState.Warn,
+                "not built yet — the overlap lane is unavailable until it does",
+                "engram repair --apply builds it"),
+        };
+    }
+
+    /// <summary>The first Apple silicon generation with tensor cores to lose (D28).</summary>
+    private const int FirstTensorGeneration = 5;
+
+    /// <summary>
+    /// Whether ggml-metal compiled the tensor path, as seen by whoever last loaded a model here.
+    /// </summary>
+    /// <remarks>
+    /// <para>Adds no row at all off macOS-arm64, or when the provider is not local — deliberately not
+    /// <see cref="DiagnosisState.Off"/>, which claims the user chose something. There is no Metal
+    /// choice to make on a machine with no Metal, and the arm64 gate keeps an Intel Mac, where these
+    /// lines never appear, from sitting on "not yet observed" forever.</para>
+    ///
+    /// <para>Reads only. Why the observation cannot be made here is <see cref="MetalRecord"/>'s whole
+    /// reason to exist (D35, D37).</para>
+    /// </remarks>
+    private static void CheckMetal(EngramHome home, EmbeddingSettings settings, List<Diagnosis> checks)
+    {
+        if (settings.Provider != EmbeddingProvider.Local
+            || !OperatingSystem.IsMacOS()
+            || RuntimeInformation.ProcessArchitecture != Architecture.Arm64)
+        {
+            return;
+        }
+
+        if (MetalRecord.Read(home) is not { } record)
+        {
+            checks.Add(new Diagnosis(
+                "metal",
+                DiagnosisState.Warn,
+                "tensor path not yet observed",
+                "it is recorded the first time a local model loads"));
+            return;
+        }
+
+        var when = Observed(record.ObservedAt);
+
+        // Reported, never enforced — two engram binaries legitimately serve one home (D42).
+        var by = record.Loader is { Length: > 0 } loader && loader != Environment.ProcessPath
+            ? $", recorded by {loader}"
+            : string.Empty;
+
+        if (record.HasTensor is not { } tensor)
+        {
+            checks.Add(new Diagnosis(
+                "metal",
+                DiagnosisState.Ok,
+                $"this llama.cpp build reports no tensor capability{when}{by}"));
+            return;
+        }
+
+        var gpu = record.Gpu ?? "this GPU";
+
+        if (tensor)
+        {
+            checks.Add(new Diagnosis("metal", DiagnosisState.Ok, $"tensor path on — {gpu}{when}{by}"));
+            return;
+        }
+
+        if (record.AppleGeneration is >= FirstTensorGeneration)
+        {
+            checks.Add(new Diagnosis(
+                "metal",
+                DiagnosisState.Warn,
+                $"tensor path off on {gpu}{when}{by} — ggml-metal compiled the pre-tensor shaders, "
+                    + "roughly half speed",
+                "the executable that loaded it records an SDK older than 26; rebuild with current "
+                    + "Xcode or command line tools and load again (D28)"));
+            return;
+        }
+
+        // Hardware that never had tensor cores, or a device name that did not parse. Either way this
+        // stays quiet: a wrong reading should cost a report, never manufacture one.
+        checks.Add(new Diagnosis("metal", DiagnosisState.Ok, $"tensor path off — {gpu}{when}{by}"));
+    }
+
+    private static string Observed(string? stamp) =>
+        DateTimeOffset.TryParse(stamp, CultureInfo.InvariantCulture, out var at)
+            ? $", observed {at.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}"
+            : string.Empty;
+
+    private static Diagnosis CheckBackups(EngramHome home, SqliteConnection? connection, ConfigFile config)
+    {
+        var settings = BackupSettings.Read(config);
+
+        foreach (var problem in settings.Problems)
+        {
+            return new Diagnosis("backups", DiagnosisState.Broken, problem, "edit [backup] in config.toml");
+        }
+
+        if (!settings.Enabled)
+        {
+            return new Diagnosis(
+                "backups",
+                DiagnosisState.Off,
+                "enabled = false — a migration still snapshots, nothing else does",
+                "set enabled = true under [backup]");
+        }
+
+        var snapshots = BackupStore.List(home);
+        var journal = Path.Combine(home.BackupDir, FactJournal.FileName);
+
+        if (snapshots.Count == 0)
+        {
+            return connection is null
+                ? new Diagnosis("backups", DiagnosisState.Ok, "on, and there is no store to snapshot yet")
+                : new Diagnosis(
+                    "backups",
+                    DiagnosisState.Warn,
+                    "on, and no snapshot has ever been taken",
+                    "engram backup take");
+        }
+
+        var newest = snapshots[0];
+        var age = DateTimeOffset.UtcNow - newest.TakenAt;
+        var detail =
+            $"{Plural(snapshots.Count, "snapshot")}, newest {Age(age)} old ({Bytes(newest.Bytes)}), "
+            + $"every {settings.IntervalMinutes} min when facts change";
+
+        if (settings.Journal && !File.Exists(journal))
+        {
+            // The .db snapshot only restores into the schema that wrote it; the journal is the
+            // half that replays into any later one (D32).
+            return new Diagnosis(
+                "backups",
+                DiagnosisState.Warn,
+                $"{detail} — journal = true and {journal} is missing, so these snapshots restore only "
+                    + "into schema " + newest.SchemaVersion.ToString(CultureInfo.InvariantCulture),
+                "engram backup take writes it");
+        }
+
+        return new Diagnosis("backups", DiagnosisState.Ok, detail);
+    }
+
+    /// <summary>
+    /// Cross-machine sync (docs/memory-expansion/01-sync-spec.md, "Staleness/liveness detection"):
+    /// Off when not enabled, Warn for any stale peer or for <c>retain_days</c> configured shorter
+    /// than <c>stale_after_days</c>, never Broken for staleness itself — a quiet peer is not this
+    /// instance's fault (D37).
+    /// </summary>
+    private static Diagnosis CheckSync(EngramHome home, SqliteConnection? connection, ConfigFile config)
+    {
+        var settings = SyncSettings.Read(config);
+
+        foreach (var problem in settings.Problems)
+        {
+            return new Diagnosis("sync", DiagnosisState.Broken, problem, "edit [sync] in config.toml");
+        }
+
+        if (!settings.Enabled)
+        {
+            return new Diagnosis(
+                "sync",
+                DiagnosisState.Off,
+                "enabled = false — no cross-machine replication configured",
+                "set enabled = true under [sync]");
+        }
+
+        if (settings.RetainDays < settings.StaleAfterDays)
+        {
+            return new Diagnosis(
+                "sync",
+                DiagnosisState.Warn,
+                $"[sync] retain_days ({settings.RetainDays}) is less than stale_after_days ({settings.StaleAfterDays}) "
+                    + "— a peer could be pruned out of this machine's own chunk history before you'd be warned it went stale",
+                "raise retain_days to at least stale_after_days in config.toml");
+        }
+
+        if (connection is null)
+        {
+            return new Diagnosis("sync", DiagnosisState.Ok, "on, and there is no store yet to check peer staleness against");
+        }
+
+        var syncRoot = settings.ResolveDir(home);
+        var ownMachineId = Sync.TryReadMachineId(home.SyncDir) ?? string.Empty;
+        var observations = Sync.GatherPeerObservations(connection, syncRoot, ownMachineId);
+        var staleness = SyncStaleness.Evaluate(observations, DateTimeOffset.UtcNow, TimeSpan.FromDays(settings.StaleAfterDays));
+
+        var stalePeers = staleness.Where(peer => peer.IsStale).ToList();
+        if (stalePeers.Count == 0)
+        {
+            return new Diagnosis(
+                "sync",
+                DiagnosisState.Ok,
+                observations.Count == 0
+                    ? "on, no known peers yet"
+                    : $"on, {Plural(observations.Count, "known peer")}, none stale");
+        }
+
+        var names = string.Join(
+            ", ",
+            stalePeers.Select(peer => $"{peer.MachineId} ({Age(DateTimeOffset.UtcNow - peer.LastObservedUtc!.Value)} since last seen)"));
+
+        return new Diagnosis(
+            "sync",
+            DiagnosisState.Warn,
+            $"{Plural(stalePeers.Count, "peer")} stale past {settings.StaleAfterDays}d: {names}",
+            "check that peer's folder-sync client is running, then run 'engram sync import' there");
+    }
+
+    /// <summary>
+    /// Counts what <c>file-touched</c> has spooled.
+    /// </summary>
+    /// <remarks>
+    /// <para>Still <see cref="DiagnosisState.Off"/> rather than a warning, and still without a
+    /// threshold chosen because it sounded large. The consumer is the code indexer, which is not
+    /// built; until it is, a backlog is the expected state and not a fault (D37). When something
+    /// does drain it the interesting question becomes whether the backlog grows faster than the
+    /// reader clears it, and that is the point to pick a number with a measurement behind it.</para>
+    ///
+    /// <para>It counts and does not read. Reading every entry would let it say how many distinct
+    /// files are behind the number, which is the more useful figure — and it is what
+    /// <c>engram queue status</c> prints, precisely so doctor does not have to open a thousand
+    /// files to draw one row. Past <see cref="SpoolCompactor.Threshold"/> the count means the
+    /// automatic compaction has not been running, so that is where the fix appears.</para>
+    /// </remarks>
+    private static Diagnosis CheckQueue(EngramHome home)
+    {
+        if (!Directory.Exists(home.QueueDir))
+        {
+            return new Diagnosis("edit queue", DiagnosisState.Off, "nothing spooled");
+        }
+
+        var spooled = Directory.EnumerateFiles(home.QueueDir, "*.spool").Count();
+
+        if (spooled == 0)
+        {
+            return new Diagnosis("edit queue", DiagnosisState.Off, "empty");
+        }
+
+        return new Diagnosis(
+            "edit queue",
+            DiagnosisState.Off,
+            $"{Plural(spooled, "edit")} spooled by file-touched, waiting for an indexer to drain them",
+            spooled > SpoolCompactor.Threshold ? "engram queue compact --apply" : null);
+    }
+
+    private static void CheckIndexingConfig(IndexingSettings settings, List<Diagnosis> checks)
+    {
+        foreach (var stale in settings.Ignored)
+        {
+            checks.Add(new Diagnosis(
+                "indexing",
+                DiagnosisState.Warn,
+                $"[indexing] {stale}; the line is ignored",
+                "delete it from config.toml"));
+        }
+    }
+
+    /// <param name="budget">
+    /// Injected so a test can reach the truncated branch without building a tree big enough to
+    /// exhaust the real one. Doctor's own budget is short by <see cref="ScanBudget.Diagnostic"/>.
+    /// </param>
+    internal static Diagnosis CheckRepo(
+        string repoRoot,
+        ConfigFile config,
+        SqliteConnection? connection,
+        ScanBudget? budget = null)
+    {
+        var scan = RepoScanner.Scan(
+            repoRoot,
+            IndexingSettings.Read(config),
+            budget: budget ?? ScanBudget.Diagnostic);
+
+        if (connection is null)
+        {
+            return new Diagnosis(
+                "indexing",
+                DiagnosisState.Off,
+                $"{scan.Summary()} in {repoRoot}, and no store to index them into yet",
+                "engram init");
+        }
+
+        // Registration is looked up the same way the indexer does it, because two answers
+        // to "which repo is this" is how a report drifts from the system it describes.
+        var identity = CodeIndexer.ResolveIdentity(repoRoot);
+
+        // The suppression column is read from this same query, not a second lookup
+        // (docs/repo-index-remediation-spec.md §14.2). EngramDatabase.Open, which doctor uses,
+        // never migrates (D31/D37) — so a store between an upgrade and its next migration
+        // genuinely has no last_scan_suppressed_reason column (pre-v8), or no repo_registry
+        // table at all (predates the repository index). Both are routine, not a fault (§14.5.2).
+        var columnExists = true;
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT r.repo_path, COUNT(f.path), MAX(f.indexed_at), r.last_scan_suppressed_reason
+            FROM repo_registry r LEFT JOIN file_state f ON f.repo_path = r.repo_path
+            WHERE r.identity = $identity
+            GROUP BY r.repo_path;
+            """;
+        command.Parameters.AddWithValue("$identity", identity);
+
+        SqliteDataReader reader;
+        try
+        {
+            reader = command.ExecuteReader();
+        }
+        catch (SqliteException e) when (IsSchemaAbsence(e))
+        {
+            if (e.Message.Contains("no such table", StringComparison.OrdinalIgnoreCase))
+            {
+                // Truncation is independent of whether repo_registry exists — the same D53
+                // reasoning the reader.Read()-false branch below applies, and checking schema
+                // state first would silently drop this Warn for a pre-repo-index store. The
+                // detail still carries the schema explanation from the Ok branch below, since
+                // that fact is required (§14.5.2) and the truncation Warn must not drop it.
+                if (scan.Truncated)
+                {
+                    return new Diagnosis(
+                        "indexing",
+                        DiagnosisState.Warn,
+                        $"{scan.Summary()} in {repoRoot} (repo check not applicable — store predates the repository index)",
+                        "too large to scan; run this from inside the project you want indexed");
+                }
+
+                // repo_registry itself is absent, so there is no fallback query left to run —
+                // the store predates the repository index and the repo check cannot run at all.
+                return new Diagnosis(
+                    "indexing",
+                    DiagnosisState.Ok,
+                    $"{scan.Summary()} in {repoRoot} (repo check not applicable — store predates the repository index)");
+            }
+
+            columnExists = false;
+            command.CommandText =
+                """
+                SELECT r.repo_path, COUNT(f.path), MAX(f.indexed_at)
+                FROM repo_registry r LEFT JOIN file_state f ON f.repo_path = r.repo_path
+                WHERE r.identity = $identity
+                GROUP BY r.repo_path;
+                """;
+            reader = command.ExecuteReader();
+        }
+
+        string repoPath;
+        long indexed;
+        long? newest;
+        string? suppressedReason;
+
+        using (reader)
+        {
+            if (!reader.Read())
+            {
+                // A truncated scan is the one case where "not indexed" is worth flagging rather than
+                // reporting flat: the directory is too big to be a project, so "engram index --apply"
+                // would be an instruction to index it anyway. Warn, never Broken — nothing about the
+                // installation is wrong, and only Broken sets exit 1 (D37).
+                if (scan.Truncated)
+                {
+                    return new Diagnosis(
+                        "indexing",
+                        DiagnosisState.Warn,
+                        $"{scan.Summary()} in {repoRoot}",
+                        "too large to scan; run this from inside the project you want indexed");
+                }
+
+                // Not indexed is a choice, not a fault (D37) — indexing starts on the next
+                // session start once enabled, or right now by hand.
+                return new Diagnosis(
+                    "indexing",
+                    DiagnosisState.Off,
+                    $"{scan.Summary()} in {repoRoot}, none indexed yet",
+                    "engram index --apply");
+            }
+
+            repoPath = reader.GetString(0);
+            indexed = reader.GetInt64(1);
+            newest = reader.IsDBNull(2) ? (long?)null : reader.GetInt64(2);
+            suppressedReason = columnExists && !reader.IsDBNull(3) ? reader.GetString(3) : null;
+        }
+
+        var age = newest is { } stamp
+            ? $", newest {Age(DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeSeconds(stamp))} old"
+            : string.Empty;
+
+        if (suppressedReason is not null)
+        {
+            var why = suppressedReason switch
+            {
+                "truncated" => "the last full scan could not read part of the repo, so its deletions were skipped",
+                "empty-scan" => "the last full scan found no files against an already-indexed repo, so its deletions were skipped",
+                _ => "the last full scan skipped its deletions",
+            };
+
+            return new Diagnosis(
+                "indexing",
+                DiagnosisState.Warn,
+                $"{Plural((int)indexed, "file")} indexed into {repoPath}{age}; {why}",
+                "engram index --full --apply once the scan can see the repo again");
+        }
+
+        if (!columnExists)
+        {
+            return new Diagnosis(
+                "indexing",
+                DiagnosisState.Ok,
+                $"{Plural((int)indexed, "file")} indexed into {repoPath}{age}; {scan.Summary()} on disk "
+                    + "(suppression check not applicable — store predates v8)");
+        }
+
+        return new Diagnosis(
+            "indexing",
+            DiagnosisState.Ok,
+            $"{Plural((int)indexed, "file")} indexed into {repoPath}{age}; {scan.Summary()} on disk");
+    }
+
+    /// <summary>
+    /// True for a <see cref="SqliteException"/> that means a table or column this store predates
+    /// is missing, never for any other failure. Shared by <see cref="CheckRepo"/> and
+    /// <see cref="CheckEnrolledRepos"/> so the two checks agree on what "this store is just old"
+    /// looks like (§3.1) — a second, separately worded version of this test is exactly the
+    /// divergence risk a shared predicate exists to remove.
+    /// </summary>
+    private static bool IsSchemaAbsence(SqliteException exception) =>
+        exception.Message.Contains("no such column", StringComparison.OrdinalIgnoreCase)
+        || exception.Message.Contains("no such table", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Warns about every enrolled repo whose checkout has gone quiet, spanning the whole store —
+    /// unlike <see cref="CheckRepo"/>, which only covers the repo doctor happens to be run inside.
+    /// </summary>
+    /// <remarks>
+    /// <para>Reuses <see cref="RepoFreshness.Neglected"/> for the predicate and the row order
+    /// rather than re-deriving either: a second implementation of "which repos are neglected" is
+    /// exactly the kind of duplication that has drifted before.</para>
+    ///
+    /// <para>A suppressed row is still reported — this check spans every enrollment, so silently
+    /// dropping it would hide the one row that explains why an index keeps not advancing — but it
+    /// carries no <c>Fix</c>: the command that would fix it is the one already declining to run
+    /// (§3.2's suppression amendment).</para>
+    ///
+    /// <para>Tolerates the same schema absences <see cref="CheckRepo"/> does — missing
+    /// <c>repo_registry</c>, missing <c>repo_enrollment</c>, or a pre-v8 store with no suppression
+    /// column — through the same <see cref="IsSchemaAbsence"/> predicate, collapsed to one
+    /// explanatory <see cref="DiagnosisState.Ok"/> row rather than <see cref="CheckRepo"/>'s more
+    /// differentiated handling, since none of the three changes what this check can say (§3.1).</para>
+    /// </remarks>
+    internal static IReadOnlyList<Diagnosis> CheckEnrolledRepos(
+        EngramHome home, SqliteConnection? connection, DateTimeOffset now, ConfigFile config)
+    {
+        _ = home;
+
+        if (connection is null)
+        {
+            return [new Diagnosis(
+                "indexing/enrollment", DiagnosisState.Off, "no store to hold enrollments yet", "engram init")];
+        }
+
+        IReadOnlyList<RepoEnrollmentRow> all;
+        IReadOnlyList<FreshnessCandidate> neglected;
+        Dictionary<string, string> suppressed;
+
+        try
+        {
+            all = RepoEnrollment.ListAll(connection);
+            neglected = RepoFreshness.Neglected(connection, now);
+            suppressed = ReadSuppressionReasons(connection);
+        }
+        catch (SqliteException e) when (IsSchemaAbsence(e))
+        {
+            return [new Diagnosis(
+                "indexing/enrollment",
+                DiagnosisState.Ok,
+                "enrollment check not applicable — store predates the repository index")];
+        }
+
+        if (neglected.Count == 0)
+        {
+            var enrolledCount = all.Count(row => row.State == RepoEnrollmentState.Enrolled);
+            return [new Diagnosis(
+                "indexing/enrollment", DiagnosisState.Ok, $"{Plural(enrolledCount, "enrolled repo")}, all scanned within the last 7 days")];
+        }
+
+        var rows = new List<Diagnosis>();
+        foreach (var candidate in neglected)
+        {
+            var identity = candidate.Row.Identity;
+            var detail = candidate.Reason == FreshnessReason.Stale
+                ? $"{identity} — last full scan {Age(now - DateTimeOffset.FromUnixTimeSeconds(candidate.Row.LastFullScanAt!.Value))} ago"
+                : $"{identity} — never scanned (enrolled {Age(now - DateTimeOffset.FromUnixTimeSeconds(candidate.Row.DecidedAt))} ago)";
+
+            rows.Add(suppressed.TryGetValue(identity, out var reason)
+                ? new Diagnosis("indexing/enrollment", DiagnosisState.Warn, $"{detail}; {SuppressionExplanation(reason)}")
+                : new Diagnosis("indexing/enrollment", DiagnosisState.Warn, detail, "engram repo index --all --apply"));
+        }
+
+        // §3.3's mitigation for §9 OQ-2 — a default-off background indexer nobody discovers. The
+        // key is introduced by a later commit, so there is no typed setting to read yet; the raw
+        // presence check is the same one EmbeddingSettings.Ignored uses for a retired key.
+        if (config.Raw("indexing", "auto_index_in_background") is null)
+        {
+            var last = rows[^1];
+            rows[^1] = last with
+            {
+                Detail = last.Detail
+                    + " engram can index enrolled repos in the background automatically — set "
+                    + "auto_index_in_background = true under [indexing] in config.toml.",
+            };
+        }
+
+        return rows;
+    }
+
+    private static Dictionary<string, string> ReadSuppressionReasons(SqliteConnection connection)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT identity, last_scan_suppressed_reason
+            FROM repo_registry
+            WHERE last_scan_suppressed_reason IS NOT NULL;
+            """;
+
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            result[reader.GetString(0)] = reader.GetString(1);
+        }
+
+        return result;
+    }
+
+    private static string SuppressionExplanation(string reason) => reason switch
+    {
+        "truncated" => "the last full scan could not read part of the repo, so its deletions were skipped",
+        "empty-scan" => "the last full scan found no files against an already-indexed repo, so its deletions were skipped",
+        _ => "the last full scan skipped its deletions",
+    };
+
+    private static string Age(TimeSpan age)
+    {
+        if (age < TimeSpan.Zero)
+        {
+            age = TimeSpan.Zero;
+        }
+
+        return age.TotalDays >= 1 ? $"{(int)age.TotalDays}d"
+            : age.TotalHours >= 1 ? $"{(int)age.TotalHours}h"
+            : age.TotalMinutes >= 1 ? $"{(int)age.TotalMinutes}m"
+            : $"{(int)age.TotalSeconds}s";
+    }
+
+    private static string Bytes(long bytes) =>
+        bytes >= 1024L * 1024 * 1024 ? $"{bytes / 1024.0 / 1024 / 1024:0.0} GB"
+        : bytes >= 1024 * 1024 ? $"{bytes / 1024.0 / 1024:0.0} MB"
+        : bytes >= 1024 ? $"{bytes / 1024.0:0} KB"
+        : $"{bytes} B";
+
+    private static string Plural(long count, string noun) =>
+        count == 1
+            ? $"1 {noun}"
+            : $"{count.ToString(CultureInfo.InvariantCulture)} {noun}s";
+}

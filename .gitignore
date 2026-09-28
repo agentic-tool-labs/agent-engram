@@ -1,0 +1,47 @@
+# Build output
+bin/
+obj/
+artifacts/
+publish/
+out/
+*.binlog
+
+# Native AOT / publish intermediates
+*.dSYM/
+*.pdb
+*.dbg
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# macOS
+.DS_Store
+
+# Test output
+TestResults/
+coverage/
+*.trx
+*.coverage
+*.coverlet.json
+
+# Local scratch — spikes write here, never committed
+scratch/
+
+# Engram runtime state must never be committed
+*.db
+*.db-wal
+*.db-shm
+
+# The plugin ships no binary — its hooks resolve an installed one (D13). Kept
+# ignored so a stale bundled copy from before that change can never be committed.
+plugin/bin/
+
+# Written by the MCP description golden test on mismatch; never committed.
+*.golden.txt.actual
+
+# The .NET SDK install.sh bootstraps privately when the machine has none
+.dotnet/
