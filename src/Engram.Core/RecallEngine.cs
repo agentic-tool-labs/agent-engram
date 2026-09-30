@@ -640,7 +640,12 @@ public static class RecallEngine
         var version = fact.Versions > 1 ? $" · v{fact.Versions}" : string.Empty;
         var judged = fact.Judged ? " · judged" : string.Empty;
 
-        return $"[{fact.Id}] {shownBody} ({fact.Scope} · {fact.AgeDays}d{version}{judged}{marker})";
+        var location = fact.Scope == "code" && fact.SubjectPath is not null
+            && CodePaths.ElidedLocationText(fact.SubjectPath) is { } text
+                ? $" · {text}"
+                : string.Empty;
+
+        return $"[{fact.Id}] {shownBody} ({fact.Scope}{location} · {fact.AgeDays}d{version}{judged}{marker})";
     }
 
     /// <summary>

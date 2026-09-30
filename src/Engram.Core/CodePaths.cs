@@ -94,6 +94,60 @@ public static class CodePaths
         return (repoPath, relativePath);
     }
 
+    /// <summary>Longest <c>&lt;repo&gt;:&lt;rel&gt;</c> token a recall line carries before leading directories are elided.</summary>
+    public const int MaxLocationChars = 64;
+
+    /// <summary>
+    /// The repo slug and file-relative path a code subject addresses, or null when
+    /// <paramref name="path"/> is not under a repo root. The one derivation every display of
+    /// "which file is this" goes through.
+    /// </summary>
+    public static (string Repo, string Relative)? LocationOf(string path)
+    {
+        if (SplitRepoPath(path) is not var (repoPath, relative))
+        {
+            return null;
+        }
+
+        return (repoPath[(repoPath.LastIndexOf('/') + 1)..], relative);
+    }
+
+    /// <summary><c>&lt;repo&gt;:&lt;rel&gt;</c>, whole.</summary>
+    public static string? LocationText(string path) =>
+        LocationOf(path) is var (repo, relative) ? $"{repo}:{relative}" : null;
+
+    /// <summary>
+    /// <see cref="LocationText"/> for a line with limited room: leading directories are dropped a
+    /// whole segment at a time behind <c>…/</c> until the token fits <see cref="MaxLocationChars"/>.
+    /// The repo slug and the file name always survive, even when that leaves it over the limit.
+    /// </summary>
+    public static string? ElidedLocationText(string path)
+    {
+        if (LocationOf(path) is not var (repo, relative))
+        {
+            return null;
+        }
+
+        var whole = $"{repo}:{relative}";
+        if (whole.Length <= MaxLocationChars)
+        {
+            return whole;
+        }
+
+        var segments = relative.Split('/');
+        var candidate = whole;
+        for (var dropped = 1; dropped < segments.Length; dropped++)
+        {
+            candidate = $"{repo}:…/{string.Join('/', segments[dropped..])}";
+            if (candidate.Length <= MaxLocationChars)
+            {
+                break;
+            }
+        }
+
+        return candidate;
+    }
+
     /// <summary>
     /// Lowercased, every run outside <c>[a-z0-9]</c> collapsed to one <c>-</c>, ends
     /// trimmed. Shared by project names, repo names, and doc-section headings so one rule

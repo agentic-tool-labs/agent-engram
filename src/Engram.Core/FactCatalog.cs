@@ -114,7 +114,8 @@ public static class FactCatalog
         Evidence: fact.Evidence,
         Versions: versions > 1 ? versions : 1,
         DetailsChars: fact.Details?.Length ?? 0,
-        Judged: judged);
+        Judged: judged,
+        SubjectPath: fact.SubjectPath);
 
     /// <summary>
     /// The display text of a fact's topic: the second path segment, resolved through the
