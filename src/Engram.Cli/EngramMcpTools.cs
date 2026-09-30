@@ -377,9 +377,9 @@ public sealed class EngramMcpTools
         {
             "history" => ExpandHistory(connection, fact),
             "related" => ExpandRelated(connection, fact),
-            "evidence" => ExpandEvidence(fact),
+            "evidence" => ExpandEvidence(connection, fact),
             "source" => ExpandSource(connection, fact),
-            "details" => ExpandDetails(fact, budget_tokens, offset),
+            "details" => ExpandDetails(connection, fact, budget_tokens, offset),
             _ => $"Unknown view '{view}'. The views are history, related, evidence, source, and details.",
         };
     }
@@ -1650,7 +1650,7 @@ public sealed class EngramMcpTools
         return builder.ToString().TrimEnd('\n');
     }
 
-    private static string ExpandEvidence(StoredFact fact)
+    private static string ExpandEvidence(SqliteConnection connection, StoredFact fact)
     {
         var evidence = string.IsNullOrWhiteSpace(fact.Evidence)
             ? "No evidence was recorded with this fact."
@@ -1660,20 +1660,27 @@ public sealed class EngramMcpTools
             ? " It is regenerable — the indexer can recompute it from source, and 'engram index' refreshes it."
             : " It is not regenerable: it exists only because it was recorded, and nothing can recompute it.";
 
-        return $"[{FactCatalog.HandleFor(fact.Id)}] {evidence} Learned via '{fact.LearnedVia}', "
+        var text = $"[{FactCatalog.HandleFor(fact.Id)}] {evidence} Learned via '{fact.LearnedVia}', "
             + $"recorded {When(fact.CreatedAt)}.{regenerable}";
+
+        return IndexedCodeNote.Build(connection, fact) is { } note ? text + "\n" + note : text;
     }
 
     private static string ExpandSource(SqliteConnection connection, StoredFact fact)
     {
         var sitting = MemoryBrowser.Sitting(connection, fact.Id);
-        var origin = sitting is { } s
-            ? $"recorded in session {s.ExternalId} (started {When(s.StartedAt)})"
-            : "recorded outside any tracked session — seeded, indexed, or written by the CLI";
+        var indexedFrom = IndexedCodeNote.LocationOf(fact);
+        var origin = indexedFrom is not null
+            ? $"indexed from {indexedFrom}"
+            : sitting is { } s
+                ? $"recorded in session {s.ExternalId} (started {When(s.StartedAt)})"
+                : "recorded outside any tracked session — seeded, indexed, or written by the CLI";
 
-        return $"[{FactCatalog.HandleFor(fact.Id)}] was {origin}, learned via '{fact.LearnedVia}' "
+        var text = $"[{FactCatalog.HandleFor(fact.Id)}] was {origin}, learned via '{fact.LearnedVia}' "
             + $"on {When(fact.CreatedAt)}."
             + (fact.ValidTo is { } closed ? $" It was closed {When(closed)}." : " It is currently believed.");
+
+        return IndexedCodeNote.Build(connection, fact) is { } note ? text + "\n" + note : text;
     }
 
     // Shared by engram_remember and engram_revise so the ceiling and its wording cannot
@@ -1714,9 +1721,13 @@ public sealed class EngramMcpTools
         return null;
     }
 
-    private static string ExpandDetails(StoredFact fact, int budgetTokens, int offset)
+    private static string ExpandDetails(SqliteConnection connection, StoredFact fact, int budgetTokens, int offset)
     {
         var text = fact.Details is null ? fact.Body : fact.Body + "\n\n" + fact.Details;
+        if (IndexedCodeNote.Build(connection, fact) is { } note)
+        {
+            text += "\n\n" + note;
+        }
 
         if (offset < 0 || offset >= text.Length)
         {

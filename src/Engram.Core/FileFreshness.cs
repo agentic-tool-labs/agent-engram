@@ -47,7 +47,7 @@ public static class FileFreshness
         Missing,
     }
 
-    public readonly record struct Verdict(State State, TimeSpan Behind)
+    public readonly record struct Verdict(State State, TimeSpan Behind, string? File = null)
     {
         public static readonly Verdict Unknown = new(FileFreshness.State.Unknown, TimeSpan.Zero);
 
@@ -98,7 +98,7 @@ public static class FileFreshness
             var file = Path.Combine(diskPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
             if (!File.Exists(file))
             {
-                return new Verdict(State.Missing, TimeSpan.Zero);
+                return new Verdict(State.Missing, TimeSpan.Zero, file);
             }
 
             // indexed_at has second resolution, so a write inside the same second as the index run
@@ -107,8 +107,8 @@ public static class FileFreshness
                 - DateTimeOffset.FromUnixTimeSeconds(indexedAt.Value).UtcDateTime;
 
             return behind > TimeSpan.FromSeconds(1)
-                ? new Verdict(State.Stale, behind)
-                : new Verdict(State.Fresh, TimeSpan.Zero);
+                ? new Verdict(State.Stale, behind, file)
+                : new Verdict(State.Fresh, TimeSpan.Zero, file);
         }
         catch (SqliteException)
         {
