@@ -5297,3 +5297,62 @@ It never opens the database — the whole point is that a session's tool use bec
 the log alone. This is measurement only: the observer decides nothing and emits no output, and any
 nudge built on what it shows is a later, separately gated decision
 (`docs/proactive-remember-adoption-spec.md`).
+
+
+## D74 — Code facts say which file they describe, and a miss says where to look next
+
+**Decision.** Four readability gaps in how an indexed code fact reaches the model, settled without a
+schema change, a migration or an `AnalyzerVersion` bump.
+
+**The location token names the repo.** A code fact's recall line carries `<repo>:<rel path>` right
+after the scope, because a gist describes a symbol and never says where it lives. A bare relative
+path would not do: one recall on this repository returned four live facts with identical bodies —
+the same file indexed under four repo roots — and `ux_fact_live` allows them because the subject
+paths differ. The token is left-elided by whole directory segments to 64 characters, never cutting
+the repo slug or the file name. It keys on scope, not regenerability: a revised code-scope fact
+still addresses a file (D2). It is rendered inside `FormatFactLine`, so the budget's estimate, taken
+on the finished line, pays for it by construction; `CannedFact` gained an optional trailing
+`SubjectPath` so the object ranker's line and the SQL ranker's line stay identical (D30).
+
+**Expand says where the file is, because the gist is all Engram holds.** `engram_expand` on an
+indexed code fact (scope `code` and `Regenerable`) appends one shared note to the evidence, source
+and details views: repo and file, the on-disk path with its freshness, that only the gist is kept,
+and the `engram_navigate` call that answers structure, chosen by `entity.kind` because `#` introduces
+symbols and markdown sections alike. `FileFreshness` remains the single resolver from entity path to
+disk file — its verdict now carries the file it checked, rather than a second `repo_registry` query
+appearing beside it. Storing full chunks was rejected (a copy of readable source, growing the store
+by the size of every indexed repo); storing line ranges was rejected (a line number in a body turns
+every edit above a symbol into a new version of that fact, history churn with no belief change).
+
+**A browse miss names the nearest path that exists.** `MemoryBrowser.NearestAncestor` walks prefixes
+cut at `/` or `#` and asks membership as index range probes instead of Browse's `substr` scan, which
+would cost a full table scan per candidate. The range bounds assume BINARY collation on
+`entity.path`; `NearestAncestor_AgreesWithBrowseMembership` compares the probe against Browse itself
+over every seeded path and its ancestors, which is what catches that assumption failing. Roots are
+listed only when nothing below `/` matched. No CLI change: the TUI loop starts at `/` and descends
+only into listed paths, so its miss is an empty store.
+
+**Rejected: a recall `repo` filter.** It would have to sit inside each lane, because `seed_k` caps
+each at 32 (D60) and post-filtering starves the result into the false `coverage: none` that D44 and
+the availability note exist to prevent; in-lane filtering redesigns the single ranking statement
+(D59) across FTS, the token-overlap lane and sqlite-vec KNN, which has no path predicate, and then
+needs the 50k latency re-measured and `explain` mirrored. `engram_navigate` already takes `repo`
+for code by name, and the location token now puts the repo on every code line. No description
+sentence was added for it either — `engram_navigate`'s own description already says it.
+
+**The tool-surface ceiling was held at 6,550 by trimming, not re-baselined.** The code path form
+went into the existing "Paths look like" sentence and the `path` parameter lost its example, a net
++20 characters. The ceiling's own comment reserves re-baselines for features whose cost cannot be
+carried; prose that can be carried is not one.
+
+**Deferred: YAML/Helm extraction.** `.yaml` still yields one prose `about` fact. An
+`AnalyzerVersion` bump is store-wide and forces a re-read of the next repo indexed, while whether it
+reaches other repos is itself unsettled ("D-code-nav gap b"); there is no YAML parser in Core and
+Helm templates are not valid YAML. A future spec should bound it to top-level keys, cap it, skip
+`{{ … }}` lines, and settle the bump's reach first.
+
+**Two things worth knowing.** `Pack` does not charge the digest header and footer against the budget
+— by design, and true for non-code lines too — so the guarantee the tests hold is that the packed
+lines' summed estimates stay within it. And the expand tests' first paging guard passed with the
+note appended *outside* the paged text, because a small body concatenates identically either way;
+it only failed once it asserted per-page length and a page count.
