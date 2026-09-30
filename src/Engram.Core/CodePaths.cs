@@ -114,7 +114,10 @@ public static class CodePaths
 
     /// <summary><c>&lt;repo&gt;:&lt;rel&gt;</c>, whole.</summary>
     public static string? LocationText(string path) =>
-        LocationOf(path) is var (repo, relative) ? $"{repo}:{relative}" : null;
+        LocationOf(path) is var (repo, relative) ? LocationText(repo, relative) : null;
+
+    /// <summary>The one spelling of <c>&lt;repo&gt;:&lt;rel&gt;</c>, for a caller that already holds both halves.</summary>
+    public static string LocationText(string repo, string relative) => $"{repo}:{relative}";
 
     /// <summary>
     /// <see cref="LocationText"/> for a line with limited room: leading directories are dropped a
@@ -128,7 +131,7 @@ public static class CodePaths
             return null;
         }
 
-        var whole = $"{repo}:{relative}";
+        var whole = LocationText(repo, relative);
         if (whole.Length <= MaxLocationChars)
         {
             return whole;
@@ -138,7 +141,7 @@ public static class CodePaths
         var candidate = whole;
         for (var dropped = 1; dropped < segments.Length; dropped++)
         {
-            candidate = $"{repo}:…/{string.Join('/', segments[dropped..])}";
+            candidate = LocationText(repo, $"…/{string.Join('/', segments[dropped..])}");
             if (candidate.Length <= MaxLocationChars)
             {
                 break;

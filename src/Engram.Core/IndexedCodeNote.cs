@@ -13,26 +13,31 @@ public static class IndexedCodeNote
     /// Only an indexer-written fact is a gist. A <c>code</c>-scope fact recorded through revise is
     /// authored truth (<c>Regenerable</c> false) and must not be described as one.
     /// </summary>
+    private static bool IsIndexed(StoredFact fact) => fact is { Scope: "code", Regenerable: true };
+
     public static string? LocationOf(StoredFact fact) =>
-        fact is { Scope: "code", Regenerable: true } ? CodePaths.LocationText(fact.SubjectPath) : null;
+        IsIndexed(fact) ? CodePaths.LocationText(fact.SubjectPath) : null;
 
     /// <summary>Null unless <paramref name="fact"/> is an indexed code fact with a location.</summary>
     public static string? Build(SqliteConnection connection, StoredFact fact)
     {
-        if (CodePaths.LocationOf(fact.SubjectPath) is not var (repo, relative) || LocationOf(fact) is null)
+        if (!IsIndexed(fact) || CodePaths.LocationOf(fact.SubjectPath) is not var (repo, relative))
         {
             return null;
         }
 
         var note = new System.Text.StringBuilder();
-        note.Append("Indexed code: ").Append(repo).Append(':').Append(relative)
+        note.Append("Indexed code: ").Append(CodePaths.LocationText(repo, relative))
             .Append(" (").Append(fact.SubjectPath).Append(")\n");
 
+        // A file that is gone is reported as where it was: "read it" would send the caller to a
+        // tool call that can only fail.
         var freshness = FileFreshness.Check(connection, fact.SubjectPath);
         if (freshness.File is not null)
         {
-            note.Append("Read it at ").Append(freshness.File)
-                .Append(freshness.IsWorthReporting ? $" ({freshness.Label})" : string.Empty).Append(".\n");
+            note.Append(freshness.State == FileFreshness.State.Missing
+                ? $"Was at {freshness.File} ({freshness.Label}).\n"
+                : $"Read it at {freshness.File}{(freshness.IsWorthReporting ? $" ({freshness.Label})" : string.Empty)}.\n");
         }
 
         note.Append("Engram keeps only this indexed gist (~60 tokens), not the source — "

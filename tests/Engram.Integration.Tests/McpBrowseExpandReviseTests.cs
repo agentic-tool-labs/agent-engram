@@ -514,6 +514,63 @@ public class McpBrowseExpandReviseTests
         Assert.DoesNotContain("indexed from", Expand(sandbox, id, "source"), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("details")]
+    [InlineData("evidence")]
+    [InlineData("source")]
+    public void Expand_IndexedCodeFact_EveryNoteView_CarriesAllElements(string view)
+    {
+        using var sandbox = new SandboxHome();
+        var disk = DiskCheckout();
+        try
+        {
+            long id;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                id = WriteIndexed(connection, RepoPath + "/src/a.cs#Foo", "symbol", GistBody);
+                RegisterRepo(connection, disk, "src/a.cs");
+            }
+
+            var result = Expand(sandbox, id, view);
+
+            Assert.Contains("r:src/a.cs", result, StringComparison.Ordinal);
+            Assert.Contains(Path.Combine(disk, "src", "a.cs"), result, StringComparison.Ordinal);
+            Assert.Contains("only this indexed gist", result, StringComparison.Ordinal);
+            Assert.Contains("engram_navigate \"Foo\"", result, StringComparison.Ordinal);
+            Assert.Contains("repo \"r\"", result, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Expand_IndexedCodeFact_MissingFile_SaysWasAtNotRead()
+    {
+        using var sandbox = new SandboxHome();
+        var disk = DiskCheckout();
+        try
+        {
+            long id;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                id = WriteIndexed(connection, RepoPath + "/src/gone.cs#Foo", "symbol", GistBody);
+                RegisterRepo(connection, disk, "src/gone.cs");
+            }
+
+            var result = Expand(sandbox, id, "details");
+
+            Assert.Contains(
+                $"Was at {Path.Combine(disk, "src", "gone.cs")} (missing).", result, StringComparison.Ordinal);
+            Assert.DoesNotContain("Read it at", result, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
     [Fact]
     public void Expand_IndexedCodeFact_Details_PagesAcrossTheNote()
     {
