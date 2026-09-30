@@ -24,6 +24,70 @@ public static class MemoryBrowser
 
     public const int MaxDepth = 3;
 
+    private static string Normalize(string path)
+    {
+        var normalized = path.TrimEnd('/');
+        return normalized.Length == 0 ? "/" : normalized;
+    }
+
+    /// <summary>
+    /// The deepest prefix of <paramref name="path"/> that <see cref="Browse"/> would answer, or null
+    /// when the store holds no entity at all — what a caller shows after a miss so the next call can
+    /// land. Prefixes are cut at the last <c>/</c> or <c>#</c>, so a missing symbol falls back to its
+    /// file rather than its directory, and the walk ends at <c>/</c>.
+    /// </summary>
+    /// <remarks>
+    /// Membership is Browse's rule — an entity at the path, or one continuing with <c>/</c> or
+    /// <c>#</c> — asked as index range probes rather than Browse's <c>substr</c> scan, which would
+    /// cost a full table scan per candidate. The bounds assume <c>entity.path</c> compares BINARY
+    /// (<c>/</c> is 0x2F and <c>0</c> 0x30; <c>#</c> is 0x23 and <c>$</c> 0x24), which
+    /// <c>NearestAncestor_AgreesWithBrowseMembership</c> is there to catch if it ever stops being true.
+    /// </remarks>
+    public static string? NearestAncestor(SqliteConnection connection, string path)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(path);
+
+        var candidate = Normalize(path);
+        while (candidate != "/")
+        {
+            if (HasEntityAtOrBeneath(connection, candidate))
+            {
+                return candidate;
+            }
+
+            var cut = candidate.LastIndexOfAny(['/', '#']);
+            candidate = cut <= 0 ? "/" : candidate[..cut];
+        }
+
+        return HasEntityAtOrBeneath(connection, "/") ? "/" : null;
+    }
+
+    private static bool HasEntityAtOrBeneath(SqliteConnection connection, string path)
+    {
+        using var command = connection.CreateCommand();
+        if (path == "/")
+        {
+            command.CommandText = "SELECT EXISTS (SELECT 1 FROM entity);";
+        }
+        else
+        {
+            command.CommandText =
+                """
+                SELECT EXISTS (SELECT 1 FROM entity WHERE path = $path)
+                    OR EXISTS (SELECT 1 FROM entity WHERE path >= $slash AND path < $slashEnd)
+                    OR EXISTS (SELECT 1 FROM entity WHERE path >= $hash AND path < $hashEnd);
+                """;
+            command.Parameters.AddWithValue("$path", path);
+            command.Parameters.AddWithValue("$slash", path + "/");
+            command.Parameters.AddWithValue("$slashEnd", path + "0");
+            command.Parameters.AddWithValue("$hash", path + "#");
+            command.Parameters.AddWithValue("$hashEnd", path + "$");
+        }
+
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0;
+    }
+
     /// <summary>
     /// One query for the whole subtree, accumulated into a tree in a single pass over the
     /// rows as they stream from the reader (docs/memory-expansion/05b-browse-depth-bound-spec.md).
@@ -36,11 +100,7 @@ public static class MemoryBrowser
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(path);
 
-        var normalized = path.TrimEnd('/');
-        if (normalized.Length == 0)
-        {
-            normalized = "/";
-        }
+        var normalized = Normalize(path);
 
         depth = Math.Clamp(depth, 1, MaxDepth);
 

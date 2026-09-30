@@ -70,6 +70,64 @@ public class McpBrowseExpandReviseTests
     }
 
     [Fact]
+    public void Browse_OnAStoreWithNoEntities_KeepsTheOriginalMissTextExactly()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Execute(connection, "DELETE FROM entity;");
+        }
+
+        var result = EngramMcpTools.Browse(
+            sandbox.Home, new McpSessionId("s"), Initialized, "/nowhere/at/all");
+
+        Assert.Equal(
+            "Nothing in memory under /nowhere/at/all. Browse lists structure that exists; "
+                + "engram_recall searches by content and does not need a path.",
+            result);
+    }
+
+    [Fact]
+    public void Browse_DeepMiss_ShowsTheNearestPathThatExistsAndItsChildren()
+    {
+        using var sandbox = new SandboxHome();
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Write(connection, "/projects/miss-test/code/engram/src/Core/a.cs", "declared-as", "a");
+            Write(connection, "/projects/miss-test/code/engram/src/Cli/b.cs", "declared-as", "b");
+        }
+
+        var result = EngramMcpTools.Browse(
+            sandbox.Home, new McpSessionId("s"), Initialized, "/projects/miss-test/code/engram/src/Foo.cs");
+
+        Assert.StartsWith("Nothing in memory under /projects/miss-test/code/engram/src/Foo.cs.\n", result, StringComparison.Ordinal);
+        Assert.Contains(
+            "Nearest path that exists: /projects/miss-test/code/engram/src — 0 facts here, 2 under it\n", result, StringComparison.Ordinal);
+        Assert.Contains("  Core — 1 fact\n", result, StringComparison.Ordinal);
+        Assert.Contains("  Cli — 1 fact\n", result, StringComparison.Ordinal);
+        Assert.Contains("/projects/<project>/code/<repo>/<file path>", result, StringComparison.Ordinal);
+        Assert.EndsWith("needs no path.", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Browse_TopLevelMiss_ListsTheRoots()
+    {
+        using var sandbox = new SandboxHome();
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Write(connection, "/projects/root-test", "decided", "x");
+            Write(connection, "/people/root-jim", "likes", "y");
+        }
+
+        var result = EngramMcpTools.Browse(
+            sandbox.Home, new McpSessionId("s"), Initialized, "nowhere/relative");
+
+        Assert.Contains("Nearest path that exists: / — ", result, StringComparison.Ordinal);
+        Assert.Contains("  projects — ", result, StringComparison.Ordinal);
+        Assert.Contains("  people — ", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Revise_ClosesTheOldBelief_AndRecordsTheReason()
     {
         using var sandbox = new SandboxHome();

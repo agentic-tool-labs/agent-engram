@@ -1,7 +1,7 @@
 tool: engram_browse
-List what Engram's memory holds under a path — children, fact counts, and the top facts at that node. A table of contents, not a search: engram_recall finds facts by content, this shows how an area is organised. Paths look like /people/jim or /projects/acme.
+List what Engram's memory holds under a path — children, fact counts, and the top facts at that node. A table of contents, not a search: engram_recall finds facts by content, this shows how an area is organised. Paths look like /people/jim or /projects/acme/code/<repo>/<file>#Symbol (indexed code).
   param: path
-  The memory path to list, e.g. /projects/acme.
+  The memory path to list.
   param: depth
   Levels of children to show, 1-3. Defaults to 1.
 
