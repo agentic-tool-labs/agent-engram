@@ -39,13 +39,32 @@ public static class PathContainment
     }
 
     /// <summary>
-    /// Whether <paramref name="path"/> lies inside <paramref name="root"/> once every symlink in both —
-    /// the final component included, since the file itself may be a link — has been followed. A root
-    /// that sits under a symlinked directory resolves the same way the file does, so it still passes.
-    /// Fails closed: a link that cannot be inspected, or a chain too long to follow, counts as outside.
+    /// Whether any segment of <paramref name="path"/> below <paramref name="root"/>, the last one
+    /// included, is a symlink. Nothing is resolved or followed: with no empty, <c>.</c> or <c>..</c>
+    /// segment (see <see cref="IsSafeRelative"/>) and no link below the root, the path the OS opens is
+    /// the path that was checked. The root itself is trusted, so a checkout under a linked directory
+    /// is not refused. A segment that does not exist ends the walk, since nothing beneath it can be a link.
     /// </summary>
-    public static bool IsPhysicallyWithin(string root, string path) =>
-        PathCanonicalizer.TryCanonical(root) is { } resolvedRoot
-        && PathCanonicalizer.TryCanonical(path) is { } resolvedPath
-        && IsWithin(resolvedRoot, resolvedPath);
+    public static bool HasLinkBelow(string root, string path)
+    {
+        var current = root;
+        foreach (var segment in Path.GetRelativePath(root, path).Split(Path.DirectorySeparatorChar))
+        {
+            current = Path.Combine(current, segment);
+
+            // LinkTarget is readlink: set for any link whatever it points at, even nothing. Attributes
+            // is not usable here, it reads as every flag set for a path that does not exist.
+            if (new FileInfo(current).LinkTarget is not null)
+            {
+                return true;
+            }
+
+            if (!File.Exists(current) && !Directory.Exists(current))
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
 }

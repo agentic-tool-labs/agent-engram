@@ -30,11 +30,10 @@ public static class CodeSourceReader
 
         try
         {
-            // First, so a path the OS refuses to follow (a link chain past its own limit reads as Missing)
-            // is still reported as an escape rather than as an absent file.
-            if (!PathContainment.IsPhysicallyWithin(root, file))
+            // Before absence, so the reason never reveals whether something exists behind a link.
+            if (PathContainment.HasLinkBelow(root, file))
             {
-                return new SourceRead(null, "outside the repo");
+                return new SourceRead(null, "symlinked path");
             }
 
             // A directory at the indexed path also reads as Missing to File.Exists; only an empty spot is gone.

@@ -81,26 +81,76 @@ public sealed class CodeSourceReaderTests : IDisposable
         Assert.Equal("location unknown", Read(entry).Reason);
     }
 
-    [Fact]
-    public void LinkOutOfTheCheckout_IsRefused_AndNoOutsideByteIsReturned()
+    // Content stays null, so no byte of whatever the link leads to can reach the output.
+    private static void AssertRefusedAsLink(SourceRead read)
     {
-        File.CreateSymbolicLink(Path.Combine(root, "src", "link.cs"), outside);
-
-        var entry = Register("src/link.cs");
-        var read = Read(entry);
-
-        Assert.Equal(FileFreshness.State.Fresh, entry.Verdict.State);
-        Assert.Equal("outside the repo", read.Reason);
+        Assert.Equal("symlinked path", read.Reason);
         Assert.Null(read.Content);
     }
 
     [Fact]
-    public void LinkInsideTheCheckout_ReturnsContent()
+    public void FileLinkedToSomethingOutsideTheCheckout_IsRefused()
     {
-        File.WriteAllText(Path.Combine(root, "src", "real.cs"), "class Real {}");
-        File.CreateSymbolicLink(Path.Combine(root, "src", "alias.cs"), Path.Combine(root, "src", "real.cs"));
+        File.CreateSymbolicLink(Path.Combine(root, "src", "link.cs"), outside);
 
-        Assert.Equal("class Real {}", Read(Register("src/alias.cs")).Content);
+        var entry = Register("src/link.cs");
+
+        Assert.Equal(FileFreshness.State.Fresh, entry.Verdict.State);
+        AssertRefusedAsLink(Read(entry));
+    }
+
+    [Fact]
+    public void FileLinkedToSomethingInsideTheCheckout_IsRefusedToo_ByDesign()
+    {
+        File.WriteAllText(Path.Combine(root, "README.md"), "inside");
+        Directory.CreateDirectory(Path.Combine(root, "docs"));
+        File.CreateSymbolicLink(Path.Combine(root, "docs", "readme.md"), "../README.md");
+
+        AssertRefusedAsLink(Read(Register("docs/readme.md")));
+    }
+
+    [Fact]
+    public void DirectoryLinkedOutsideTheCheckout_RefusesAFileBeneathIt()
+    {
+        var elsewhere = Path.Combine(Path.GetDirectoryName(root)!, "elsewhere");
+        Directory.CreateDirectory(elsewhere);
+        File.WriteAllText(Path.Combine(elsewhere, "x.md"), "SECRET-VIA-DIRECTORY");
+        Directory.CreateSymbolicLink(Path.Combine(root, "D"), elsewhere);
+
+        AssertRefusedAsLink(Read(Register("D/x.md")));
+    }
+
+    // D -> <outside>/a/b and f.md -> D/../x.md: folding the dot-dot as text before following D lands
+    // inside the checkout, while the OS opens <outside>/a/x.md.
+    [Fact]
+    public void ADotDotInsideALinkTarget_CannotReachAFileOutside()
+    {
+        var elsewhere = Path.Combine(Path.GetDirectoryName(root)!, "dotdot");
+        Directory.CreateDirectory(Path.Combine(elsewhere, "a", "b"));
+        File.WriteAllText(Path.Combine(elsewhere, "a", "x.md"), "SECRET-VIA-DOTDOT");
+        Directory.CreateSymbolicLink(Path.Combine(root, "D"), Path.Combine(elsewhere, "a", "b"));
+        File.CreateSymbolicLink(Path.Combine(root, "f.md"), "D/../x.md");
+
+        AssertRefusedAsLink(Read(Register("f.md")));
+    }
+
+    [Fact]
+    public void ALinkCycle_IsRefusedPromptly_WithoutAHangOrAnException()
+    {
+        File.CreateSymbolicLink(Path.Combine(root, "cyc-a"), "cyc-b");
+        File.CreateSymbolicLink(Path.Combine(root, "cyc-b"), "cyc-a");
+
+        var read = Read(Register("cyc-a/x.md"));
+
+        AssertRefusedAsLink(read);
+    }
+
+    [Fact]
+    public void AnAbsentIntermediateDirectory_IsMissing_NotALink()
+    {
+        var entry = Register("gone/x.md");
+
+        Assert.Equal("file missing", Read(entry).Reason);
     }
 
     [Fact]
@@ -180,33 +230,11 @@ public sealed class CodeSourceReaderTests : IDisposable
     }
 
     [Fact]
-    public void TenNestedLinksEndingOutside_AreRefused_WhereTheLenientCapWouldLetThemThrough()
+    public void TenNestedDirectoryLinks_AreRefused()
     {
-        var entry = Register(LinkChain(10, Path.Combine(Path.GetDirectoryName(root)!, "elsewhere")));
+        var entry = Register(LinkChain(10, Path.Combine(Path.GetDirectoryName(root)!, "chained")));
 
-        var read = Read(entry);
-
-        Assert.Equal("outside the repo", read.Reason);
-        Assert.Null(read.Content);
-    }
-
-    [Fact]
-    public void ALinkChainPastTheCap_IsRefused()
-    {
-        var entry = Register(LinkChain(33, Path.Combine(Path.GetDirectoryName(root)!, "elsewhere")));
-
-        var read = Read(entry);
-
-        Assert.Equal("outside the repo", read.Reason);
-        Assert.Null(read.Content);
-    }
-
-    [Fact]
-    public void TenNestedLinksEndingInside_StillRead()
-    {
-        var entry = Register(LinkChain(10, Path.Combine(root, "inner")));
-
-        Assert.Equal("CHAIN-BYTES", Read(entry).Content);
+        AssertRefusedAsLink(Read(entry));
     }
 
     [Fact]
