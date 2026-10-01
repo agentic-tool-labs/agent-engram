@@ -1,8 +1,9 @@
 name: CI
 
+# Manual only: run it from the Actions tab before a release. On every push and PR it ran
+# the whole three-OS matrix twice per branch and nothing gated on the result.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
