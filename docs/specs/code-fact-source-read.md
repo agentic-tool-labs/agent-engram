@@ -10,6 +10,17 @@ wins. Every such point is named in §6.
 Decision record: **D75** in `docs/engram-implementation-plan.md` (D74 is the highest heading at
 plan.md:5302; confirm `D75` is unused before writing it).
 
+> **Amendment 1 (rev 2): rulings on review sr-review (20260930-203339-c4gc)**
+>
+> 1. **Blocking: physical containment must fail closed.** §3 step 2 is rewritten. It adds a strict canonicalisation (cap of 32 link resolutions; any uninspectable link or the cap means refuse), adds rows R2b–R2d, and adds falsification arms F8 and F8b.
+> 2. **Should-fix: tier-2 lines are counted by `'\n'`, not by Roslyn's line map.** This changes the tier-2 row in §2, the sidecar protocol, and S5 (lone CR and NEL rows). §4 gains an out-of-range guard. New AC D12 and arms F9 and F10.
+> 3. **§3 step 0:** `file missing` now requires that nothing exists at the path. A directory falls through to `not a regular file`.
+> 4. **`FileFreshness.Verdict` gains `Root`.** The physical check uses it; the root is no longer recovered from the file path by string surgery (§3).
+> 5. **D75 wording is fixed** (new §12): the containment paragraph, the `'\n'` rule, and the residual risk from the indexer reading through symlinks.
+> 6. **D2 gains a C# member row**, kept beside the markdown row.
+>
+> Rework steps are in §8 under "Rework (rev 2)". Section numbers are unchanged.
+
 ---
 
 ## 0. Goal and decisions
@@ -92,7 +103,7 @@ written anywhere.
 |---|---|
 | file (path with no `#`) | `1 … N`, where N is the line count. A trailing newline does not add an empty last line. |
 | symbol, from tier 1 | The start and end lines of the declaration node that tier 1 already pairs with the symbol's name node for call attribution. Byte offsets become lines through the existing UTF-8-aware helper (`LineNumberAt`/`NewlineOffsets`, TreeSitter.cs:552-570), never by counting chars. |
-| symbol, from tier 2 | The start and end lines of the declaration syntax node's `Span`: attributes and modifiers included, leading trivia (doc comments) excluded. The sidecar emits these lines; the client parses them. |
+| symbol, from tier 2 | The declaration syntax node's `Span`: attributes and modifiers included, leading trivia (doc comments) excluded. The sidecar emits the lines and the client parses them. **(rev 2)** The sidecar counts lines by `'\n'` in the source text it was sent: start = 1 + the number of `'\n'` before `Span.Start`; end = 1 + the number of `'\n'` before `Span.End − 1` (the span's last character). It must **not** use `GetLineSpan` or `SourceText.Lines`, because Roslyn also breaks lines on a lone `\r` and on U+0085 (NEL); the review probe reproduced both. Every such character above a member would shift its span away from the `'\n'` numbering the reader uses. |
 | symbol, from tier 0 (regex, top level only) | Start is the line of the regex match. End is the line before the next tier-0 declaration's start line in the same file, or N, with trailing blank lines then dropped. |
 | section (markdown) | From the heading's line to the line before the next heading at the same or a shallower level, or N, with trailing blank lines dropped. Headings are recognised exactly as the analyzer already recognises them (fenced code included or excluded as it does today). For a duplicate fragment, the first occurrence's range. |
 
@@ -111,7 +122,7 @@ written anywhere.
 If spans become a field on a record compared by value, every comparison that decides a write must still compare exactly what it compares today. Guard: AC-S7.
 
 **Sidecar protocol.**
-- Add per-symbol start and end line fields to the symbol JSON. The change is additive.
+- Add per-symbol start and end line fields to the symbol JSON. The change is additive. The values are `'\n'`-counted as in the tier-2 row above (rev 2).
 - The client treats absent fields as "no span", so an older installed sidecar degrades to the reason `analyzer unavailable` and never errors.
 - The sidecar timeout for a source read is a fixed **5 s** constant, not config. A timeout or error counts as "deep tier unavailable".
 
@@ -128,15 +139,20 @@ If spans become a field on a record compared by value, every comparison that dec
 | Step | Check | Reason if it fails |
 |---|---|---|
 | 0 | Verdict `Unknown`, or `File` is null | `location unknown` |
-| 0 | Verdict `Missing` | `file missing` |
-| 1 | **Lexical containment, in `FileFreshness.Check` itself.** The relative path must have no empty, `.` or `..` segment and must not be rooted. `GetFullPath(Combine(disk_path, rel))` must be contained in `GetFullPath(disk_path)` by the existing idiom (§1). A failure makes `Check` return `Verdict.Unknown`, so no view ever prints an escaping path. | (reported as `location unknown`) |
-| 2 | **Physical containment.** Resolve symlinks at every segment **including the final one** (the file itself may be a link) for both the root and the file. The resolved file must be contained in the resolved root. A root that is itself under a symlinked directory must still pass. | `outside the repo` |
+| 0 | Verdict `Missing` **and nothing exists at the path**, neither a file nor a directory (rev 2). A directory at the path also reads as `Missing` to `File.Exists`, so it falls through to step 2, then step 3, and is reported as `not a regular file`. | `file missing` |
+| 1 | **Lexical containment, in `FileFreshness.Check` itself.** The relative path must have no empty, `.` or `..` segment and must not be rooted. `GetFullPath(Combine(disk_path, rel))` must be contained in `GetFullPath(disk_path)` by the existing idiom (§1). A failure makes `Check` return `Verdict.Unknown`, so no view ever prints an escaping path. **(rev 2)** `Verdict` gains a trailing optional `Root`: the `GetFullPath(disk_path)` that this check compared against. It is set whenever `File` is set and null otherwise. Nothing else changes in `Verdict`. | (reported as `location unknown`) |
+| 2 | **Physical containment, which fails closed (rev 2).** Both the root (`Verdict.Root`, never recovered from `File` by string slicing) and the file are canonicalised **strictly**. Every symlink on the path is resolved, the file's own final segment included. The resolved file must be contained in the resolved root, by the same helper as step 1. Strict canonicalisation returns **no result** (the read is refused) when either: (a) it would follow more than **32** link resolutions in total for one path (32 is macOS's MAXSYMLINKS, the lower kernel limit; the OS itself cannot open a longer chain there), or (b) any component's link status or target cannot be inspected, i.e. the inspection throws. It never returns a partially resolved path. A root under a symlinked directory still passes. | `outside the repo` |
 | 3 | Must be a regular file (not a directory, FIFO, socket or device). Enforceability on FIFOs depends on E2. | `not a regular file` |
 | 4 | Size must not exceed the configured `max_file_bytes`, the same setting `IndexFilter` uses. **Never read more than `max_file_bytes + 1` bytes**, so a file that grows between stat and read still reports too large. | `over {max_file_bytes} bytes` |
 | 5 | No NUL in the first `HeadBytes` bytes, reusing `IndexFilter`'s rule or constant, not a copy. | `binary` |
 
 - **Decoding** must match the indexer (`File.ReadAllText` semantics: UTF-8, BOM detected and stripped), so spans and the analyzer agree on line numbers.
 - **Analysis:** the single-file analysis of §2 runs on the content just read. Never read the file twice for one call.
+- **Strict canonicalisation (rev 2).**
+  - It lives beside the lenient one in `PathCanonicalizer`, as `TryCanonical`, returning a nullable string. The name was proposed by the Reviewer and is adopted.
+  - The lenient `Canonical` keeps its exact current behaviour for its existing callers (queue matching, `IndexCommand`): its depth cap of 8, and keeping a component as spelled when inspection throws. Its existing tests stay unmodified and green.
+  - Both entry points share one resolution walk. The only differences are the cap and what happens at the cap or on a throw: lenient continues as spelled; strict returns null. Do not write a second walk.
+  - The physical containment check calls only `TryCanonical`, and null means `outside the repo`.
 - **Shared helper:** the lexical containment check must not be a third inline copy of the idiom. Put one helper in Engram.Core and use it for steps 1 and 2. Migrating MemoryGuardPathMatcher and SpoolQueue onto it is **out of scope**; leave those files untouched.
 
 ---
@@ -169,6 +185,7 @@ Indexed code: {location} ({subject path})
 
     Either fallback shows `a = 1, b = N`.
   - `{resolved file}` is `Verdict.File`, the path shown everywhere else, not the symlink-resolved one.
+  - **Out-of-range guard (rev 2).** A span with `Start < 1`, `End < Start` or `End > N` is treated as **no span**, whatever tier produced it. The result is the whole file with `{fallback}` = `analyzer unavailable`. Building `details` never indexes outside the file's lines and never throws on any span value.
 - **UNAVAILABLE BLOCK:**
 
   ```
@@ -233,7 +250,7 @@ The current total is about 6,537 against a ceiling of 6,550; the implementor mea
 | S2 | Section spans: nested sections (the parent includes its children), a sibling ends the span, trailing blank lines are dropped, and a duplicate fragment takes the first range. |
 | S3 | The file span is `1…N`, and the trailing-newline case is exact. |
 | S4 | Tier-1 TypeScript, with exact `(start, end)`. Covers: a function; a class method; an exported const arrow; a declaration with multi-byte UTF-8 characters on earlier lines (fails if bytes are counted as chars); a CRLF file. |
-| S5 | Tier-2 C#, with exact `(start, end)`. Covers: an Allman-brace method; a method with attributes (starts at the attribute line); an expression-bodied member; a member of a nested type (`Outer/Inner/M`); colliding overloads (`M(int)` and `M(string)` each get their own span); a doc-commented method (starts at the declaration, not the `///`). |
+| S5 | Tier-2 C#, with exact `(start, end)`. Covers: an Allman-brace method; a method with attributes (starts at the attribute line); an expression-bodied member; a member of a nested type (`Outer/Inner/M`); colliding overloads (`M(int)` and `M(string)` each get their own span); a doc-commented method (starts at the declaration, not the `///`). **(rev 2)** Two more rows, each asserting the exact `'\n'`-counted span: a lone `\r` inside a block comment above a member, and a U+0085 inside a block comment above a member. Both are in RoslynSpanTests and run against the real sidecar. |
 | S6 | Precedence: an entity that both tiers produce takes the deep span. An entity the deep tier produced with no span (older sidecar, simulated by a fixture JSON without the fields) reports no span. |
 | S7 | **No line ever reaches the store.** Index a fixture repo, insert 5 blank lines at the top of every file, re-index, and assert **zero** new fact versions and identical live bodies and evidence. Also assert that the fact set from indexing the fixture repo equals the set produced before this change, against a committed expected snapshot or the existing indexer tests left unmodified. `AnalyzerVersion` and `code_index_version` are unchanged. |
 
@@ -245,6 +262,11 @@ S4 and S5 need real grammars and the sidecar. They must **run, not skip**, in th
 |---|---|
 | R1 | An entity whose relative path contains `..` (or an empty segment, or is rooted) makes `FileFreshness.Check` return `Unknown`. No expand view prints a path, and `details` says `Source unavailable: location unknown.` |
 | R2 | A symlink inside the repo pointing at a file outside it gives `outside the repo`, and none of the outside file's bytes appear in the output. A symlink inside the repo pointing at a file inside it returns content. A repo registered through a symlinked parent directory returns content. |
+| R2b (rev 2) | Ten nested in-repo directory links, `L0 → L1/x`, …, `L8 → L9/x`, with `L9 → <outside dir>`. The file is read through `L0/…`. Result: `outside the repo`, and none of the outside file's bytes appear. This is the Reviewer's reproduction, which the lenient depth cap of 8 lets through. |
+| R2c (rev 2) | The same shape with **33** links, so the chain exceeds the strict cap. Result: `outside the repo`. |
+| R2d (rev 2) | Ten nested in-repo directory links ending **inside** the repo. Content is returned, which proves the cap of 32 does not refuse a legitimate deep chain. |
+
+The throw branch of strict canonicalisation has no row: there is no deterministic fixture that is also safe under root. The Reviewer verifies it by reading. It must return null and never a partially resolved path.
 | R3 | A directory at the file's path gives `not a regular file`. The FIFO case depends on E2. |
 | R4 | A file over the configured `max_file_bytes` (set small in the test's config) gives `over N bytes`. A stream-level test or seam proves at most `max+1` bytes are read. |
 | R5 | A NUL byte in the head gives `binary`. |
@@ -255,7 +277,7 @@ S4 and S5 need real grammars and the sidecar. They must **run, not skip**, in th
 | AC | Requirement |
 |---|---|
 | D1 | A symbol fact on a fresh file: page 1 contains, in order, the Body, the `Indexed code:` line, the hint, `Source: … · lines a–b of N`, and exactly lines a..b. Assert the block text by equality. |
-| D2 | Stale: after indexing, edit a line **inside** the method. The header has ` · changed since indexed`, and the shown text contains the edited line. |
+| D2 | Stale: after indexing, edit a line **inside** the method. The header has ` · changed since indexed`, and the shown text contains the edited line. **(rev 2)** Two rows: keep the existing markdown-section row, which runs everywhere, and add a C# member row through the existing `SidecarOnly` gate. The C# row edits a line inside the method body and asserts that the span still covers the method and shows the edited line. |
 | D3 | Rename the symbol in the file. The output is the whole file plus ` · not in the current file, whole file`. |
 | D4 | The deep tier is unavailable (grammar dir or sidecar path set to a nonexistent location in the test) for a member fact. The output is the whole file plus ` · analyzer unavailable, whole file`. |
 | D5 | A section fact gives the section range. A file fact gives `1…N`. |
@@ -265,6 +287,7 @@ S4 and S5 need real grammars and the sidecar. They must **run, not skip**, in th
 | D9 | `history`/`related` are unchanged. |
 | D10 | The golden file matches §5 exactly. `McpToolSurfaceBudgetTests` is green with 6550 and 11 unchanged. |
 | D11 | Expand writes nothing: `fact`, `entity` and `repo_registry` row counts and `max(id)` are equal before and after a `details` call. |
+| D12 (rev 2) | Drive `details` on a C# member through a **stub sidecar** that answers the fact's file with `endLine` = N + 50. The stub is an executable script reached through the same sidecar-location input the integration tests already override; if a stub mechanism already exists, reuse it. Result: the whole file, ` · analyzer unavailable, whole file`, and expand returns normally. A second row with `startLine` = 0 gives the same result. |
 
 **Falsification**, per CLAUDE.md: against a committed tree, with `git diff --quiet` checked before each arm.
 
@@ -277,6 +300,10 @@ S4 and S5 need real grammars and the sidecar. They must **run, not skip**, in th
 | F5 | Use the node's `FullSpan` (with trivia) in the sidecar | S5's doc-comment case |
 | F6 | Drop the Stale suffix | D2 |
 | F7 | Make `evidence` always say "the details view reads the current source" | D8's Missing row |
+| F8 (rev 2) | Make the physical check call the lenient `Canonical` | R2b and R2c (R2, R2d and R1 stay green) |
+| F8b (rev 2) | Make `TryCanonical` return the as-spelled remainder at the cap instead of null | R2c only |
+| F9 (rev 2) | Make the sidecar compute lines with `GetLineSpan` | S5's lone-CR and NEL rows only |
+| F10 (rev 2) | Remove the out-of-range guard | D12 (it throws or reddens) |
 
 ---
 
@@ -319,6 +346,25 @@ S4 and S5 need real grammars and the sidecar. They must **run, not skip**, in th
 - tier 3 must run, against a published `./out`, and is not skipped;
 - `ENGRAM_HOME` is sandboxed for any by-hand binary call;
 - after the run, no leftover sidecar or testhost processes.
+
+**Rework (rev 2).** These go on top of HEAD 666dd32. Each one builds and is committed alone.
+
+- **R-a, containment fails closed.**
+  - `PathCanonicalizer.TryCanonical`, using the shared walk.
+  - `Verdict.Root`, set in `Check`.
+  - The physical check uses `Root` and `TryCanonical`.
+  - §3 step 0 "nothing at the path".
+  - Rows R2b–R2d. Arms F8 and F8b.
+- **R-b, tier-2 `'\n'` lines.**
+  - Sidecar line counting per §2.
+  - The out-of-range guard per §4.
+  - S5 lone-CR and NEL rows, and D12 (two rows).
+  - Arms F9 and F10.
+  - Rebuild the sidecar.
+- **R-c, the D2 C# row.** Through `SidecarOnly`.
+- **R-d, D75 text** replaced per §12.
+
+For each: run the targeted suites with grammars and the sidecar set, so S4, S5, D2 C# and D12 run rather than skip, then the full suite. Report pass and skip counts per tier.
 
 ---
 
@@ -370,3 +416,19 @@ dotnet run "$T/probe.cs" -- "$T/p" "$T/f" "$T/d"
 - **Description headroom** is about 14 chars after §5. The next description change must trim.
 - **Residual TOCTOU:** a symlink swapped between the physical check and the open. This is accepted: it needs write access to the checkout, and anyone with that already controls what the model reads.
 - **The containment idiom stays in three places** (two legacy copies plus the new helper). Migrating the legacy two is a follow-up, not part of this work.
+- **(rev 2) The indexer reads through symlinks with no containment check.** This predates this spec and is out of its scope. A tracked `x.md → <file outside the checkout>` is listed by `git ls-files`, read by `CodeIndexer`, and its lead sentences (≤60 tokens) become a stored gist. That can include secrets, which recall then hands to the model. The physical check in this spec guards only the full read in `details`. **Ruling: record it in D75 as a residual, and fix it in a separate spec, recommended as the next item.** It changes what the scanner admits and interacts with deletion semantics (D53), so it needs its own design and tests. → NEEDS-ARCHITECT (a new brief), at the Orchestrator's discretion.
+
+---
+
+## 12. D75 text (rev 2): exact replacement paragraphs
+
+Replace D75's containment paragraph with **A**. Add **B** and **C** after it. Leave the rest of D75 as committed. Copy the wording verbatim; the Implementor may only re-wrap lines.
+
+**A. Containment.**
+> Containment is checked twice, and the two checks have different jobs. The lexical check lives in `FileFreshness.Check`. A relative path with an empty, `.` or `..` segment, a rooted one, or one whose full path leaves the repo root makes the verdict `Unknown`, so no expand view ever prints a path outside the repo. The physical check sits beside the read. It canonicalises the root and the file strictly: every symlink on the way to the file is resolved, the file's own last segment included, and it refuses anything that does not land inside the resolved root. Strict means fail closed. A link that cannot be inspected, or a chain of more than 32 links (macOS's own limit), counts as outside. The lenient canonicaliser the queue uses stops at eight links and carries on with the rest of the path as spelled, and that is a fail-open: ten nested in-repo directory links ending outside the checkout were measured reading the outside file as inside. The physical check would also refuse a `..` escape, because full-path normalisation folds it before the comparison. What stops the two checks from being one rule written twice is their tests. The lexical check is asserted on the verdict's state and path, which every view prints. The physical check is asserted on the read, through symlink chains containing no `..` at all. Delete either check and only its own test reddens.
+
+**B. Line numbering.**
+> Every tier numbers lines the same way, by counting `'\n'`. Tier 0 splits on it, tree-sitter's newline table counts it in UTF-8 bytes, and the Roslyn sidecar counts it in the text before the node's start and before the node's last character. The sidecar does not use Roslyn's line map, which also breaks on a lone `\r` and on U+0085. A probe with one lone `\r` in a comment above a method had Roslyn report line 5 where the reader counts line 4, so `details` would have shown the wrong lines as the symbol, with no label. A span that still falls outside the file is treated as no span: the whole file, labelled `analyzer unavailable`. A disagreement between the sidecar and the reader can therefore neither mislabel code nor throw.
+
+**C. Residual, outside this decision.**
+> The indexer itself reads through symlinks with no containment check. A tracked link to a file outside the checkout is listed by `git ls-files`, read, and summarised into a stored gist of up to 60 tokens, which recall can return. This decision's physical check guards only the full read in `details`. Closing the indexer's path changes what the scanner admits and interacts with the rule that a partial scan never deletes (D53). It is therefore its own change, and not part of this one.
