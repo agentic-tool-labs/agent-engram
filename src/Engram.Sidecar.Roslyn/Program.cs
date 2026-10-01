@@ -245,6 +245,12 @@ static void Emit(
         ["doc"] = doc,
     };
 
+    // Span, not FullSpan: attributes and modifiers belong to the declaration, a leading doc comment
+    // is trivia and is already the symbol's `about` fact.
+    var lines = declaration.SyntaxTree.GetLineSpan(declaration.Span);
+    symbol["startLine"] = lines.StartLinePosition.Line + 1;
+    symbol["endLine"] = lines.EndLinePosition.Line + 1;
+
     if (scope is not null)
     {
         symbol["scope"] = scope;

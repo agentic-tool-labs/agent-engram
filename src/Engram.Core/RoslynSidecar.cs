@@ -131,6 +131,15 @@ public static class RoslynSidecar
         }
     }
 
+    // Absent or malformed lines mean "no span", so a sidecar built before they existed degrades to
+    // the whole file rather than failing the analysis.
+    private static LineSpan? SpanOf(JsonObject symbol) =>
+        symbol["startLine"] is JsonValue start && start.TryGetValue<int>(out var first)
+            && symbol["endLine"] is JsonValue end && end.TryGetValue<int>(out var last)
+            && first >= 1 && last >= first
+            ? new LineSpan(first, last)
+            : null;
+
     // internal rather than private: item 26's falsification (a positional zip instead of the
     // id map) needs to hand-craft JSON with a gap in the id sequence, which Analyze()'s real
     // subprocess round-trip cannot produce from valid C#.
@@ -177,7 +186,8 @@ public static class RoslynSidecar
                         declaration,
                         symbol["doc"]?.GetValue<string>(),
                         symbol["scope"]?.GetValue<string>(),
-                        symbol["params"]?.GetValue<string>());
+                        symbol["params"]?.GetValue<string>(),
+                        SpanOf(symbol));
                     symbols.Add(deepSymbol);
 
                     if (symbol["id"]?.GetValue<int>() is { } id)
