@@ -35,6 +35,13 @@ plan.md:5302; confirm `D75` is unused before writing it).
 >
 > Rework steps are in §8 under "Rework (rev 3)".
 
+> **Amendment 3 (rev 4): sign-off nits from review sr-review3 (20260930-210933-ummg)**
+>
+> 1. **Spec defect.** For an in-repo link, `evidence`/`source` pointed at a `details` view that always refuses. §4's sentence rule now also requires no link at or below the root, decided by the same link-walk helper as §3 step 2. New row D8b and arm F11.
+> 2. **Defence in depth.** The link-walk helper refuses on its own when the file is not lexically inside the root, so the read site does not rely on its caller (§3 step 2). New row R2 ix and arm F12.
+>
+> Both are fix-now and go in one implementor commit (§8 "Rework (rev 4)").
+
 ---
 
 ## 0. Goal and decisions
@@ -154,7 +161,7 @@ If spans become a field on a record compared by value, every comparison that dec
 |---|---|---|
 | 0 | Verdict `Unknown`, or `File` is null | `location unknown` |
 | 1 | **Lexical containment, in `FileFreshness.Check` itself.** The relative path must have no empty, `.` or `..` segment and must not be rooted. `GetFullPath(Combine(disk_path, rel))` must be contained in `GetFullPath(disk_path)` by the existing idiom (§1). A failure makes `Check` return `Verdict.Unknown`, so no view ever prints an escaping path. **(rev 2)** `Verdict` gains a trailing optional `Root`: the `GetFullPath(disk_path)` that this check compared against. It is set whenever `File` is set and null otherwise. Nothing else changes in `Verdict`. **(rev 3) Dangling link means Missing.** When `File.Exists(file)` is true, the file's own last segment is a link (`LinkTarget` non-null), and `File.ResolveLinkTarget(file, returnFinalTarget: true)` is null, is not `Exists`, or throws, then `Check` returns `Missing` (with `File` and `Root` set). The note then says `Was at …`, never `Read it at …`. Nothing is read on this path. This existence test is used only for the label, so its lexical treatment of `..` inside a target cannot leak content. | (reported as `location unknown`) |
-| 2 | **No symlink at or below the root (rev 3; this replaces strict canonicalisation).** Walk the relative path's segments from `Verdict.Root` (never recovered from `File` by slicing), one at a time, down to and **including** the file's own last segment. A segment is a link iff `FileSystemInfo.LinkTarget` is non-null for that exact path; this is `readlink` semantics, independent of the target's type or existence. Do **not** use `Attributes`, which is `(FileAttributes)(-1)`, with every flag set, for a path that does not exist. The rules: the first segment that is a link refuses the read; a segment that does not exist ends the walk (step 2b reports it); any exception during the walk gives `unreadable`. Nothing is resolved, followed, combined with a target, or compared after canonicalisation. Segments **above** the root (the root itself, or a symlinked parent of the checkout) are not inspected: the registered root is trusted, and a checkout under a linked directory still reads. **Why this is correct by construction:** step 1 has already rejected empty, `.` and `..` segments, so with no link at or below the root the path the kernel opens is the lexical path, and step 1 contained that. | `symlinked path` |
+| 2 | **No symlink at or below the root (rev 3; this replaces strict canonicalisation).** Walk the relative path's segments from `Verdict.Root` (never recovered from `File` by slicing), one at a time, down to and **including** the file's own last segment. A segment is a link iff `FileSystemInfo.LinkTarget` is non-null for that exact path; this is `readlink` semantics, independent of the target's type or existence. Do **not** use `Attributes`, which is `(FileAttributes)(-1)`, with every flag set, for a path that does not exist. The rules: the first segment that is a link refuses the read; a segment that does not exist ends the walk (step 2b reports it); any exception during the walk gives `unreadable`. Nothing is resolved, followed, combined with a target, or compared after canonicalisation. Segments **above** the root (the root itself, or a symlinked parent of the checkout) are not inspected: the registered root is trusted, and a checkout under a linked directory still reads. **(rev 4)** The helper itself answers "link" (refuse) when `File` is not lexically within `Root` by the shared lexical helper, for example a relative path that is rooted or starts with `..`. It never walks such a path. This is unreachable through `FileFreshness.Check` today, but the read site must not depend on its caller for containment. **Why this is correct by construction:** step 1 has already rejected empty, `.` and `..` segments, so with no link at or below the root the path the kernel opens is the lexical path, and step 1 contained that. | `symlinked path` |
 | 2b | Verdict `Missing` and **nothing exists at the path**, neither a file nor a directory. This is the rev-2 step-0 rule, moved after the link check (rev 3) so an outside path's existence never shows through the reason. A directory at the path falls through to step 3. | `file missing` |
 | 3 | Must be a regular file (not a directory, FIFO, socket or device). Enforceability on FIFOs depends on E2. | `not a regular file` |
 | 4 | Size must not exceed the configured `max_file_bytes`, the same setting `IndexFilter` uses. **Never read more than `max_file_bytes + 1` bytes**, so a file that grows between stat and read still reports too large. | `over {max_file_bytes} bytes` |
@@ -213,7 +220,8 @@ Indexed code: {location} ({subject path})
 - Paging stays stateless (D64). Each page call re-reads and re-analyzes, and offsets assume the file did not change between calls. This is accepted and recorded in D75.
 
 **`evidence` and `source` on an indexed code fact.** Today's note (§2 of the readability spec, with the Amendment 2 "Was at" rule) is unchanged except for the gist sentence:
-- If `File` is non-null and the state is not `Missing`: `Engram keeps only this indexed gist (~60 tokens); the details view reads the current source.`
+- If `File` is non-null, the state is not `Missing`, **and (rev 4) the link-walk helper of §3 step 2 finds no link from `Root` down to `File`**: `Engram keeps only this indexed gist (~60 tokens); the details view reads the current source.`
+  - The helper must be the same one the reader uses, not a copy. An exception inside it counts as "link", so the old sentence is used.
 - Otherwise, today's sentence is kept verbatim. Never point at a call that can only fail; this is the same principle as the "Was at" fix.
 - No source text appears in these views.
 
@@ -288,6 +296,7 @@ S4 and S5 need real grammars and the sidecar. They must **run, not skip**, in th
 | vi | Ten nested in-repo directory links (the rev-2 R2b shape) | refused |
 | vii | The repo is registered through a symlinked **parent** directory (a link above the root) | content returned |
 | viii | An intermediate segment does not exist (fact rel `gone/x.md`) | `file missing`, not `symlinked path`. This pins the "missing ends the walk" rule and the `Attributes == -1` trap. |
+| ix (rev 4) | Core unit test on the link-walk helper: `Root` = a temp repo, `File` = a regular, link-free file **outside** it (a sibling directory) | the helper answers "link" (refuse) |
 
 A dangling link at the last segment (`f.md → nowhere`) also gets a row: `evidence` says `Was at … (missing)` and never `Read it at`, and `details` says `Source unavailable: symlinked path.`
 | R3 | A directory at the file's path gives `not a regular file`. The FIFO case depends on E2. |
@@ -307,6 +316,7 @@ A dangling link at the last segment (`f.md → nowhere`) also gets a row: `evide
 | D6 | Paging over a long span with a small `budget_tokens`: more than 3 pages, the concatenation equals the unpaged text, each page's length ≤ budget, and the footer format is unchanged. |
 | D7 | `details` on a non-code fact is byte-identical to before (existing tests unmodified and green). |
 | D8 | `evidence`/`source` have the new gist sentence when `File` is non-null and the state is not Missing, the old sentence otherwise, and never any source text. |
+| D8b (rev 4) | An in-repo link (R2 ii shape, Fresh): `evidence` and `source` carry the **old** sentence (`… there is nothing more to expand.`) and never "the details view reads the current source". They still carry `Read it at …`. |
 | D9 | `history`/`related` are unchanged. |
 | D10 | The golden file matches §5 exactly. `McpToolSurfaceBudgetTests` is green with 6550 and 11 unchanged. |
 | D11 | Expand writes nothing: `fact`, `entity` and `repo_registry` row counts and `max(id)` are equal before and after a `details` call. |
@@ -326,6 +336,8 @@ A dangling link at the last segment (`f.md → nowhere`) also gets a row: `evide
 | F8 (rev 3) | Delete the link walk | R2 i–vi (R1, vii and viii stay green) |
 | F8b (rev 3) | Inspect only the last segment | R2 iii, v and vi only (i, ii and iv still refuse, because their last segment is itself a link) |
 | F8c (rev 3) | Skip the last segment | R2 i, ii and iv only |
+| F11 (rev 4) | Drop the link condition from the gist-sentence rule | D8b only |
+| F12 (rev 4) | Remove the helper's own containment guard | R2 ix only |
 | F9 (rev 2) | Make the sidecar compute lines with `GetLineSpan` | S5's lone-CR and NEL rows only |
 | F10 (rev 2) | Remove the out-of-range guard | D12 (it throws or reddens) |
 
@@ -402,6 +414,15 @@ For each: run the targeted suites with grammars and the sidecar set, so S4, S5, 
 - **R3-c, D75.** Replace paragraph A with the rev-3 text in §12. B and C are unchanged.
 
 Verification is the same as rev 2.
+
+**Rework (rev 4).** One commit on top of 1b35b9d, with:
+
+- the §4 gist-sentence link condition, using the same helper;
+- the helper's containment guard from §3 step 2;
+- rows D8b and R2 ix;
+- arms F11 and F12, each against a committed tree.
+
+Run the targeted Integration and Core suites with grammars set. No D75 text change.
 
 ---
 
