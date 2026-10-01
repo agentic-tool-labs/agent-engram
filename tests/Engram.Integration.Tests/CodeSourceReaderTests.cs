@@ -57,6 +57,28 @@ public sealed class CodeSourceReaderTests : IDisposable
         command.ExecuteNonQuery();
     }
 
+    // Creating a link needs a privilege some Windows runners lack. A skip is only for that: the probe
+    // makes a real link, so wherever links work every test below still runs.
+    private void RequireSymlinks()
+    {
+        var probe = Path.Combine(Path.GetDirectoryName(root)!, "link-probe");
+        try
+        {
+            File.CreateSymbolicLink(probe, outside);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            Assert.Skip("this environment cannot create symbolic links");
+            return;
+        }
+
+        File.Delete(probe);
+    }
+
+    // Relative link targets are spelled with the platform's separator; Windows rejects a forward
+    // slash in a directory link's target.
+    private static string Target(string relative) => relative.Replace('/', Path.DirectorySeparatorChar);
+
     private static SourceRead Read((FileFreshness.Verdict Verdict, string Subject) entry, long limit = Limit) =>
         CodeSourceReader.Read(entry.Verdict, limit);
 
@@ -91,6 +113,7 @@ public sealed class CodeSourceReaderTests : IDisposable
     [Fact]
     public void FileLinkedToSomethingOutsideTheCheckout_IsRefused()
     {
+        RequireSymlinks();
         File.CreateSymbolicLink(Path.Combine(root, "src", "link.cs"), outside);
 
         var entry = Register("src/link.cs");
@@ -102,9 +125,10 @@ public sealed class CodeSourceReaderTests : IDisposable
     [Fact]
     public void FileLinkedToSomethingInsideTheCheckout_IsRefusedToo_ByDesign()
     {
+        RequireSymlinks();
         File.WriteAllText(Path.Combine(root, "README.md"), "inside");
         Directory.CreateDirectory(Path.Combine(root, "docs"));
-        File.CreateSymbolicLink(Path.Combine(root, "docs", "readme.md"), "../README.md");
+        File.CreateSymbolicLink(Path.Combine(root, "docs", "readme.md"), Target("../README.md"));
 
         AssertRefusedAsLink(Read(Register("docs/readme.md")));
     }
@@ -112,6 +136,7 @@ public sealed class CodeSourceReaderTests : IDisposable
     [Fact]
     public void DirectoryLinkedOutsideTheCheckout_RefusesAFileBeneathIt()
     {
+        RequireSymlinks();
         var elsewhere = Path.Combine(Path.GetDirectoryName(root)!, "elsewhere");
         Directory.CreateDirectory(elsewhere);
         File.WriteAllText(Path.Combine(elsewhere, "x.md"), "SECRET-VIA-DIRECTORY");
@@ -125,11 +150,12 @@ public sealed class CodeSourceReaderTests : IDisposable
     [Fact]
     public void ADotDotInsideALinkTarget_CannotReachAFileOutside()
     {
+        RequireSymlinks();
         var elsewhere = Path.Combine(Path.GetDirectoryName(root)!, "dotdot");
         Directory.CreateDirectory(Path.Combine(elsewhere, "a", "b"));
         File.WriteAllText(Path.Combine(elsewhere, "a", "x.md"), "SECRET-VIA-DOTDOT");
         Directory.CreateSymbolicLink(Path.Combine(root, "D"), Path.Combine(elsewhere, "a", "b"));
-        File.CreateSymbolicLink(Path.Combine(root, "f.md"), "D/../x.md");
+        File.CreateSymbolicLink(Path.Combine(root, "f.md"), Target("D/../x.md"));
 
         AssertRefusedAsLink(Read(Register("f.md")));
     }
@@ -137,8 +163,9 @@ public sealed class CodeSourceReaderTests : IDisposable
     [Fact]
     public void ALinkCycle_IsRefusedPromptly_WithoutAHangOrAnException()
     {
-        File.CreateSymbolicLink(Path.Combine(root, "cyc-a"), "cyc-b");
-        File.CreateSymbolicLink(Path.Combine(root, "cyc-b"), "cyc-a");
+        RequireSymlinks();
+        File.CreateSymbolicLink(Path.Combine(root, Target("cyc-a")), Target("cyc-b"));
+        File.CreateSymbolicLink(Path.Combine(root, Target("cyc-b")), Target("cyc-a"));
 
         var read = Read(Register("cyc-a/x.md"));
 
@@ -148,7 +175,8 @@ public sealed class CodeSourceReaderTests : IDisposable
     [Fact]
     public void ADanglingLinkAtTheFilePath_IsMissing_AndNothingIsRead()
     {
-        File.CreateSymbolicLink(Path.Combine(root, "src", "dangling.cs"), "nowhere.cs");
+        RequireSymlinks();
+        File.CreateSymbolicLink(Path.Combine(root, "src", "dangling.cs"), Target("nowhere.cs"));
 
         var entry = Register("src/dangling.cs");
 
@@ -168,6 +196,7 @@ public sealed class CodeSourceReaderTests : IDisposable
     [Fact]
     public void CheckoutRegisteredThroughASymlinkedParent_ReturnsContent()
     {
+        RequireSymlinks();
         File.WriteAllText(Path.Combine(root, "src", "a.cs"), "class A {}");
         var viaLink = Path.Combine(sandbox.Home.Root, "via-link");
         Directory.CreateSymbolicLink(viaLink, Path.GetDirectoryName(root)!);
@@ -235,7 +264,7 @@ public sealed class CodeSourceReaderTests : IDisposable
         {
             Directory.CreateSymbolicLink(
                 Path.Combine(root, $"L{i}"),
-                i == links - 1 ? end : $"L{i + 1}/x");
+                i == links - 1 ? end : Target($"L{i + 1}/x"));
         }
 
         return "L0/secret.txt";
@@ -244,6 +273,7 @@ public sealed class CodeSourceReaderTests : IDisposable
     [Fact]
     public void TenNestedDirectoryLinks_AreRefused()
     {
+        RequireSymlinks();
         var entry = Register(LinkChain(10, Path.Combine(Path.GetDirectoryName(root)!, "chained")));
 
         AssertRefusedAsLink(Read(entry));
