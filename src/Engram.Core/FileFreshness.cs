@@ -109,6 +109,14 @@ public static class FileFreshness
                 return new Verdict(State.Missing, TimeSpan.Zero, file, root);
             }
 
+            // File.Exists is true for a link whose target is gone, but there is nothing to read behind
+            // it: it is as absent as a deleted file, and must not be described as one to go and read.
+            // Used for this label only; nothing is read through the link here.
+            if (IsDanglingLink(file))
+            {
+                return new Verdict(State.Missing, TimeSpan.Zero, file, root);
+            }
+
             // indexed_at has second resolution, so a write inside the same second as the index run
             // is not evidence of staleness — counting it would mark a freshly indexed file stale.
             var behind = File.GetLastWriteTimeUtc(file)
@@ -133,6 +141,23 @@ public static class FileFreshness
         catch (ArgumentException)
         {
             return Verdict.Unknown;
+        }
+    }
+
+    private static bool IsDanglingLink(string file)
+    {
+        try
+        {
+            return new FileInfo(file).LinkTarget is not null
+                && File.ResolveLinkTarget(file, returnFinalTarget: true) is not { Exists: true };
+        }
+        catch (IOException)
+        {
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
         }
     }
 

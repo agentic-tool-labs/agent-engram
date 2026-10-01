@@ -953,6 +953,45 @@ public class McpBrowseExpandReviseTests
     }
 
     [Fact]
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    public void Expand_LinkedFiles_SayWhereToReadOrWhereItWas_AndDetailsRefusesToReadThem()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "symlinks need privileges on Windows");
+        var disk = Checkout(("README.md", "inside the repo"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(disk, "docs"));
+            File.CreateSymbolicLink(Path.Combine(disk, "docs", "readme.md"), "../README.md");
+            File.CreateSymbolicLink(Path.Combine(disk, "docs", "dangling.md"), "nowhere.md");
+
+            using var sandbox = new SandboxHome();
+            long linked;
+            long dangling;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                linked = WriteIndexed(connection, RepoPath + "/docs/readme.md", "file", "readme.md — the readme.");
+                dangling = WriteIndexed(connection, RepoPath + "/docs/dangling.md", "file", "dangling.md — gone.");
+                RegisterRepo(connection, disk, "docs/readme.md", "docs/dangling.md");
+            }
+
+            Assert.Contains(
+                "Read it at " + Path.Combine(disk, "docs", "readme.md"), Expand(sandbox, linked, "evidence"), StringComparison.Ordinal);
+            var linkedDetails = Expand(sandbox, linked, "details");
+            Assert.EndsWith("Source unavailable: symlinked path.", linkedDetails, StringComparison.Ordinal);
+            Assert.DoesNotContain("inside the repo", linkedDetails, StringComparison.Ordinal);
+
+            var danglingEvidence = Expand(sandbox, dangling, "evidence");
+            Assert.Contains("Was at " + Path.Combine(disk, "docs", "dangling.md") + " (missing).", danglingEvidence, StringComparison.Ordinal);
+            Assert.DoesNotContain("Read it at", danglingEvidence, StringComparison.Ordinal);
+            Assert.EndsWith("Source unavailable: symlinked path.", Expand(sandbox, dangling, "details"), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Expand_HistoryAndRelated_AreUnchangedForAnIndexedCodeFact()
     {
         using var sandbox = new SandboxHome();

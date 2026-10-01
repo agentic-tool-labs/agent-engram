@@ -146,6 +146,18 @@ public sealed class CodeSourceReaderTests : IDisposable
     }
 
     [Fact]
+    public void ADanglingLinkAtTheFilePath_IsMissing_AndNothingIsRead()
+    {
+        File.CreateSymbolicLink(Path.Combine(root, "src", "dangling.cs"), "nowhere.cs");
+
+        var entry = Register("src/dangling.cs");
+
+        Assert.Equal(FileFreshness.State.Missing, entry.Verdict.State);
+        Assert.NotNull(entry.Verdict.File);
+        AssertRefusedAsLink(Read(entry));
+    }
+
+    [Fact]
     public void AnAbsentIntermediateDirectory_IsMissing_NotALink()
     {
         var entry = Register("gone/x.md");
