@@ -871,6 +871,48 @@ public class McpBrowseExpandReviseTests
     }
 
     [Fact]
+    public void Details_AnEditInsideACSharpMember_IsMarkedChangedAndTheSpanStillCoversTheMethod()
+    {
+        using var sandbox = new SandboxHome();
+        var source = string.Join(
+            "\n",
+            "using System;",              // 1
+            "",                           // 2
+            "public class Foo",           // 3
+            "{",                          // 4
+            "    public void Run()",      // 5
+            "    {",                      // 6
+            "        var x = 1;",         // 7
+            "    }",                      // 8
+            "}") + "\n";                  // 9
+        var disk = Checkout(("src/a.cs", source));
+        try
+        {
+            long id;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                id = WriteIndexed(connection, RepoPath + "/src/a.cs#Foo/Run", "symbol", GistBody);
+                RegisterRepo(connection, disk);
+                Execute(
+                    connection,
+                    "INSERT INTO file_state (repo_path, path, blob_sha, indexed_at) VALUES ($repo, 'src/a.cs', 'x', 1);",
+                    ("$repo", RepoPath));
+            }
+
+            File.WriteAllText(Path.Combine(disk, "src", "a.cs"), source.Replace("var x = 1", "var x = 2"));
+
+            var result = Details(sandbox, id, SidecarOnly);
+
+            Assert.Contains(" · lines 5–8 of 9 · changed since indexed\n", result, StringComparison.Ordinal);
+            Assert.EndsWith("        var x = 2;\n    }", result, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Expand_EvidenceAndSource_PointAtDetailsOnlyWhereItCanRead_AndNeverCarrySource()
     {
         using var sandbox = new SandboxHome();
