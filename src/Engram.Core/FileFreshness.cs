@@ -95,7 +95,14 @@ public static class FileFreshness
                 return Verdict.Unknown;
             }
 
+            // The relative path comes from a store row. One that climbs out of the checkout must not
+            // resolve to a file at all, or every view that prints the verdict's path would print it.
             var file = Path.Combine(diskPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
+            if (!PathContainment.IsSafeRelative(relativePath) || !PathContainment.IsWithin(diskPath, file))
+            {
+                return Verdict.Unknown;
+            }
+
             if (!File.Exists(file))
             {
                 return new Verdict(State.Missing, TimeSpan.Zero, file);
