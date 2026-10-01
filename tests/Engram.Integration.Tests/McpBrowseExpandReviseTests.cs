@@ -978,6 +978,15 @@ public class McpBrowseExpandReviseTests
                 "Read it at " + Path.Combine(disk, "docs", "readme.md"), Expand(sandbox, linked, "evidence"), StringComparison.Ordinal);
             var linkedDetails = Expand(sandbox, linked, "details");
             Assert.EndsWith("Source unavailable: symlinked path.", linkedDetails, StringComparison.Ordinal);
+
+            // evidence and source must not point at a details view that is going to refuse.
+            foreach (var view in new[] { "evidence", "source" })
+            {
+                var note = Expand(sandbox, linked, view);
+                Assert.Contains("not the source — there is nothing more to expand.", note, StringComparison.Ordinal);
+                Assert.DoesNotContain("the details view reads the current source", note, StringComparison.Ordinal);
+            }
+
             Assert.DoesNotContain("inside the repo", linkedDetails, StringComparison.Ordinal);
 
             var danglingEvidence = Expand(sandbox, dangling, "evidence");

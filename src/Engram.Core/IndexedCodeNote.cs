@@ -38,7 +38,7 @@ public static class IndexedCodeNote
 
         // Point at the details view only when it can read something: sending the caller to a call
         // that can only fail is the same mistake as telling it to read a file that is gone.
-        note.Append(freshness.File is not null && freshness.State != FileFreshness.State.Missing
+        note.Append(DetailsCanRead(freshness)
             ? "Engram keeps only this indexed gist (~60 tokens); the details view reads the current source."
             : "Engram keeps only this indexed gist (~60 tokens), not the source — "
                 + "there is nothing more to expand.");
@@ -141,6 +141,25 @@ public static class IndexedCodeNote
         }
 
         return note.ToString();
+    }
+
+    // The details view refuses a linked path, so pointing at it would be sending the caller to a call
+    // that can only fail. The same walk the reader uses decides, and anything it cannot tell counts as a link.
+    private static bool DetailsCanRead(FileFreshness.Verdict freshness)
+    {
+        if (freshness.File is not { } file || freshness.Root is not { } root || freshness.State == FileFreshness.State.Missing)
+        {
+            return false;
+        }
+
+        try
+        {
+            return !PathContainment.HasLinkBelow(root, file);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     /// <summary>
