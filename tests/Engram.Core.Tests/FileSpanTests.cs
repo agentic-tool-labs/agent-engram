@@ -113,4 +113,30 @@ public class FileSpanTests
 
         Assert.Equal(before, after);
     }
+
+    private static DeepAnalysis DeepWith(DeepSymbol symbol) =>
+        new("Sample.cs", [symbol], [], null, [], [], Tier: 1);
+
+    [Fact]
+    public void AnEntityBothTiersProduce_TakesTheDeepSpan()
+    {
+        var content = Join("\n", CSharpLines) + "\n";
+        var deep = DeepWith(new DeepSymbol("Alpha", "symbol", "public class Alpha", null, Span: new LineSpan(3, 4)));
+
+        var analysis = FileAnalysis.Analyze(FilePath, content, CSharp(), deep);
+
+        Assert.Equal(new LineSpan(3, 4), analysis.Spans[CodePaths.ForSymbol(FilePath, "Alpha")]);
+    }
+
+    [Fact]
+    public void AnEntityTheDeepTierProducedWithoutASpan_HasNone()
+    {
+        var content = Join("\n", CSharpLines) + "\n";
+        var deep = DeepWith(new DeepSymbol("Alpha", "symbol", "public class Alpha", null));
+
+        var analysis = FileAnalysis.Analyze(FilePath, content, CSharp(), deep);
+
+        Assert.False(analysis.Spans.ContainsKey(CodePaths.ForSymbol(FilePath, "Alpha")));
+        Assert.Equal(new LineSpan(1, 11), analysis.Spans[FilePath]);
+    }
 }

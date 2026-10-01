@@ -68,6 +68,23 @@ public sealed record FileAnalysis(IReadOnlyList<CodeCandidate> Candidates, IRead
             candidates = DeepTier.Merge(fileEntityPath, candidates, deep);
         }
 
+        // The deeper tier's range for an entity it produced beats tier 0's; an entity it produced
+        // without one has none, rather than keeping a regex's guess about a different declaration.
+        if (deep is { Error: null })
+        {
+            foreach (var (path, span) in DeepTier.Spans(fileEntityPath, deep))
+            {
+                if (span is { } found)
+                {
+                    spans[path] = found;
+                }
+                else
+                {
+                    spans.Remove(path);
+                }
+            }
+        }
+
         // A span is only meaningful for an entity the analysis still produces.
         var produced = candidates.Select(c => c.EntityPath).ToHashSet(StringComparer.Ordinal);
         foreach (var path in spans.Keys.Where(p => p != fileEntityPath && !produced.Contains(p)).ToList())

@@ -176,6 +176,7 @@ public sealed unsafe class TreeSitter : IDisposable
 
             var symbols = new List<DeepSymbol>();
             var declNodes = new Dictionary<DeepSymbol, TsNode>(ReferenceEqualityComparer.Instance);
+            var newlines = NewlineOffsets(source);
             foreach (var captures in Matches(declarations, root, source))
             {
                 if (!captures.TryGetValue("name", out var nameNode))
@@ -188,6 +189,14 @@ public sealed unsafe class TreeSitter : IDisposable
                     ? Text(scopeNode, source)
                     : null;
 
+                // The declaration node for a call-site parent walk (§5.2) is this capture's
+                // own parent: a tree-sitter field never inserts an extra layer, so `@name`'s
+                // ts_node_parent is exactly the function_declaration/method_definition/etc.
+                // the pattern matched. Recording it here, keyed by the same DeepSymbol
+                // Fragments() below will pair a fragment with, is what lets the walk land on
+                // a byte-identical address without re-implementing "what is a declaration".
+                var declaration = nodeParent(nameNode);
+
                 var symbol = new DeepSymbol(
                     Text(nameNode, source),
                     "symbol",
@@ -196,16 +205,11 @@ public sealed unsafe class TreeSitter : IDisposable
                     Scope: scope,
                     Params: captures.TryGetValue("params", out var paramsNode)
                         ? Text(paramsNode, source)
-                        : null);
+                        : null,
+                    Span: nodeIsNull(declaration) != 0 ? null : SpanOf(newlines, declaration));
                 symbols.Add(symbol);
 
-                // The declaration node for a call-site parent walk (§5.2) is this capture's
-                // own parent: a tree-sitter field never inserts an extra layer, so `@name`'s
-                // ts_node_parent is exactly the function_declaration/method_definition/etc.
-                // the pattern matched. Recording it here, keyed by the same DeepSymbol
-                // Fragments() below will pair a fragment with, is what lets the walk land on
-                // a byte-identical address without re-implementing "what is a declaration".
-                declNodes[symbol] = nodeParent(nameNode);
+                declNodes[symbol] = declaration;
             }
 
             var modules = new List<string>();
@@ -561,6 +565,20 @@ public sealed unsafe class TreeSitter : IDisposable
         }
 
         return offsets;
+    }
+
+    /// <summary>
+    /// The declaration node's lines. Offsets are UTF-8 bytes, so they go through the newline table
+    /// rather than a char count; the end is the node's last byte, because an end offset is exclusive
+    /// and a node that swallows its trailing newline would otherwise report the next line.
+    /// </summary>
+    private LineSpan SpanOf(List<int> newlineOffsets, TsNode node)
+    {
+        var start = nodeStartByte(node);
+        var end = nodeEndByte(node);
+        return new LineSpan(
+            LineNumberAt(newlineOffsets, start),
+            LineNumberAt(newlineOffsets, end > start ? end - 1 : start));
     }
 
     /// <summary>1-based line number holding a byte offset, via binary search over <paramref name="newlineOffsets"/>.</summary>
