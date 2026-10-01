@@ -353,7 +353,7 @@ public class McpBrowseExpandReviseTests
     }
 
     [Fact]
-    public void Expand_IndexedCodeFact_Details_SaysGistOnlyAndWhereToRead()
+    public void Expand_IndexedCodeFact_Details_CarriesLocationHintAndTheLiveSource()
     {
         using var sandbox = new SandboxHome();
         var disk = DiskCheckout();
@@ -370,8 +370,9 @@ public class McpBrowseExpandReviseTests
 
             Assert.StartsWith(GistBody + "\n\n", result, StringComparison.Ordinal);
             Assert.Contains("r:src/a.cs", result, StringComparison.Ordinal);
-            Assert.Contains(Path.Combine(disk, "src", "a.cs"), result, StringComparison.Ordinal);
-            Assert.Contains("only this indexed gist", result, StringComparison.Ordinal);
+            Assert.Contains($"Source: {Path.Combine(disk, "src", "a.cs")} · lines ", result, StringComparison.Ordinal);
+            Assert.EndsWith("\nclass A {}", result, StringComparison.Ordinal);
+            Assert.DoesNotContain("only this indexed gist", result, StringComparison.Ordinal);
             Assert.Contains("engram_navigate \"Foo\"", result, StringComparison.Ordinal);
             Assert.Contains("repo \"r\"", result, StringComparison.Ordinal);
         }
@@ -453,7 +454,7 @@ public class McpBrowseExpandReviseTests
 
         Assert.DoesNotContain("Read it at", result, StringComparison.Ordinal);
         Assert.Contains("Indexed code: r:src/a.cs", result, StringComparison.Ordinal);
-        Assert.Contains("only this indexed gist", result, StringComparison.Ordinal);
+        Assert.EndsWith("Source unavailable: location unknown.", result, StringComparison.Ordinal);
 
         using var unregistered = new SandboxHome();
         long other;
@@ -464,7 +465,7 @@ public class McpBrowseExpandReviseTests
 
         var bare = Expand(unregistered, other, "details");
         Assert.DoesNotContain("Read it at", bare, StringComparison.Ordinal);
-        Assert.Contains("only this indexed gist", bare, StringComparison.Ordinal);
+        Assert.EndsWith("Source unavailable: location unknown.", bare, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -486,7 +487,11 @@ public class McpBrowseExpandReviseTests
             }
 
             Assert.Contains(
-                Path.Combine(disk, "src", "a.cs") + " (stale).", Expand(sandbox, id, "details"), StringComparison.Ordinal);
+                Path.Combine(disk, "src", "a.cs") + " · lines 1–1 of 1 · changed since indexed",
+                Expand(sandbox, id, "details"),
+                StringComparison.Ordinal);
+            Assert.Contains(
+                Path.Combine(disk, "src", "a.cs") + " (stale).", Expand(sandbox, id, "evidence"), StringComparison.Ordinal);
         }
         finally
         {
@@ -535,9 +540,23 @@ public class McpBrowseExpandReviseTests
 
             Assert.Contains("r:src/a.cs", result, StringComparison.Ordinal);
             Assert.Contains(Path.Combine(disk, "src", "a.cs"), result, StringComparison.Ordinal);
-            Assert.Contains("only this indexed gist", result, StringComparison.Ordinal);
             Assert.Contains("engram_navigate \"Foo\"", result, StringComparison.Ordinal);
             Assert.Contains("repo \"r\"", result, StringComparison.Ordinal);
+
+            // The details view is the one that reads the source; the others say where to look for it.
+            if (view == "details")
+            {
+                Assert.Contains("Source: ", result, StringComparison.Ordinal);
+                Assert.Contains("class A {}", result, StringComparison.Ordinal);
+                Assert.DoesNotContain("only this indexed gist", result, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains(
+                    "Engram keeps only this indexed gist (~60 tokens); the details view reads the current source.",
+                    result,
+                    StringComparison.Ordinal);
+            }
         }
         finally
         {
@@ -572,13 +591,15 @@ public class McpBrowseExpandReviseTests
     }
 
     [Fact]
-    public void Expand_IndexedCodeFact_Details_PagesAcrossTheNote()
+    public void Expand_IndexedCodeFact_Details_PagesAcrossTheSource()
     {
         using var sandbox = new SandboxHome();
+        var disk = Checkout(("docs/guide.md", GuideMd));
         long id;
         using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
         {
-            id = WriteIndexed(connection, RepoPath + "/src/a.cs#Foo", "symbol", GistBody);
+            id = WriteIndexed(connection, RepoPath + "/docs/guide.md", "file", "guide.md — a long guide.");
+            RegisterRepo(connection, disk, "docs/guide.md");
         }
 
         var whole = Expand(sandbox, id, "details");
@@ -609,6 +630,308 @@ public class McpBrowseExpandReviseTests
 
         Assert.True(pages > 3, $"only {pages} pages — the budget was meant to split the note");
         Assert.Equal(whole, joined.ToString());
+        Directory.Delete(disk, recursive: true);
+    }
+
+    private static readonly string GuideMd = string.Join(
+        "\n",
+        "# Guide",
+        "This guide explains how the widget works end to end.",
+        "",
+        "## Usage",
+        "Run the widget from the command line with the flags below.",
+        "Each flag changes one behaviour and none of them stack.",
+        "",
+        "## Maintenance",
+        "Clean the widget weekly and replace the filter monthly.") + "\n";
+
+    private static string Checkout(params (string Relative, string Content)[] files)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "engram-expand-" + Guid.NewGuid().ToString("N"));
+        foreach (var (relative, content) in files)
+        {
+            var path = Path.Combine(dir, relative.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, content);
+        }
+
+        return dir;
+    }
+
+    private static readonly string[] CSharpSource =
+    [
+        "using System;",        // 1
+        "",                     // 2
+        "public class Foo",     // 3
+        "{",                    // 4
+        "    public void Run()", // 5
+        "    {",                // 6
+        "    }",                // 7
+        "}",                    // 8
+    ];
+
+    private static string? SidecarOnly(string name) =>
+        name == RoslynSidecar.EnvironmentOverride ? SidecarLocator.Binary() : null;
+
+    private static string? NoSidecar(string name) =>
+        name == RoslynSidecar.EnvironmentOverride ? "/nonexistent/engram-roslyn" : null;
+
+    private static string Details(SandboxHome sandbox, long id, Func<string, string?> environment)
+    {
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        var fact = FactStore.ReadById(connection, id)!;
+        return IndexedCodeNote.BuildDetails(connection, sandbox.Home, fact, environment)!;
+    }
+
+    [Fact]
+    public void Details_SymbolOnAFreshFile_ShowsExactlyTheDeclarationLines()
+    {
+        using var sandbox = new SandboxHome();
+        var disk = Checkout(("src/a.cs", string.Join("\n", CSharpSource) + "\n"));
+        try
+        {
+            long id;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                id = WriteIndexed(connection, RepoPath + "/src/a.cs#Foo/Run", "symbol", GistBody);
+                RegisterRepo(connection, disk, "src/a.cs");
+            }
+
+            var file = Path.Combine(disk, "src", "a.cs");
+            Assert.Equal(
+                "Indexed code: r:src/a.cs (/projects/p/code/r/src/a.cs#Foo/Run)\n"
+                + "Structure: engram_navigate \"Foo/Run\" defined_at | members | callers, repo \"r\".\n"
+                + $"Source: {file} · lines 5–7 of 8\n"
+                + "    public void Run()\n    {\n    }",
+                Details(sandbox, id, SidecarOnly));
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Details_RenamedSymbol_ShowsTheWholeFileAndSaysItIsNotThere()
+    {
+        using var sandbox = new SandboxHome();
+        var disk = Checkout(("src/a.cs", string.Join("\n", CSharpSource).Replace("Run", "Walk") + "\n"));
+        try
+        {
+            long id;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                id = WriteIndexed(connection, RepoPath + "/src/a.cs#Foo/Run", "symbol", GistBody);
+                RegisterRepo(connection, disk, "src/a.cs");
+            }
+
+            var result = Details(sandbox, id, SidecarOnly);
+
+            Assert.Contains(" · lines 1–8 of 8 · not in the current file, whole file\n", result, StringComparison.Ordinal);
+            Assert.EndsWith("\n}", result, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Details_MemberWhenTheDeepTierIsUnavailable_ShowsTheWholeFileAndSaysSo()
+    {
+        using var sandbox = new SandboxHome();
+        var disk = Checkout(("src/a.cs", string.Join("\n", CSharpSource) + "\n"));
+        try
+        {
+            long id;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                id = WriteIndexed(connection, RepoPath + "/src/a.cs#Foo/Run", "symbol", GistBody);
+                RegisterRepo(connection, disk, "src/a.cs");
+            }
+
+            Assert.Contains(
+                " · lines 1–8 of 8 · analyzer unavailable, whole file\n",
+                Details(sandbox, id, NoSidecar),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Details_SectionAndFile_ShowTheirRanges()
+    {
+        using var sandbox = new SandboxHome();
+        var disk = Checkout(("docs/guide.md", GuideMd));
+        try
+        {
+            long section;
+            long file;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                section = WriteIndexed(connection, RepoPath + "/docs/guide.md#guide/usage", "section", "Usage — how to run it.");
+                file = WriteIndexed(connection, RepoPath + "/docs/guide.md", "file", "guide.md — the guide.");
+                RegisterRepo(connection, disk, "docs/guide.md");
+            }
+
+            var sectionResult = Expand(sandbox, section, "details");
+            var fileResult = Expand(sandbox, file, "details");
+
+            Assert.EndsWith(
+                " · lines 4–6 of 9\n## Usage\nRun the widget from the command line with the flags below.\n"
+                + "Each flag changes one behaviour and none of them stack.",
+                sectionResult,
+                StringComparison.Ordinal);
+            Assert.Contains(" · lines 1–9 of 9\n# Guide\n", fileResult, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Details_AnEditInsideTheSymbol_IsMarkedChangedAndShowsTheEditedLine()
+    {
+        using var sandbox = new SandboxHome();
+        var disk = Checkout(("docs/guide.md", GuideMd));
+        try
+        {
+            long id;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                id = WriteIndexed(connection, RepoPath + "/docs/guide.md#guide/usage", "section", "Usage — how to run it.");
+                RegisterRepo(connection, disk);
+                Execute(
+                    connection,
+                    "INSERT INTO file_state (repo_path, path, blob_sha, indexed_at) VALUES ($repo, 'docs/guide.md', 'x', 1);",
+                    ("$repo", RepoPath));
+            }
+
+            File.WriteAllText(
+                Path.Combine(disk, "docs", "guide.md"),
+                GuideMd.Replace("none of them stack", "all of them stack"));
+
+            var result = Expand(sandbox, id, "details");
+
+            Assert.Contains(" · lines 4–6 of 9 · changed since indexed\n", result, StringComparison.Ordinal);
+            Assert.Contains("all of them stack", result, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Expand_EvidenceAndSource_PointAtDetailsOnlyWhereItCanRead_AndNeverCarrySource()
+    {
+        using var sandbox = new SandboxHome();
+        var disk = Checkout(("src/a.cs", "class A { /* SOURCE-MARKER */ }"));
+        try
+        {
+            long readable;
+            long missing;
+            long unregistered;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                readable = WriteIndexed(connection, RepoPath + "/src/a.cs#Foo", "symbol", GistBody);
+                missing = WriteIndexed(connection, RepoPath + "/src/gone.cs#Foo", "symbol", GistBody);
+                RegisterRepo(connection, disk, "src/a.cs", "src/gone.cs");
+                unregistered = WriteIndexed(connection, "/projects/q/code/other/src/b.cs#Foo", "symbol", GistBody);
+            }
+
+            const string pointer = "the details view reads the current source";
+            foreach (var view in new[] { "evidence", "source" })
+            {
+                var ok = Expand(sandbox, readable, view);
+                Assert.Contains(pointer, ok, StringComparison.Ordinal);
+                Assert.DoesNotContain("SOURCE-MARKER", ok, StringComparison.Ordinal);
+
+                var gone = Expand(sandbox, missing, view);
+                Assert.DoesNotContain(pointer, gone, StringComparison.Ordinal);
+                Assert.Contains("not the source — there is nothing more to expand.", gone, StringComparison.Ordinal);
+
+                var bare = Expand(sandbox, unregistered, view);
+                Assert.DoesNotContain(pointer, bare, StringComparison.Ordinal);
+                Assert.Contains("not the source — there is nothing more to expand.", bare, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Expand_HistoryAndRelated_AreUnchangedForAnIndexedCodeFact()
+    {
+        using var sandbox = new SandboxHome();
+        var disk = DiskCheckout();
+        try
+        {
+            long id;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                id = WriteIndexed(connection, RepoPath + "/src/a.cs#Foo", "symbol", GistBody);
+                RegisterRepo(connection, disk, "src/a.cs");
+            }
+
+            foreach (var view in new[] { "history", "related" })
+            {
+                var result = Expand(sandbox, id, view);
+                Assert.DoesNotContain("Source:", result, StringComparison.Ordinal);
+                Assert.DoesNotContain("Indexed code", result, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Expand_Details_WritesNothingToTheStore()
+    {
+        using var sandbox = new SandboxHome();
+        var disk = DiskCheckout();
+        try
+        {
+            long id;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                id = WriteIndexed(connection, RepoPath + "/src/a.cs#Foo", "symbol", GistBody);
+                RegisterRepo(connection, disk, "src/a.cs");
+            }
+
+            (long Facts, long MaxId, long Entities, long Repos) Counts()
+            {
+                using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+                long Scalar(string sql)
+                {
+                    using var command = connection.CreateCommand();
+                    command.CommandText = sql;
+                    return Convert.ToInt64(command.ExecuteScalar());
+                }
+
+                return (
+                    Scalar("SELECT count(*) FROM fact"),
+                    Scalar("SELECT coalesce(max(id), 0) FROM fact"),
+                    Scalar("SELECT count(*) FROM entity"),
+                    Scalar("SELECT count(*) FROM repo_registry"));
+            }
+
+            var before = Counts();
+            Expand(sandbox, id, "details");
+            Assert.Equal(before, Counts());
+        }
+        finally
+        {
+            Directory.Delete(disk, recursive: true);
+        }
     }
 
     private static long Write(SqliteConnection connection, string path, string predicate, string body) =>

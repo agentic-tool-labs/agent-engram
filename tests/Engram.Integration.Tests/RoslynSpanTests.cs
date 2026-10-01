@@ -47,39 +47,9 @@ public class RoslynSpanTests
         "}",                                               // 35
     ];
 
-    private static string SidecarBinary()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "docs", "engram-schema.sql")))
-        {
-            dir = dir.Parent;
-        }
-
-        Assert.NotNull(dir);
-
-        var name = OperatingSystem.IsWindows() ? "engram-roslyn.exe" : "engram-roslyn";
-        var configurations = AppContext.BaseDirectory.Contains(
-            $"{Path.DirectorySeparatorChar}Release{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
-            ? new[] { "Release", "Debug" }
-            : ["Debug", "Release"];
-
-        foreach (var configuration in configurations)
-        {
-            var candidate = Path.Combine(
-                dir.FullName, "src", "Engram.Sidecar.Roslyn", "bin", configuration, "net10.0", name);
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-        }
-
-        Assert.Fail("engram-roslyn is not built; the ProjectReference in this test project should have built it");
-        return null!;
-    }
-
     private static Dictionary<string, LineSpan?> Spans(string content)
     {
-        var results = RoslynSidecar.Analyze(SidecarBinary(), [("Sample.cs", content)], TimeSpan.FromSeconds(30));
+        var results = RoslynSidecar.Analyze(SidecarLocator.Binary(), [("Sample.cs", content)], TimeSpan.FromSeconds(30));
         Assert.NotNull(results);
         var analysis = results["Sample.cs"];
         Assert.Null(analysis.Error);

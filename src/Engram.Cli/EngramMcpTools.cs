@@ -357,16 +357,16 @@ public sealed class EngramMcpTools
     [Description(
         "The full story behind one fact handle: its supersession history, related facts on the same " +
         "subject, its evidence, or where it was learned. Call it when a fact engram_recall returned " +
-        "needs scrutiny before you rely on it. The details view returns everything the handle holds, " +
-        "paged by budget_tokens and offset.")]
+        "needs scrutiny before you rely on it. The details view returns everything the handle holds " +
+        "(code: live source), paged by budget_tokens and offset.")]
     public static string Expand(
         EngramHome home,
         McpSessionId session,
         McpHomeState homeState,
         [Description("The bracketed fact id, e.g. \"f42\".")] string fact_id,
         [Description("One of: history, related, evidence, source, details.")] string view,
-        [Description("Maximum tokens returned per call. Defaults to 800.")] int budget_tokens = 800,
-        [Description("Character offset to continue a paged details view from. Defaults to 0.")] int offset = 0)
+        [Description("Max tokens per call. Defaults to 800.")] int budget_tokens = 800,
+        [Description("Character offset to continue a paged view from. Defaults to 0.")] int offset = 0)
     {
         if (!FactCatalog.TryParseHandle(fact_id, out var factId))
         {
@@ -395,7 +395,7 @@ public sealed class EngramMcpTools
             "related" => ExpandRelated(connection, fact),
             "evidence" => ExpandEvidence(connection, fact),
             "source" => ExpandSource(connection, fact),
-            "details" => ExpandDetails(connection, fact, budget_tokens, offset),
+            "details" => ExpandDetails(connection, home, fact, budget_tokens, offset),
             _ => $"Unknown view '{view}'. The views are history, related, evidence, source, and details.",
         };
     }
@@ -1737,10 +1737,11 @@ public sealed class EngramMcpTools
         return null;
     }
 
-    private static string ExpandDetails(SqliteConnection connection, StoredFact fact, int budgetTokens, int offset)
+    private static string ExpandDetails(
+        SqliteConnection connection, EngramHome home, StoredFact fact, int budgetTokens, int offset)
     {
         var text = fact.Details is null ? fact.Body : fact.Body + "\n\n" + fact.Details;
-        if (IndexedCodeNote.Build(connection, fact) is { } note)
+        if (IndexedCodeNote.BuildDetails(connection, home, fact, Environment.GetEnvironmentVariable) is { } note)
         {
             text += "\n\n" + note;
         }
