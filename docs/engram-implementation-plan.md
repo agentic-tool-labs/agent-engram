@@ -5397,19 +5397,36 @@ tree-sitter keeps comments as siblings, so one rule across both is "declaration 
 fields are additive: an older installed sidecar omits them and the client reads that as no span, so
 a C# member degrades to the whole file labelled `analyzer unavailable`.
 
-**Containment is checked twice, and each check has a test only it can fail.** A relative path with
-an empty, `.` or `..` segment, or a rooted one, makes `FileFreshness.Check` return `Unknown`, so no
-view ever prints a path that escapes the checkout; deleting that check reddens
-`ClimbingPath_ResolvesToNothing_SoNoViewCanPrintIt` and nothing else. After the freshness answer,
-the reader follows every symlink in the root and the file — the final component included — and
-refuses a file that resolves outside the root; deleting that reddens
-`LinkOutOfTheCheckout_IsRefused_AndNoOutsideByteIsReturned` and nothing else. The two do not
-overlap: a spelling check cannot see a symlink and a physical check never sees a `..` that
-canonicalisation already folded away. A repo registered through a symlinked parent still reads,
-because root and file resolve the same way. The size and binary rules are the indexer's, not copies
-(`max_file_bytes`, `IndexFilter.Classify` and `HeadBytes`), and at most `max_file_bytes + 1` bytes
-are ever pulled, so a file that grows after the stat still reports too large. An unreadable file is
-`unreadable`, never an exception out of expand.
+**Containment is checked twice, and the two checks have different jobs.** The lexical check lives in
+`FileFreshness.Check`. A relative path with an empty, `.` or `..` segment, a rooted one, or one
+whose full path leaves the repo root makes the verdict `Unknown`, so no expand view ever prints a
+path outside the repo. The physical check sits beside the read. It canonicalises the root and the
+file strictly: every symlink on the way to the file is resolved, the file's own last segment
+included, and it refuses anything that does not land inside the resolved root. Strict means fail
+closed. A link that cannot be inspected, or a chain of more than 32 links (macOS's own limit),
+counts as outside. The lenient canonicaliser the queue uses stops at eight links and carries on with
+the rest of the path as spelled, and that is a fail-open: ten nested in-repo directory links ending
+outside the checkout were measured reading the outside file as inside. The physical check would also
+refuse a `..` escape, because full-path normalisation folds it before the comparison. What stops the
+two checks from being one rule written twice is their tests. The lexical check is asserted on the
+verdict's state and path, which every view prints. The physical check is asserted on the read,
+through symlink chains containing no `..` at all. Delete either check and only its own test reddens.
+
+**Every tier numbers lines the same way, by counting `'\n'`.** Tier 0 splits on it, tree-sitter's
+newline table counts it in UTF-8 bytes, and the Roslyn sidecar counts it in the text before the
+node's start and before the node's last character. The sidecar does not use Roslyn's line map, which
+also breaks on a lone `\r` and on U+0085. A probe with one lone `\r` in a comment above a method had
+Roslyn report line 5 where the reader counts line 4, so `details` would have shown the wrong lines
+as the symbol, with no label. A span that still falls outside the file is treated as no span: the
+whole file, labelled `analyzer unavailable`. A disagreement between the sidecar and the reader can
+therefore neither mislabel code nor throw.
+
+**Residual, outside this decision: the indexer reads through symlinks.** The indexer itself reads
+through symlinks with no containment check. A tracked link to a file outside the checkout is listed
+by `git ls-files`, read, and summarised into a stored gist of up to 60 tokens, which recall can
+return. This decision's physical check guards only the full read in `details`. Closing the indexer's
+path changes what the scanner admits and interacts with the rule that a partial scan never deletes
+(D53). It is therefore its own change, and not part of this one.
 
 **A FIFO cannot be refused by type (E2).** Measured on .NET 10, macOS: a FIFO and a regular file both
 report `attrs=Normal`, with the same `FileInfo` shape, and a symlink reports `ReparsePoint`. Only
