@@ -5400,17 +5400,22 @@ a C# member degrades to the whole file labelled `analyzer unavailable`.
 **Containment is checked twice, and the two checks have different jobs.** The lexical check lives in
 `FileFreshness.Check`. A relative path with an empty, `.` or `..` segment, a rooted one, or one
 whose full path leaves the repo root makes the verdict `Unknown`, so no expand view ever prints a
-path outside the repo. The physical check sits beside the read. It canonicalises the root and the
-file strictly: every symlink on the way to the file is resolved, the file's own last segment
-included, and it refuses anything that does not land inside the resolved root. Strict means fail
-closed. A link that cannot be inspected, or a chain of more than 32 links (macOS's own limit),
-counts as outside. The lenient canonicaliser the queue uses stops at eight links and carries on with
-the rest of the path as spelled, and that is a fail-open: ten nested in-repo directory links ending
-outside the checkout were measured reading the outside file as inside. The physical check would also
-refuse a `..` escape, because full-path normalisation folds it before the comparison. What stops the
-two checks from being one rule written twice is their tests. The lexical check is asserted on the
-verdict's state and path, which every view prints. The physical check is asserted on the read,
-through symlink chains containing no `..` at all. Delete either check and only its own test reddens.
+path outside the repo. The second check sits beside the read, and it does not resolve symlinks. It
+refuses to read anything if any segment from the repo root down to the file, the file itself
+included, is a link. It decides by `LinkTarget`, which is readlink semantics, and never by
+attributes, because those read as every flag set for a path that does not exist. Given the lexical
+check, this is correct by construction: with no `.` or `..` and no link below the root, the path the
+kernel opens is the path that was checked. Resolving links by hand was built first, and it failed
+open twice. The first canonicaliser gave up after eight links and carried on with the rest of the
+path as spelled, so ten nested in-repo directory links ending outside the checkout read an outside
+file. Its fix folded a `..` inside a link target as text, before the link was followed, so two links
+(`D → <outside>/a/b` and `f.md → D/../x.md`) read `<outside>/a/x.md` while the check reported it
+inside. A correct resolver needs each platform's own call, and a symlinked file inside the repo is
+not worth that. Such a file gets no inline source, and its note still says where to read it. The
+registered root itself is trusted, so a checkout under a linked directory still reads. The two
+checks are kept apart by their tests. The lexical check is asserted on the verdict's state and path,
+which every view prints. The link check is asserted on the read, through link shapes that contain no
+`..` in the fact's own path. Delete either check and only its own test reddens.
 
 **Every tier numbers lines the same way, by counting `'\n'`.** Tier 0 splits on it, tree-sitter's
 newline table counts it in UTF-8 bytes, and the Roslyn sidecar counts it in the text before the
