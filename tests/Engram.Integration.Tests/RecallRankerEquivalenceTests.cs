@@ -87,6 +87,15 @@ public class RecallRankerEquivalenceTests
         Write(connection, "cafe", "café naïve 東京 — non-ASCII survives round-tripping.");
         Write(connection, "unrelated", "Nothing here concerns listeners or binding at all.", "inferred");
 
+        // The code-scope line names its file, so the object ranker and the SQL ranker must both
+        // carry the subject path into the formatter; a pathless one renders a different line.
+        FactStore.Remember(
+            connection,
+            new FactWrite(
+                "/projects/p/code/r/src/kestrel.cs#Bind", "symbol", "declared-as",
+                "Bind(port) — kestrel listener binder.", "code", "observed", Regenerable: true),
+            T0);
+
         // D64's trap: DetailsChars is computed by two separate derivations (FactCatalog.ToCannedFact
         // and RecallRanker's SQL projection), and neither the sweep above nor AssertCandidatesEqual's
         // Line comparison can catch the two disagreeing unless a seeded fact actually carries Details.

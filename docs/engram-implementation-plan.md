@@ -5297,3 +5297,167 @@ It never opens the database — the whole point is that a session's tool use bec
 the log alone. This is measurement only: the observer decides nothing and emits no output, and any
 nudge built on what it shows is a later, separately gated decision
 (`docs/proactive-remember-adoption-spec.md`).
+
+
+## D74 — Code facts say which file they describe, and a miss says where to look next
+
+**Decision.** Four readability gaps in how an indexed code fact reaches the model, settled without a
+schema change, a migration or an `AnalyzerVersion` bump.
+
+**The location token names the repo.** A code fact's recall line carries `<repo>:<rel path>` right
+after the scope, because a gist describes a symbol and never says where it lives. A bare relative
+path would not do: one recall on this repository returned four live facts with identical bodies —
+the same file indexed under four repo roots — and `ux_fact_live` allows them because the subject
+paths differ. The token is left-elided by whole directory segments to 64 characters, never cutting
+the repo slug or the file name. It keys on scope, not regenerability: a revised code-scope fact
+still addresses a file (D2). It is rendered inside `FormatFactLine`, so the budget's estimate, taken
+on the finished line, pays for it by construction; `CannedFact` gained an optional trailing
+`SubjectPath` so the object ranker's line and the SQL ranker's line stay identical (D30).
+
+**Expand says where the file is, because the gist is all Engram holds.** `engram_expand` on an
+indexed code fact (scope `code` and `Regenerable`) appends one shared note to the evidence, source
+and details views: repo and file, the on-disk path with its freshness, that only the gist is kept,
+and the `engram_navigate` call that answers structure, chosen by `entity.kind` because `#` introduces
+symbols and markdown sections alike. `FileFreshness` remains the single resolver from entity path to
+disk file — its verdict now carries the file it checked, rather than a second `repo_registry` query
+appearing beside it. Storing full chunks was rejected (a copy of readable source, growing the store
+by the size of every indexed repo); storing line ranges was rejected (a line number in a body turns
+every edit above a symbol into a new version of that fact, history churn with no belief change).
+
+**A browse miss names the nearest path that exists.** `MemoryBrowser.NearestAncestor` walks prefixes
+cut at `/` or `#` and asks membership as index range probes instead of Browse's `substr` scan, which
+would cost a full table scan per candidate. The range bounds assume BINARY collation on
+`entity.path`; `NearestAncestor_AgreesWithBrowseMembership` compares the probe against Browse itself
+over every seeded path and its ancestors, which is what catches that assumption failing. Roots are
+listed only when nothing below `/` matched. No CLI change: the TUI loop starts at `/` and descends
+only into listed paths, so its miss is an empty store.
+
+**Rejected: a recall `repo` filter.** It would have to sit inside each lane, because `seed_k` caps
+each at 32 (D60) and post-filtering starves the result into the false `coverage: none` that D44 and
+the availability note exist to prevent; in-lane filtering redesigns the single ranking statement
+(D59) across FTS, the token-overlap lane and sqlite-vec KNN, which has no path predicate, and then
+needs the 50k latency re-measured and `explain` mirrored. `engram_navigate` already takes `repo`
+for code by name, and the location token now puts the repo on every code line. No description
+sentence was added for it either — `engram_navigate`'s own description already says it.
+
+**The tool-surface ceiling was held at 6,550 by trimming, not re-baselined.** The code path form
+went into the existing "Paths look like" sentence and the `path` parameter lost its example, a net
++20 characters. The ceiling's own comment reserves re-baselines for features whose cost cannot be
+carried; prose that can be carried is not one.
+
+**Deferred: YAML/Helm extraction.** `.yaml` still yields one prose `about` fact. An
+`AnalyzerVersion` bump is store-wide and forces a re-read of the next repo indexed, while whether it
+reaches other repos is itself unsettled ("D-code-nav gap b"); there is no YAML parser in Core and
+Helm templates are not valid YAML. A future spec should bound it to top-level keys, cap it, skip
+`{{ … }}` lines, and settle the bump's reach first.
+
+**Two things worth knowing.** `Pack` does not charge the digest header and footer against the budget
+— by design, and true for non-code lines too — so the guarantee the tests hold is that the packed
+lines' summed estimates stay within it. And the expand tests' first paging guard passed with the
+note appended *outside* the paged text, because a small body concatenates identically either way;
+it only failed once it asserted per-page length and a page count.
+
+## D75 — Expanding an indexed code fact returns the live source of what it describes
+
+`engram_expand … details` on an indexed code fact (`Scope == "code"`, `Regenerable`) used to return a
+gist and "read it at <path>", which cost the model a second call and gave it no line range. It now
+reads the file at call time and returns exactly the lines the fact describes, under one header,
+`Source: <file> · lines a–b of N`, with ` · changed since indexed` when the file is newer than the
+index. `evidence` and `source` still say where to look, and point at `details` only where it can
+read something: a missing file or an unknown location keeps the old sentence, for the same reason
+D74 reports "Was at" and not "Read it at".
+
+**Rejected, and not to be reopened: storing the source, or its line numbers.** Chunks copy readable
+source and grow the store by roughly the size of the repo. A line number in any column, body or
+evidence turns every edit above a symbol into a new fact version, which is the append-only rule
+being used as a clock. Spans are therefore transient: computed from the live file on each call,
+never written anywhere. `CodeIndexerSpanTests` is the guard — it inserts five blank lines at the top
+of every file, re-indexes, and asserts no new fact version, no changed live body or evidence, and
+the same `AnalyzerVersion`. Putting the start line into a body reddens it; that arm was run.
+
+**Locate by re-running the indexer's own analysis, not by searching the file for the stored
+declaration text.** The indexer owns fragment identity (`DeepTier.Fragments`, `CodePaths.Slug`, the
+heading stack), so reusing it attributes a span by the exact rule that named the fact. Anchoring on
+the stored `declared-as` text is a second identity rule: it shows the wrong code confidently when
+the text occurs twice (nested types, overload-like duplicates) and fails the moment the signature is
+edited. Re-analysis survives body and signature edits and fails only on a rename, and then it fails
+honestly — the whole file, labelled `not in the current file`. The composition (tier 0, then the
+optional deep tier, then `DeepTier.Merge`) exists once, in `FileAnalysis.Analyze`, and the indexer
+and the reader both call it. Spans ride a side map beside the candidates, never on `CodeCandidate`,
+whose value equality decides what is written. `DeepSymbol` gained an optional `Span`, read by
+nothing that compares or writes.
+
+Tier 0 bounds a regex declaration by the next one and drops trailing blanks; sections end at the
+next heading of the same or shallower level; a file is `1…N`. Tier 1 takes the declaration node
+tree-sitter already pairs with each name, through the UTF-8 byte newline table — counting chars
+shifts every span below a multi-byte character, and that arm reddens the test. Tier 2 emits
+`startLine`/`endLine` from the node's `Span`, not `FullSpan`: attributes and modifiers are part of
+the declaration, a leading doc comment is trivia and is already the symbol's `about` fact, and
+tree-sitter keeps comments as siblings, so one rule across both is "declaration node only". The
+fields are additive: an older installed sidecar omits them and the client reads that as no span, so
+a C# member degrades to the whole file labelled `analyzer unavailable`.
+
+**Containment is checked twice, and the two checks have different jobs.** The lexical check lives in
+`FileFreshness.Check`. A relative path with an empty, `.` or `..` segment, a rooted one, or one
+whose full path leaves the repo root makes the verdict `Unknown`, so no expand view ever prints a
+path outside the repo. The second check sits beside the read, and it does not resolve symlinks. It
+refuses to read anything if any segment from the repo root down to the file, the file itself
+included, is a link. It decides by `LinkTarget`, which is readlink semantics, and never by
+attributes, because those read as every flag set for a path that does not exist. Given the lexical
+check, this is correct by construction: with no `.` or `..` and no link below the root, the path the
+kernel opens is the path that was checked. Resolving links by hand was built first, and it failed
+open twice. The first canonicaliser gave up after eight links and carried on with the rest of the
+path as spelled, so ten nested in-repo directory links ending outside the checkout read an outside
+file. Its fix folded a `..` inside a link target as text, before the link was followed, so two links
+(`D → <outside>/a/b` and `f.md → D/../x.md`) read `<outside>/a/x.md` while the check reported it
+inside. A correct resolver needs each platform's own call, and a symlinked file inside the repo is
+not worth that. Such a file gets no inline source, and its note still says where to read it. The
+registered root itself is trusted, so a checkout under a linked directory still reads. The two
+checks are kept apart by their tests. The lexical check is asserted on the verdict's state and path,
+which every view prints. The link check is asserted on the read, through link shapes that contain no
+`..` in the fact's own path. Delete either check and only its own test reddens.
+
+**Every tier numbers lines the same way, by counting `'\n'`.** Tier 0 splits on it, tree-sitter's
+newline table counts it in UTF-8 bytes, and the Roslyn sidecar counts it in the text before the
+node's start and before the node's last character. The sidecar does not use Roslyn's line map, which
+also breaks on a lone `\r` and on U+0085. A probe with one lone `\r` in a comment above a method had
+Roslyn report line 5 where the reader counts line 4, so `details` would have shown the wrong lines
+as the symbol, with no label. A span that still falls outside the file is treated as no span: the
+whole file, labelled `analyzer unavailable`. A disagreement between the sidecar and the reader can
+therefore neither mislabel code nor throw.
+
+**Residual, outside this decision: the indexer reads through symlinks.** The indexer itself reads
+through symlinks with no containment check. A tracked link to a file outside the checkout is listed
+by `git ls-files`, read, and summarised into a stored gist of up to 60 tokens, which recall can
+return. This decision's physical check guards only the full read in `details`. Closing the indexer's
+path changes what the scanner admits and interacts with the rule that a partial scan never deletes
+(D53). It is therefore its own change, and not part of this one.
+
+**A FIFO cannot be refused by type (E2).** Measured on .NET 10, macOS: a FIFO and a regular file both
+report `attrs=Normal`, with the same `FileInfo` shape, and a symlink reports `ReparsePoint`. Only
+directories are refused as `not a regular file`. The residual risk is that a FIFO at an indexed path
+would block the read; it is accepted because git cannot track one and the indexer's own read has the
+same exposure. A directory at the path reads as `Missing` to `File.Exists`, so the reader checks for
+it before reporting `file missing`.
+
+**Paging stays stateless, so offsets assume an unchanged file.** Each page call re-reads and
+re-analyses the file, exactly as the pager already recomputes everything per call (D64). A file
+edited between two pages can therefore shift later offsets; the footer's `continue with offset`
+is advice about a text that no longer exists. Accepted: holding the text server-side would make the
+pager stateful for a case whose cost is one confusing page.
+
+**E1 — `details` latency, on the published binary with real grammars and the freshly built
+sidecar, sandboxed home, 20 alternating calls per arm.** C# member: p50 116.9 ms, p95 126.7 ms.
+TypeScript function: p50 33.1 ms, p95 36.5 ms. Calibration (a non-code fact): p50 0.5 ms, p95
+4.0 ms. C# p95 minus calibration p95 is 122.7 ms against the 1,000 ms line, so a per-call sidecar
+spawn is accepted as designed; the plan's ~300 ms figure was an estimate, not a measurement, and
+overstated it by about 2.5x. A held sidecar process would be a separate design and was not built.
+
+**Description arithmetic.** The ceiling stays 6,550. The `details` clause gained `(code: live
+source)`, +20 characters, paid for by trimming `offset` ("a paged view", −8) and `budget_tokens`
+("Max tokens per call", −13). Measured total 6,536 against 6,550, so headroom is 14 and the next
+description change must trim. The guard is `McpToolSurfaceBudgetTests`, unchanged.
+
+**Not changed.** Schema, `AnalyzerVersion`, `code_index_version`, any fact body, predicate,
+evidence or path the indexer writes, the recall line, budget and markers (D30, D44, D57, D64), the
+`history` and `related` views, `MemoryBrowser`, and the pager's algorithm.

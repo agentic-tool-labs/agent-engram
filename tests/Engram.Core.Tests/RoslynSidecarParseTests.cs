@@ -41,4 +41,19 @@ public class RoslynSidecarParseTests
         Assert.NotNull(analysis);
         Assert.Null(Assert.Single(analysis.Calls).EnclosingFragment);
     }
+
+    [Fact]
+    public void Parse_ReadsASymbolsLineRange_AndTreatsAbsentFieldsAsNoSpan()
+    {
+        var withLines = RoslynSidecar.Parse(
+            """{"path":"a.cs","symbols":[{"id":0,"name":"A","kind":"class","declaration":"class A","startLine":3,"endLine":7}],"imports":[],"calls":[]}""");
+        var older = RoslynSidecar.Parse(
+            """{"path":"a.cs","symbols":[{"id":0,"name":"A","kind":"class","declaration":"class A"}],"imports":[],"calls":[]}""");
+        var inverted = RoslynSidecar.Parse(
+            """{"path":"a.cs","symbols":[{"id":0,"name":"A","kind":"class","declaration":"class A","startLine":9,"endLine":2}],"imports":[],"calls":[]}""");
+
+        Assert.Equal(new LineSpan(3, 7), withLines!.Symbols[0].Span);
+        Assert.Null(older!.Symbols[0].Span);
+        Assert.Null(inverted!.Symbols[0].Span);
+    }
 }

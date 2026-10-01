@@ -7,6 +7,10 @@ namespace Engram.Core;
 /// revised belief indistinguishable from one that was always held; the count is the only thing
 /// in reach that separates them.
 /// </param>
+/// <param name="SubjectPath">
+/// The subject's entity path. Only a <c>code</c>-scope line reads it, to say which file the fact
+/// addresses — the gist body alone never does.
+/// </param>
 public sealed record CannedFact(
     string Id,
     string Subject,
@@ -18,7 +22,8 @@ public sealed record CannedFact(
     string? Evidence = null,
     int Versions = 1,
     int DetailsChars = 0,
-    bool Judged = false);
+    bool Judged = false,
+    string? SubjectPath = null);
 
 public static class CannedFacts
 {

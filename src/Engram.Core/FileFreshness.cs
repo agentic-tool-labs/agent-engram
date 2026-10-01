@@ -47,7 +47,7 @@ public static class FileFreshness
         Missing,
     }
 
-    public readonly record struct Verdict(State State, TimeSpan Behind)
+    public readonly record struct Verdict(State State, TimeSpan Behind, string? File = null, string? Root = null)
     {
         public static readonly Verdict Unknown = new(FileFreshness.State.Unknown, TimeSpan.Zero);
 
@@ -95,10 +95,26 @@ public static class FileFreshness
                 return Verdict.Unknown;
             }
 
+            // The relative path comes from a store row. One that climbs out of the checkout must not
+            // resolve to a file at all, or every view that prints the verdict's path would print it.
             var file = Path.Combine(diskPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
+            var root = Path.GetFullPath(diskPath);
+            if (!PathContainment.IsSafeRelative(relativePath) || !PathContainment.IsWithin(root, file))
+            {
+                return Verdict.Unknown;
+            }
+
             if (!File.Exists(file))
             {
-                return new Verdict(State.Missing, TimeSpan.Zero);
+                return new Verdict(State.Missing, TimeSpan.Zero, file, root);
+            }
+
+            // File.Exists is true for a link whose target is gone, but there is nothing to read behind
+            // it: it is as absent as a deleted file, and must not be described as one to go and read.
+            // Used for this label only; nothing is read through the link here.
+            if (IsDanglingLink(file))
+            {
+                return new Verdict(State.Missing, TimeSpan.Zero, file, root);
             }
 
             // indexed_at has second resolution, so a write inside the same second as the index run
@@ -107,8 +123,8 @@ public static class FileFreshness
                 - DateTimeOffset.FromUnixTimeSeconds(indexedAt.Value).UtcDateTime;
 
             return behind > TimeSpan.FromSeconds(1)
-                ? new Verdict(State.Stale, behind)
-                : new Verdict(State.Fresh, TimeSpan.Zero);
+                ? new Verdict(State.Stale, behind, file, root)
+                : new Verdict(State.Fresh, TimeSpan.Zero, file, root);
         }
         catch (SqliteException)
         {
@@ -125,6 +141,23 @@ public static class FileFreshness
         catch (ArgumentException)
         {
             return Verdict.Unknown;
+        }
+    }
+
+    private static bool IsDanglingLink(string file)
+    {
+        try
+        {
+            return new FileInfo(file).LinkTarget is not null
+                && File.ResolveLinkTarget(file, returnFinalTarget: true) is not { Exists: true };
+        }
+        catch (IOException)
+        {
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
         }
     }
 

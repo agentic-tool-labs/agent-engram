@@ -288,12 +288,12 @@ public sealed class EngramMcpTools
     [Description(
         "List what Engram's memory holds under a path — children, fact counts, and the top facts at that node. " +
         "A table of contents, not a search: engram_recall finds facts by content, this shows how an " +
-        "area is organised. Paths look like /people/jim or /projects/acme.")]
+        "area is organised. Paths look like /people/jim or /projects/acme/code/<repo>/<file>#Symbol (indexed code).")]
     public static string Browse(
         EngramHome home,
         McpSessionId session,
         McpHomeState homeState,
-        [Description("The memory path to list, e.g. /projects/acme.")] string path,
+        [Description("The memory path to list.")] string path,
         [Description("Levels of children to show, 1-3. Defaults to 1.")] int? depth = null)
     {
         using var connection = EngramDatabase.OpenInitialized(home);
@@ -310,8 +310,24 @@ public sealed class EngramMcpTools
 
         if (node is null)
         {
-            return $"Nothing in memory under {path}. Browse lists structure that exists; "
-                + "engram_recall searches by content and does not need a path.";
+            var nearest = MemoryBrowser.NearestAncestor(connection, path) is { } ancestor
+                ? MemoryBrowser.Browse(connection, ancestor, 1)
+                : null;
+
+            if (nearest is null)
+            {
+                return $"Nothing in memory under {path}. Browse lists structure that exists; "
+                    + "engram_recall searches by content and does not need a path.";
+            }
+
+            var miss = new System.Text.StringBuilder();
+            miss.Append("Nothing in memory under ").Append(path).Append(".\nNearest path that exists: ")
+                .Append(nearest.Path).Append(" — ").Append(CountText(nearest.FactsHere, "fact"))
+                .Append(" here, ").Append(nearest.FactsUnder).Append(" under it\n");
+            AppendChildren(miss, nearest, "  ");
+            miss.Append("Indexed code lives at /projects/<project>/code/<repo>/<file path>; "
+                + "engram_recall searches by content and needs no path.");
+            return miss.ToString();
         }
 
         var builder = new System.Text.StringBuilder();
@@ -341,16 +357,16 @@ public sealed class EngramMcpTools
     [Description(
         "The full story behind one fact handle: its supersession history, related facts on the same " +
         "subject, its evidence, or where it was learned. Call it when a fact engram_recall returned " +
-        "needs scrutiny before you rely on it. The details view returns everything the handle holds, " +
-        "paged by budget_tokens and offset.")]
+        "needs scrutiny before you rely on it. The details view returns everything the handle holds " +
+        "(code: live source), paged by budget_tokens and offset.")]
     public static string Expand(
         EngramHome home,
         McpSessionId session,
         McpHomeState homeState,
         [Description("The bracketed fact id, e.g. \"f42\".")] string fact_id,
         [Description("One of: history, related, evidence, source, details.")] string view,
-        [Description("Maximum tokens returned per call. Defaults to 800.")] int budget_tokens = 800,
-        [Description("Character offset to continue a paged details view from. Defaults to 0.")] int offset = 0)
+        [Description("Max tokens per call. Defaults to 800.")] int budget_tokens = 800,
+        [Description("Character offset to continue a paged view from. Defaults to 0.")] int offset = 0)
     {
         if (!FactCatalog.TryParseHandle(fact_id, out var factId))
         {
@@ -377,9 +393,9 @@ public sealed class EngramMcpTools
         {
             "history" => ExpandHistory(connection, fact),
             "related" => ExpandRelated(connection, fact),
-            "evidence" => ExpandEvidence(fact),
+            "evidence" => ExpandEvidence(connection, fact),
             "source" => ExpandSource(connection, fact),
-            "details" => ExpandDetails(fact, budget_tokens, offset),
+            "details" => ExpandDetails(connection, home, fact, budget_tokens, offset),
             _ => $"Unknown view '{view}'. The views are history, related, evidence, source, and details.",
         };
     }
@@ -1650,7 +1666,7 @@ public sealed class EngramMcpTools
         return builder.ToString().TrimEnd('\n');
     }
 
-    private static string ExpandEvidence(StoredFact fact)
+    private static string ExpandEvidence(SqliteConnection connection, StoredFact fact)
     {
         var evidence = string.IsNullOrWhiteSpace(fact.Evidence)
             ? "No evidence was recorded with this fact."
@@ -1660,20 +1676,27 @@ public sealed class EngramMcpTools
             ? " It is regenerable — the indexer can recompute it from source, and 'engram index' refreshes it."
             : " It is not regenerable: it exists only because it was recorded, and nothing can recompute it.";
 
-        return $"[{FactCatalog.HandleFor(fact.Id)}] {evidence} Learned via '{fact.LearnedVia}', "
+        var text = $"[{FactCatalog.HandleFor(fact.Id)}] {evidence} Learned via '{fact.LearnedVia}', "
             + $"recorded {When(fact.CreatedAt)}.{regenerable}";
+
+        return IndexedCodeNote.Build(connection, fact) is { } note ? text + "\n" + note : text;
     }
 
     private static string ExpandSource(SqliteConnection connection, StoredFact fact)
     {
         var sitting = MemoryBrowser.Sitting(connection, fact.Id);
-        var origin = sitting is { } s
-            ? $"recorded in session {s.ExternalId} (started {When(s.StartedAt)})"
-            : "recorded outside any tracked session — seeded, indexed, or written by the CLI";
+        var indexedFrom = IndexedCodeNote.LocationOf(fact);
+        var origin = indexedFrom is not null
+            ? $"indexed from {indexedFrom}"
+            : sitting is { } s
+                ? $"recorded in session {s.ExternalId} (started {When(s.StartedAt)})"
+                : "recorded outside any tracked session — seeded, indexed, or written by the CLI";
 
-        return $"[{FactCatalog.HandleFor(fact.Id)}] was {origin}, learned via '{fact.LearnedVia}' "
+        var text = $"[{FactCatalog.HandleFor(fact.Id)}] was {origin}, learned via '{fact.LearnedVia}' "
             + $"on {When(fact.CreatedAt)}."
             + (fact.ValidTo is { } closed ? $" It was closed {When(closed)}." : " It is currently believed.");
+
+        return IndexedCodeNote.Build(connection, fact) is { } note ? text + "\n" + note : text;
     }
 
     // Shared by engram_remember and engram_revise so the ceiling and its wording cannot
@@ -1714,9 +1737,14 @@ public sealed class EngramMcpTools
         return null;
     }
 
-    private static string ExpandDetails(StoredFact fact, int budgetTokens, int offset)
+    private static string ExpandDetails(
+        SqliteConnection connection, EngramHome home, StoredFact fact, int budgetTokens, int offset)
     {
         var text = fact.Details is null ? fact.Body : fact.Body + "\n\n" + fact.Details;
+        if (IndexedCodeNote.BuildDetails(connection, home, fact, Environment.GetEnvironmentVariable) is { } note)
+        {
+            text += "\n\n" + note;
+        }
 
         if (offset < 0 || offset >= text.Length)
         {

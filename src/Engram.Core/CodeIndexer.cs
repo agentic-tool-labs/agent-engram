@@ -531,11 +531,7 @@ public static class CodeIndexer
 
         var language = LanguageRegistry.Resolve(rel);
         var filePath = CodePaths.ForFile(repoPath, rel);
-        var candidates = CodeAnalyzer.Analyze(filePath, content, language);
-        if (deep is not null)
-        {
-            candidates = DeepTier.Merge(filePath, candidates, deep);
-        }
+        var candidates = FileAnalysis.Analyze(filePath, content, language, deep).Candidates;
 
         var live = ReadLiveUnder(connection, filePath);
 

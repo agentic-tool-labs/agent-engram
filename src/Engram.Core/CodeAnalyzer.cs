@@ -38,14 +38,31 @@ public static class CodeAnalyzer
     public static IReadOnlyList<CodeCandidate> Analyze(
         string fileEntityPath,
         string content,
-        LanguageDefinition language)
+        LanguageDefinition language) => Analyze(fileEntityPath, content, language, null);
+
+    /// <summary>
+    /// The same analysis, also filling <paramref name="spans"/> with the line range of each entity it
+    /// finds. Spans live in a side map rather than on <see cref="CodeCandidate"/>, whose value
+    /// equality decides what the indexer writes: a line number there would make every edit above a
+    /// symbol look like a changed fact.
+    /// </summary>
+    internal static IReadOnlyList<CodeCandidate> Analyze(
+        string fileEntityPath,
+        string content,
+        LanguageDefinition language,
+        Dictionary<string, LineSpan>? spans)
     {
         var candidates = new List<CodeCandidate>();
         var fileName = fileEntityPath[(fileEntityPath.LastIndexOf('/') + 1)..];
+        var lines = spans is null ? null : LineSpan.Lines(content);
+        if (spans is not null)
+        {
+            spans[fileEntityPath] = new LineSpan(1, lines!.Count);
+        }
 
         if (language.DocHeadings)
         {
-            AnalyzeDocument(fileEntityPath, fileName, content, candidates);
+            AnalyzeDocument(fileEntityPath, fileName, content, candidates, spans, lines);
             return candidates;
         }
 
@@ -58,7 +75,7 @@ public static class CodeAnalyzer
             candidates.Add(new CodeCandidate(fileEntityPath, "file", fileName, "about", impression));
         }
 
-        AddDeclarations(fileEntityPath, content, language, candidates);
+        AddDeclarations(fileEntityPath, content, language, candidates, spans, lines);
         AddImports(fileEntityPath, fileName, content, language, candidates);
 
         return candidates;
@@ -68,9 +85,13 @@ public static class CodeAnalyzer
         string fileEntityPath,
         string content,
         LanguageDefinition language,
-        List<CodeCandidate> candidates)
+        List<CodeCandidate> candidates,
+        Dictionary<string, LineSpan>? spans,
+        IReadOnlyList<string>? lines)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
+        var starts = spans is null ? null : new List<(string Path, int Start)>();
+        var newlines = spans is null ? null : LineSpan.NewlineOffsets(content);
 
         foreach (var pattern in language.DeclarationPatterns)
         {
@@ -83,13 +104,29 @@ public static class CodeAnalyzer
                 }
 
                 var line = LineOf(content, match.Index).Trim();
+                var symbolPath = CodePaths.ForSymbol(fileEntityPath, name);
                 candidates.Add(new CodeCandidate(
-                    CodePaths.ForSymbol(fileEntityPath, name),
+                    symbolPath,
                     "symbol",
                     name,
                     "declared-as",
                     Cap(line)));
+                starts?.Add((symbolPath, LineSpan.LineNumber(newlines!, match.Index)));
             }
+        }
+
+        if (starts is null)
+        {
+            return;
+        }
+
+        // Regexes find declarations pattern by pattern, so source order is rebuilt before each one is
+        // bounded by the next declaration's start.
+        starts.Sort((a, b) => a.Start.CompareTo(b.Start));
+        for (var i = 0; i < starts.Count; i++)
+        {
+            var next = i + 1 < starts.Count ? starts[i + 1].Start - 1 : lines!.Count;
+            spans![starts[i].Path] = LineSpan.Trimmed(lines!, starts[i].Start, Math.Max(starts[i].Start, next));
         }
     }
 
@@ -130,18 +167,22 @@ public static class CodeAnalyzer
         string fileEntityPath,
         string fileName,
         string content,
-        List<CodeCandidate> candidates)
+        List<CodeCandidate> candidates,
+        Dictionary<string, LineSpan>? spans,
+        IReadOnlyList<string>? sourceLines)
     {
         var lines = content.Split('\n');
+        var headings = new List<(int Line, int Level)>();
+        var firstHeading = new Dictionary<string, int>(StringComparer.Ordinal);
         var stack = new List<(int Level, string Slug)>();
         var sections = new List<(string Fragment, string Heading, StringBuilder Body)>();
         var bodies = new Dictionary<string, StringBuilder>(StringComparer.Ordinal);
         var preamble = new StringBuilder();
         var current = preamble;
 
-        foreach (var raw in lines)
+        for (var lineIndex = 0; lineIndex < lines.Length; lineIndex++)
         {
-            var line = raw.TrimEnd('\r');
+            var line = lines[lineIndex].TrimEnd('\r');
             var level = HeadingLevel(line, out var heading);
 
             if (level == 0)
@@ -160,6 +201,8 @@ public static class CodeAnalyzer
             // Two headings can slug to one fragment; their prose merges under the first,
             // because one address can only hold one section entity.
             var fragment = string.Join('/', stack.ConvertAll(entry => entry.Slug));
+            headings.Add((lineIndex + 1, level));
+            firstHeading.TryAdd(fragment, headings.Count - 1);
             if (!bodies.TryGetValue(fragment, out var body))
             {
                 body = new StringBuilder();
@@ -179,6 +222,23 @@ public static class CodeAnalyzer
 
         foreach (var (fragment, heading, body) in sections)
         {
+            if (spans is not null)
+            {
+                var index = firstHeading[fragment];
+                var (start, level) = headings[index];
+                var end = sourceLines!.Count;
+                for (var next = index + 1; next < headings.Count; next++)
+                {
+                    if (headings[next].Level <= level)
+                    {
+                        end = headings[next].Line - 1;
+                        break;
+                    }
+                }
+
+                spans[CodePaths.ForSection(fileEntityPath, fragment)] = LineSpan.Trimmed(sourceLines!, start, Math.Max(start, end));
+            }
+
             var impression = ImpressionExtractor.FromProse(body.ToString());
             if (impression is not null)
             {

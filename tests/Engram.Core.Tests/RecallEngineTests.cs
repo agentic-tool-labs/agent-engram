@@ -180,6 +180,91 @@ public class RecallEngineTests
         Assert.DoesNotContain("· v", result.Text);
     }
 
+    private const string CodePath = "/projects/p/code/r/src/a.cs#Foo";
+
+    private static CannedFact CodeFact(string path, int versions = 1, int detailsChars = 0, bool judged = false, string scope = "code") =>
+        new("f7", "Foo", "states", "Gist.", scope, "topic", 3, null, versions, detailsChars, judged, path);
+
+    [Fact]
+    public void FormatFactLine_CodeFact_ShowsRepoAndFileBeforeAge()
+    {
+        Assert.Equal("[f7] Gist. (code · r:src/a.cs · 3d)", RecallEngine.FormatFactLine(CodeFact(CodePath)));
+    }
+
+    [Fact]
+    public void FormatFactLine_CodeFact_MarkersStayAfterAge()
+    {
+        Assert.Equal(
+            "[f7] Gist. (code · r:src/a.cs · 3d · v2 · judged · +1.2k)",
+            RecallEngine.FormatFactLine(CodeFact(CodePath, versions: 2, detailsChars: 1200, judged: true)));
+    }
+
+    [Fact]
+    public void FormatFactLine_NonCodeScopeWithCodePath_IsUnchanged()
+    {
+        Assert.Equal("[f7] Gist. (project · 3d)", RecallEngine.FormatFactLine(CodeFact(CodePath, scope: "project")));
+    }
+
+    [Theory]
+    [InlineData("/projects/p/code/r")]
+    [InlineData("/knowledge/testing/x")]
+    public void FormatFactLine_CodeFact_UnsplittablePath_RendersAsBefore(string path)
+    {
+        Assert.Equal("[f7] Gist. (code · 3d)", RecallEngine.FormatFactLine(CodeFact(path)));
+    }
+
+    [Fact]
+    public void FormatFactLine_CodeFact_NoPath_RendersAsBefore()
+    {
+        var fact = new CannedFact("f7", "Foo", "states", "Gist.", "code", "topic", 3);
+
+        Assert.Equal("[f7] Gist. (code · 3d)", RecallEngine.FormatFactLine(fact));
+    }
+
+    [Fact]
+    public void Elision_ExactlyAtTheLimit_IsUnchanged()
+    {
+        var rel = "d/" + new string('x', CodePaths.MaxLocationChars - "r:d/".Length);
+        Assert.Equal(CodePaths.MaxLocationChars, ("r:" + rel).Length);
+
+        Assert.Equal("r:" + rel, CodePaths.ElidedLocationText("/projects/p/code/r/" + rel));
+    }
+
+    [Fact]
+    public void Elision_OneOverTheLimit_DropsTheFirstSegmentOnly()
+    {
+        var name = new string('x', CodePaths.MaxLocationChars + 1 - "r:dd/ee/".Length);
+        var rel = $"dd/ee/{name}";
+        Assert.Equal(CodePaths.MaxLocationChars + 1, ("r:" + rel).Length);
+
+        Assert.Equal($"r:…/ee/{name}", CodePaths.ElidedLocationText("/projects/p/code/r/" + rel));
+    }
+
+    [Fact]
+    public void Elision_OverlongFileName_KeepsRepoAndWholeName()
+    {
+        var name = new string('n', 80) + ".cs";
+
+        Assert.Equal($"r:…/{name}", CodePaths.ElidedLocationText($"/projects/p/code/r/a/b/{name}"));
+    }
+
+    [Fact]
+    public void Elision_DirectorylessPath_IsNeverElided()
+    {
+        var name = new string('n', 80) + ".cs";
+
+        Assert.Equal($"r:{name}", CodePaths.ElidedLocationText($"/projects/p/code/r/{name}"));
+    }
+
+    [Fact]
+    public void Elision_DropsWholeSegmentsUntilItFits()
+    {
+        Assert.Equal(
+            "acme-billing-service:…/acme/billing/invoice/InvoiceService.java",
+            CodePaths.ElidedLocationText(
+                "/projects/p/code/acme-billing-service/src/main/java/com/acme/billing/invoice/InvoiceService.java"));
+    }
+
     [Fact]
     public void FormatFactLine_NothingWithheld_HasNoMarker()
     {

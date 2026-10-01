@@ -5,7 +5,9 @@ namespace Engram.Core;
 /// containing type names (<c>Outer/Inner</c>) or null at top level; <paramref name="Params"/>
 /// is the parameter list exactly as written, parentheses included, or null for anything
 /// that has none. Both are raw material: <see cref="DeepTier.Fragments"/> is what turns
-/// them into an address, so neither tier ever composes one.
+/// them into an address, so neither tier ever composes one. <paramref name="Span"/> is where the
+/// declaration sits in the file just analysed — transient, read by the source reader and by nothing
+/// that decides what the indexer writes.
 /// </summary>
 public sealed record DeepSymbol(
     string Name,
@@ -13,7 +15,8 @@ public sealed record DeepSymbol(
     string Declaration,
     string? Doc,
     string? Scope = null,
-    string? Params = null);
+    string? Params = null,
+    LineSpan? Span = null);
 
 /// <summary>One observed call site: who called, what name they wrote, where.</summary>
 public sealed record DeepCall(
@@ -101,6 +104,22 @@ public static class DeepTier
         }
 
         return fragments;
+    }
+
+    /// <summary>
+    /// The span of every address <see cref="Merge"/> would write a declaration for, first declaration
+    /// winning exactly as it does there. A symbol the tier reported without a span maps to null, so
+    /// the caller can tell "no span" from "not produced".
+    /// </summary>
+    public static IReadOnlyDictionary<string, LineSpan?> Spans(string fileEntityPath, DeepAnalysis analysis)
+    {
+        var spans = new Dictionary<string, LineSpan?>(StringComparer.Ordinal);
+        foreach (var (fragment, symbol) in Fragments(analysis.Symbols))
+        {
+            spans.TryAdd(CodePaths.ForSymbol(fileEntityPath, fragment), symbol.Span);
+        }
+
+        return spans;
     }
 
     /// <summary>

@@ -322,7 +322,7 @@ public static class RecallRanker
         var line = origin switch
         {
             FactOrigin.LongTerm => RecallEngine.FormatFactLine(
-                new CannedFact(handle, subjectName, string.Empty, body, scope, string.Empty, ageDays, null, versions, detailsChars, judged)),
+                new CannedFact(handle, subjectName, string.Empty, body, scope, string.Empty, ageDays, null, versions, detailsChars, judged, path)),
             FactOrigin.CurrentSession => RecallEngine.FormatSessionFactLine(
                 ToSessionFact(factId, body, path, subjectName, ageDays, detailsChars, agentNames)),
             FactOrigin.PriorSession => RecallEngine.FormatPriorSessionFactLine(
