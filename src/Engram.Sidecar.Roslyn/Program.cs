@@ -246,10 +246,12 @@ static void Emit(
     };
 
     // Span, not FullSpan: attributes and modifiers belong to the declaration, a leading doc comment
-    // is trivia and is already the symbol's `about` fact.
-    var lines = declaration.SyntaxTree.GetLineSpan(declaration.Span);
-    symbol["startLine"] = lines.StartLinePosition.Line + 1;
-    symbol["endLine"] = lines.EndLinePosition.Line + 1;
+    // is trivia and is already the symbol's `about` fact. Lines are counted by '\n' like every other
+    // tier's, not through Roslyn's line map, which also breaks on a lone '\r' and on U+0085 and would
+    // number a member differently from the reader that shows the lines.
+    var span = declaration.Span;
+    symbol["startLine"] = NewlineLines.LineOf(declaration.SyntaxTree, span.Start);
+    symbol["endLine"] = NewlineLines.LineOf(declaration.SyntaxTree, Math.Max(span.Start, span.End - 1));
 
     if (scope is not null)
     {
@@ -420,4 +422,28 @@ static string? DocSummary(MemberDeclarationSyntax declaration)
     text = string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     return text.Length == 0 ? null : text.Length > 300 ? text[..300] : text;
+}
+
+internal static class NewlineLines
+{
+    private static readonly ConditionalWeakTable<SyntaxTree, int[]> Tables = new();
+
+    /// <summary>The 1-based line holding a character position, counting only '\n'.</summary>
+    public static int LineOf(SyntaxTree tree, int position)
+    {
+        var newlines = Tables.GetValue(tree, t =>
+        {
+            var text = t.GetText().ToString();
+            var offsets = new List<int>();
+            for (var i = text.IndexOf('\n'); i >= 0; i = text.IndexOf('\n', i + 1))
+            {
+                offsets.Add(i);
+            }
+
+            return [.. offsets];
+        });
+
+        var at = Array.BinarySearch(newlines, position);
+        return (at < 0 ? ~at : at) + 1;
+    }
 }

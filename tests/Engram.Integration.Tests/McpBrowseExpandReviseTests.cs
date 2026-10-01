@@ -761,6 +761,50 @@ public class McpBrowseExpandReviseTests
         }
     }
 
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    private static string StubSidecar(int startLine, int endLine)
+    {
+        var script = Path.Combine(Path.GetTempPath(), $"engram-stub-{Guid.NewGuid():N}.sh");
+        File.WriteAllText(
+            script,
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "
+            + $"'{{\"path\":\"src/a.cs\",\"symbols\":[{{\"id\":0,\"name\":\"Run\",\"kind\":\"method\",\"declaration\":\"public void Run()\","
+            + $"\"scope\":\"Foo\",\"params\":\"()\",\"startLine\":{startLine},\"endLine\":{endLine}}}],\"imports\":[],\"calls\":[]}}'\n");
+        File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        return script;
+    }
+
+    [Theory]
+    [InlineData(5, 58)]
+    [InlineData(0, 7)]
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    public void Details_ASidecarRangeOutsideTheFile_ShowsTheWholeFileAndDoesNotThrow(int startLine, int endLine)
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "the stub sidecar is a shell script");
+        var disk = Checkout(("src/a.cs", string.Join("\n", CSharpSource) + "\n"));
+        var stub = StubSidecar(startLine, endLine);
+        try
+        {
+            using var sandbox = new SandboxHome();
+            long id;
+            using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+            {
+                id = WriteIndexed(connection, RepoPath + "/src/a.cs#Foo/Run", "symbol", GistBody);
+                RegisterRepo(connection, disk, "src/a.cs");
+            }
+
+            var result = Details(sandbox, id, name => name == RoslynSidecar.EnvironmentOverride ? stub : null);
+
+            Assert.Contains(" · lines 1–8 of 8 · analyzer unavailable, whole file\n", result, StringComparison.Ordinal);
+            Assert.EndsWith("\n}", result, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(stub);
+            Directory.Delete(disk, recursive: true);
+        }
+    }
+
     [Fact]
     public void Details_SectionAndFile_ShowTheirRanges()
     {

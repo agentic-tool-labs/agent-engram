@@ -102,7 +102,16 @@ public static class IndexedCodeNote
         var lines = LineSpan.Lines(content);
 
         string? fallback = null;
-        if (!analysis.Spans.TryGetValue(fact.SubjectPath, out var span))
+
+        // A range outside the file is no range, from whichever tier it came: the whole file, labelled,
+        // is better than a wrong slice or an exception out of expand.
+        var found = analysis.Spans.TryGetValue(fact.SubjectPath, out var span);
+        if (found && (span.Start < 1 || span.End < span.Start || span.End > lines.Count))
+        {
+            span = new LineSpan(1, lines.Count);
+            fallback = "analyzer unavailable";
+        }
+        else if (!found)
         {
             span = new LineSpan(1, lines.Count);
 

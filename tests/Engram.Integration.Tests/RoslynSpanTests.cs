@@ -85,4 +85,27 @@ public class RoslynSpanTests
 
         Assert.Equal(lf.OrderBy(kv => kv.Key), crlf.OrderBy(kv => kv.Key));
     }
+
+    // Roslyn's line map also breaks on a lone CR and on NEL; the reader numbers by '\n' alone, so a
+    // member below one must still report the '\n' line or details would show the wrong slice.
+    [Theory]
+    [InlineData("\r")]
+    [InlineData("\u0085")]
+    public void TierTwo_ACharacterRoslynCallsALineBreak_DoesNotShiftTheSpan(string breakCharacter)
+    {
+        var content = string.Join(
+            "\n",
+            "public class Foo",                          // 1
+            "{",                                         // 2
+            $"    /* note{breakCharacter}more */",        // 3
+            "    public void Run()",                     // 4
+            "    {",                                     // 5
+            "    }",                                     // 6
+            "}") + "\n";                                 // 7
+
+        var spans = Spans(content);
+
+        Assert.Equal(new LineSpan(4, 6), spans["Foo/Run"]);
+        Assert.Equal(new LineSpan(1, 7), spans["Foo"]);
+    }
 }
