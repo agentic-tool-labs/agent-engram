@@ -47,7 +47,7 @@ public static class FileFreshness
         Missing,
     }
 
-    public readonly record struct Verdict(State State, TimeSpan Behind, string? File = null)
+    public readonly record struct Verdict(State State, TimeSpan Behind, string? File = null, string? Root = null)
     {
         public static readonly Verdict Unknown = new(FileFreshness.State.Unknown, TimeSpan.Zero);
 
@@ -98,14 +98,15 @@ public static class FileFreshness
             // The relative path comes from a store row. One that climbs out of the checkout must not
             // resolve to a file at all, or every view that prints the verdict's path would print it.
             var file = Path.Combine(diskPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
-            if (!PathContainment.IsSafeRelative(relativePath) || !PathContainment.IsWithin(diskPath, file))
+            var root = Path.GetFullPath(diskPath);
+            if (!PathContainment.IsSafeRelative(relativePath) || !PathContainment.IsWithin(root, file))
             {
                 return Verdict.Unknown;
             }
 
             if (!File.Exists(file))
             {
-                return new Verdict(State.Missing, TimeSpan.Zero, file);
+                return new Verdict(State.Missing, TimeSpan.Zero, file, root);
             }
 
             // indexed_at has second resolution, so a write inside the same second as the index run
@@ -114,8 +115,8 @@ public static class FileFreshness
                 - DateTimeOffset.FromUnixTimeSeconds(indexedAt.Value).UtcDateTime;
 
             return behind > TimeSpan.FromSeconds(1)
-                ? new Verdict(State.Stale, behind, file)
-                : new Verdict(State.Fresh, TimeSpan.Zero, file);
+                ? new Verdict(State.Stale, behind, file, root)
+                : new Verdict(State.Fresh, TimeSpan.Zero, file, root);
         }
         catch (SqliteException)
         {

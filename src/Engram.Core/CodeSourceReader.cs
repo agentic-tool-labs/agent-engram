@@ -12,37 +12,35 @@ public readonly record struct SourceRead(string? Content, string? Reason);
 /// </summary>
 public static class CodeSourceReader
 {
-    public static SourceRead Read(FileFreshness.Verdict verdict, string subjectPath, long maxFileBytes) =>
-        Read(verdict, subjectPath, maxFileBytes, OpenRead);
+    public static SourceRead Read(FileFreshness.Verdict verdict, long maxFileBytes) =>
+        Read(verdict, maxFileBytes, OpenRead);
 
     /// <summary>The stream is a seam so a test can prove how much of it is ever consumed.</summary>
     internal static SourceRead Read(
         FileFreshness.Verdict verdict,
-        string subjectPath,
         long maxFileBytes,
         Func<string, Stream> open)
     {
         if (verdict.File is not { } file
-            || verdict.State == FileFreshness.State.Unknown
-            || CodePaths.SplitRepoPath(subjectPath) is not var (_, relative))
+            || verdict.Root is not { } root
+            || verdict.State == FileFreshness.State.Unknown)
         {
             return new SourceRead(null, "location unknown");
         }
 
-        // A directory at the indexed path reads as Missing to File.Exists, but it is there.
-        if (verdict.State == FileFreshness.State.Missing && !Directory.Exists(file))
-        {
-            return new SourceRead(null, "file missing");
-        }
-
         try
         {
-            // The file path is the root with the relative path appended, so the root is what remains
-            // once that suffix is removed; the verdict does not carry it separately.
-            var root = file[..(file.Length - relative.Length)].TrimEnd(Path.DirectorySeparatorChar);
-            if (!PathContainment.IsPhysicallyWithin(root.Length == 0 ? Path.DirectorySeparatorChar.ToString() : root, file))
+            // First, so a path the OS refuses to follow (a link chain past its own limit reads as Missing)
+            // is still reported as an escape rather than as an absent file.
+            if (!PathContainment.IsPhysicallyWithin(root, file))
             {
                 return new SourceRead(null, "outside the repo");
+            }
+
+            // A directory at the indexed path also reads as Missing to File.Exists; only an empty spot is gone.
+            if (verdict.State == FileFreshness.State.Missing && !Directory.Exists(file))
+            {
+                return new SourceRead(null, "file missing");
             }
 
             // Only a directory is refused by type: a FIFO reports the same attributes as a regular file

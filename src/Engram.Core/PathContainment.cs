@@ -42,7 +42,10 @@ public static class PathContainment
     /// Whether <paramref name="path"/> lies inside <paramref name="root"/> once every symlink in both —
     /// the final component included, since the file itself may be a link — has been followed. A root
     /// that sits under a symlinked directory resolves the same way the file does, so it still passes.
+    /// Fails closed: a link that cannot be inspected, or a chain too long to follow, counts as outside.
     /// </summary>
     public static bool IsPhysicallyWithin(string root, string path) =>
-        IsWithin(PathCanonicalizer.Canonical(root), PathCanonicalizer.Canonical(path));
+        PathCanonicalizer.TryCanonical(root) is { } resolvedRoot
+        && PathCanonicalizer.TryCanonical(path) is { } resolvedPath
+        && IsWithin(resolvedRoot, resolvedPath);
 }

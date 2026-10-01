@@ -37,9 +37,9 @@ public class CodeSourceReaderBoundTests
             var file = Path.Combine(dir, "src", "a.cs");
             File.WriteAllText(file, "tiny");
             var stream = new CountingStream(10_000_000);
-            var verdict = new FileFreshness.Verdict(FileFreshness.State.Fresh, TimeSpan.Zero, file);
+            var verdict = new FileFreshness.Verdict(FileFreshness.State.Fresh, TimeSpan.Zero, file, dir);
 
-            var read = CodeSourceReader.Read(verdict, "/projects/p/code/r/src/a.cs", 1000, _ => stream);
+            var read = CodeSourceReader.Read(verdict, 1000, _ => stream);
 
             Assert.Equal("over 1000 bytes", read.Reason);
             Assert.Equal(1001, stream.Served);

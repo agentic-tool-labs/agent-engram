@@ -83,7 +83,7 @@ public static class IndexedCodeNote
 
         var freshness = FileFreshness.Check(connection, fact.SubjectPath);
         var maxFileBytes = IndexingSettings.Read(ConfigFile.Load(home.ConfigPath)).MaxFileBytes;
-        var read = CodeSourceReader.Read(freshness, fact.SubjectPath, maxFileBytes);
+        var read = CodeSourceReader.Read(freshness, maxFileBytes);
 
         if (read.Content is not { } content)
         {

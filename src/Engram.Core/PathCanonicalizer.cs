@@ -10,13 +10,32 @@ namespace Engram.Core;
 /// </summary>
 public static class PathCanonicalizer
 {
-    public static string Canonical(string path) => Canonical(path, depth: 0);
+    /// <summary>The most link resolutions one path may cost; macOS refuses to open a longer chain itself.</summary>
+    private const int MaxLinks = 32;
 
-    private static string Canonical(string path, int depth)
+    public static string Canonical(string path)
+    {
+        var links = 0;
+        return Walk(path, depth: 0, strict: false, ref links)!;
+    }
+
+    /// <summary>
+    /// The same resolution, failing closed: null when a component cannot be inspected or the path
+    /// costs more than <see cref="MaxLinks"/> link resolutions, and never a partially resolved path.
+    /// For deciding whether a file is really inside a directory, where "kept as spelled" would call an
+    /// unresolved escape inside.
+    /// </summary>
+    public static string? TryCanonical(string path)
+    {
+        var links = 0;
+        return Walk(path, depth: 0, strict: true, ref links);
+    }
+
+    private static string? Walk(string path, int depth, bool strict, ref int links)
     {
         var full = Path.GetFullPath(path);
         var root = Path.GetPathRoot(full);
-        if (string.IsNullOrEmpty(root) || depth > 8)
+        if (string.IsNullOrEmpty(root) || (!strict && depth > 8))
         {
             return full;
         }
@@ -36,13 +55,33 @@ public static class PathCanonicalizer
                 // unwalked reintroduces the exact mismatch this class exists to remove.
                 if (Directory.ResolveLinkTarget(current, returnFinalTarget: true) is { } target)
                 {
-                    current = Canonical(target.FullName, depth + 1);
+                    if (strict && ++links > MaxLinks)
+                    {
+                        return null;
+                    }
+
+                    var resolved = Walk(target.FullName, depth + 1, strict, ref links);
+                    if (resolved is null)
+                    {
+                        return null;
+                    }
+
+                    current = resolved;
                 }
             }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException)
             {
-                // A component that cannot be inspected is kept as spelled; comparison
-                // degrades to the literal path rather than the walk failing.
+                // Nothing there is nothing to resolve, and nothing can be beneath it either.
+            }
+            catch (Exception e) when (strict || e is IOException or UnauthorizedAccessException)
+            {
+                // A component that cannot be inspected is kept as spelled when this is only
+                // matching paths up; comparison degrades to the literal path rather than the walk
+                // failing. When the answer decides what may be read, it is no answer.
+                if (strict)
+                {
+                    return null;
+                }
             }
         }
 

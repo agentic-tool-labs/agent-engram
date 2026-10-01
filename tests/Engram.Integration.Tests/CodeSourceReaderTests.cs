@@ -58,7 +58,7 @@ public sealed class CodeSourceReaderTests : IDisposable
     }
 
     private static SourceRead Read((FileFreshness.Verdict Verdict, string Subject) entry, long limit = Limit) =>
-        CodeSourceReader.Read(entry.Verdict, entry.Subject, limit);
+        CodeSourceReader.Read(entry.Verdict, limit);
 
     [Fact]
     public void RegularFile_ReturnsItsText_WithTheByteOrderMarkStripped()
@@ -155,6 +155,58 @@ public sealed class CodeSourceReaderTests : IDisposable
         {
             File.SetUnixFileMode(file, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         }
+    }
+
+    // Li -> L(i+1)/x, so resolving one link leaves a path that still runs through the next: each costs
+    // a recursion rather than collapsing into one final-target lookup.
+    private string LinkChain(int links, string end)
+    {
+        var deepest = end;
+        for (var i = 0; i < links - 1; i++)
+        {
+            deepest = Path.Combine(deepest, "x");
+        }
+
+        Directory.CreateDirectory(deepest);
+        File.WriteAllText(Path.Combine(deepest, "secret.txt"), "CHAIN-BYTES");
+        for (var i = 0; i < links; i++)
+        {
+            Directory.CreateSymbolicLink(
+                Path.Combine(root, $"L{i}"),
+                i == links - 1 ? end : $"L{i + 1}/x");
+        }
+
+        return "L0/secret.txt";
+    }
+
+    [Fact]
+    public void TenNestedLinksEndingOutside_AreRefused_WhereTheLenientCapWouldLetThemThrough()
+    {
+        var entry = Register(LinkChain(10, Path.Combine(Path.GetDirectoryName(root)!, "elsewhere")));
+
+        var read = Read(entry);
+
+        Assert.Equal("outside the repo", read.Reason);
+        Assert.Null(read.Content);
+    }
+
+    [Fact]
+    public void ALinkChainPastTheCap_IsRefused()
+    {
+        var entry = Register(LinkChain(33, Path.Combine(Path.GetDirectoryName(root)!, "elsewhere")));
+
+        var read = Read(entry);
+
+        Assert.Equal("outside the repo", read.Reason);
+        Assert.Null(read.Content);
+    }
+
+    [Fact]
+    public void TenNestedLinksEndingInside_StillRead()
+    {
+        var entry = Register(LinkChain(10, Path.Combine(root, "inner")));
+
+        Assert.Equal("CHAIN-BYTES", Read(entry).Content);
     }
 
     [Fact]
