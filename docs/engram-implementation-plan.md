@@ -5356,3 +5356,86 @@ Helm templates are not valid YAML. A future spec should bound it to top-level ke
 lines' summed estimates stay within it. And the expand tests' first paging guard passed with the
 note appended *outside* the paged text, because a small body concatenates identically either way;
 it only failed once it asserted per-page length and a page count.
+
+## D75 — Expanding an indexed code fact returns the live source of what it describes
+
+`engram_expand … details` on an indexed code fact (`Scope == "code"`, `Regenerable`) used to return a
+gist and "read it at <path>", which cost the model a second call and gave it no line range. It now
+reads the file at call time and returns exactly the lines the fact describes, under one header,
+`Source: <file> · lines a–b of N`, with ` · changed since indexed` when the file is newer than the
+index. `evidence` and `source` still say where to look, and point at `details` only where it can
+read something: a missing file or an unknown location keeps the old sentence, for the same reason
+D74 reports "Was at" and not "Read it at".
+
+**Rejected, and not to be reopened: storing the source, or its line numbers.** Chunks copy readable
+source and grow the store by roughly the size of the repo. A line number in any column, body or
+evidence turns every edit above a symbol into a new fact version, which is the append-only rule
+being used as a clock. Spans are therefore transient: computed from the live file on each call,
+never written anywhere. `CodeIndexerSpanTests` is the guard — it inserts five blank lines at the top
+of every file, re-indexes, and asserts no new fact version, no changed live body or evidence, and
+the same `AnalyzerVersion`. Putting the start line into a body reddens it; that arm was run.
+
+**Locate by re-running the indexer's own analysis, not by searching the file for the stored
+declaration text.** The indexer owns fragment identity (`DeepTier.Fragments`, `CodePaths.Slug`, the
+heading stack), so reusing it attributes a span by the exact rule that named the fact. Anchoring on
+the stored `declared-as` text is a second identity rule: it shows the wrong code confidently when
+the text occurs twice (nested types, overload-like duplicates) and fails the moment the signature is
+edited. Re-analysis survives body and signature edits and fails only on a rename, and then it fails
+honestly — the whole file, labelled `not in the current file`. The composition (tier 0, then the
+optional deep tier, then `DeepTier.Merge`) exists once, in `FileAnalysis.Analyze`, and the indexer
+and the reader both call it. Spans ride a side map beside the candidates, never on `CodeCandidate`,
+whose value equality decides what is written. `DeepSymbol` gained an optional `Span`, read by
+nothing that compares or writes.
+
+Tier 0 bounds a regex declaration by the next one and drops trailing blanks; sections end at the
+next heading of the same or shallower level; a file is `1…N`. Tier 1 takes the declaration node
+tree-sitter already pairs with each name, through the UTF-8 byte newline table — counting chars
+shifts every span below a multi-byte character, and that arm reddens the test. Tier 2 emits
+`startLine`/`endLine` from the node's `Span`, not `FullSpan`: attributes and modifiers are part of
+the declaration, a leading doc comment is trivia and is already the symbol's `about` fact, and
+tree-sitter keeps comments as siblings, so one rule across both is "declaration node only". The
+fields are additive: an older installed sidecar omits them and the client reads that as no span, so
+a C# member degrades to the whole file labelled `analyzer unavailable`.
+
+**Containment is checked twice, and each check has a test only it can fail.** A relative path with
+an empty, `.` or `..` segment, or a rooted one, makes `FileFreshness.Check` return `Unknown`, so no
+view ever prints a path that escapes the checkout; deleting that check reddens
+`ClimbingPath_ResolvesToNothing_SoNoViewCanPrintIt` and nothing else. After the freshness answer,
+the reader follows every symlink in the root and the file — the final component included — and
+refuses a file that resolves outside the root; deleting that reddens
+`LinkOutOfTheCheckout_IsRefused_AndNoOutsideByteIsReturned` and nothing else. The two do not
+overlap: a spelling check cannot see a symlink and a physical check never sees a `..` that
+canonicalisation already folded away. A repo registered through a symlinked parent still reads,
+because root and file resolve the same way. The size and binary rules are the indexer's, not copies
+(`max_file_bytes`, `IndexFilter.Classify` and `HeadBytes`), and at most `max_file_bytes + 1` bytes
+are ever pulled, so a file that grows after the stat still reports too large. An unreadable file is
+`unreadable`, never an exception out of expand.
+
+**A FIFO cannot be refused by type (E2).** Measured on .NET 10, macOS: a FIFO and a regular file both
+report `attrs=Normal`, with the same `FileInfo` shape, and a symlink reports `ReparsePoint`. Only
+directories are refused as `not a regular file`. The residual risk is that a FIFO at an indexed path
+would block the read; it is accepted because git cannot track one and the indexer's own read has the
+same exposure. A directory at the path reads as `Missing` to `File.Exists`, so the reader checks for
+it before reporting `file missing`.
+
+**Paging stays stateless, so offsets assume an unchanged file.** Each page call re-reads and
+re-analyses the file, exactly as the pager already recomputes everything per call (D64). A file
+edited between two pages can therefore shift later offsets; the footer's `continue with offset`
+is advice about a text that no longer exists. Accepted: holding the text server-side would make the
+pager stateful for a case whose cost is one confusing page.
+
+**E1 — `details` latency, on the published binary with real grammars and the freshly built
+sidecar, sandboxed home, 20 alternating calls per arm.** C# member: p50 116.9 ms, p95 126.7 ms.
+TypeScript function: p50 33.1 ms, p95 36.5 ms. Calibration (a non-code fact): p50 0.5 ms, p95
+4.0 ms. C# p95 minus calibration p95 is 122.7 ms against the 1,000 ms line, so a per-call sidecar
+spawn is accepted as designed; the plan's ~300 ms figure was an estimate, not a measurement, and
+overstated it by about 2.5x. A held sidecar process would be a separate design and was not built.
+
+**Description arithmetic.** The ceiling stays 6,550. The `details` clause gained `(code: live
+source)`, +20 characters, paid for by trimming `offset` ("a paged view", −8) and `budget_tokens`
+("Max tokens per call", −13). Measured total 6,536 against 6,550, so headroom is 14 and the next
+description change must trim. The guard is `McpToolSurfaceBudgetTests`, unchanged.
+
+**Not changed.** Schema, `AnalyzerVersion`, `code_index_version`, any fact body, predicate,
+evidence or path the indexer writes, the recall line, budget and markers (D30, D44, D57, D64), the
+`history` and `related` views, `MemoryBrowser`, and the pager's algorithm.
