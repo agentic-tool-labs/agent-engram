@@ -301,6 +301,57 @@ public class InvariantFactsTests
         Assert.Single(DirectiveFacts.ReadLive(check));
     }
 
+    // remove guards "is a live invariant" with two clauses, the predicate and the path marker, and
+    // each covers a case the other does not. A markdown heading that slugs to "Invariant abcd1234"
+    // yields a section fact on a #invariant- path with another predicate; a fact written elsewhere
+    // with the predicate "invariant" has no marker.
+    [Fact]
+    public void Remove_OfAFactOnAnInvariantPathWithAnotherPredicate_IsRefusedAndLeavesItLive()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        var (_, file) = IndexedRepo(sandbox);
+        var entity = EntityPathOf(sandbox, file);
+        long id;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            id = FactStore.Remember(
+                connection,
+                new FactWrite(entity + "#invariant-abcd1234", "section", "describes", "A section named like an invariant.", "code", "observed"),
+                DateTimeOffset.UtcNow).FactId;
+        }
+
+        var (exit, _, _) = Run(sandbox, "remove", FactCatalog.HandleFor(id), "--apply");
+
+        Assert.Equal(1, exit);
+        Assert.True(IsLive(sandbox, id));
+    }
+
+    [Fact]
+    public void Remove_OfAnInvariantPredicateFactWithoutTheMarkerPath_IsRefusedAndLeavesItLive()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        IndexedRepo(sandbox);
+        long id;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            id = FactStore.Remember(
+                connection,
+                new FactWrite("/facts/elsewhere", "note", InvariantFacts.Predicate, "Not on a file.", "user", "stated"),
+                DateTimeOffset.UtcNow).FactId;
+        }
+
+        var (exit, _, _) = Run(sandbox, "remove", FactCatalog.HandleFor(id), "--apply");
+
+        Assert.Equal(1, exit);
+        Assert.True(IsLive(sandbox, id));
+    }
+
+    private static bool IsLive(SandboxHome sandbox, long factId)
+    {
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        return FactStore.ReadById(connection, factId) is { ValidTo: null };
+    }
+
     private static int LiveRegenerableUnder(SandboxHome sandbox, string entityPath)
     {
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
