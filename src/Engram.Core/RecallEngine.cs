@@ -22,6 +22,16 @@ public sealed record RecallPackResult(
     int LongTermFactCount,
     int PriorSessionFactCount);
 
+/// <summary>A digest with the structured values it was written from.</summary>
+/// <param name="Notes">The availability notes the header renders, one per entry, without their separators.</param>
+/// <param name="Gaps">The text after <c>gaps:</c>, or null when coverage is high and no such line is written.</param>
+/// <param name="Packed">The candidates whose lines are in the text, in text order.</param>
+public sealed record RecallPackDetail(
+    RecallPackResult Result,
+    IReadOnlyList<string> Notes,
+    string? Gaps,
+    IReadOnlyList<RecallCandidate> Packed);
+
 /// <summary>Which tier of memory a candidate came from.</summary>
 public enum FactOrigin
 {
@@ -50,7 +60,19 @@ public sealed record RecallCandidate(
     FactOrigin Origin,
     int Tokens,
     bool Packed,
-    bool Pinned = false);
+    bool Pinned = false,
+    RecallCandidateSource? Source = null);
+
+/// <summary>
+/// What the formatter used to write a candidate's line, kept so a caller that wants the fields
+/// behind the line reads the same values the line was built from instead of deriving them again.
+/// </summary>
+/// <param name="WithheldChars">The number behind the line's <c>· +N</c> suffix; 0 when the line has none.</param>
+/// <param name="Location">The code location the line names, or null when it names none.</param>
+public sealed record RecallCandidateSource(string Body, string Scope, int Versions, int WithheldChars, string? Location);
+
+/// <summary>A formatted line with the values the formatter computed while writing it.</summary>
+internal sealed record MeasuredLine(string Line, int WithheldChars, string? Location = null);
 
 /// <summary>
 /// What <see cref="RecallEngine.Pack(string, IReadOnlyList{CannedFact}, IReadOnlyList{SessionFact}, IReadOnlyList{SessionFact}, int)"/>
@@ -633,19 +655,25 @@ public static class RecallEngine
     /// never invisible-or-poisonous to the rest of the digest (D57's marking pattern: present
     /// only when something is actually withheld, never on a whole, untruncated body).</para>
     /// </summary>
-    internal static string FormatFactLine(CannedFact fact)
+    internal static string FormatFactLine(CannedFact fact) => MeasureFactLine(fact).Line;
+
+    internal static MeasuredLine MeasureFactLine(CannedFact fact)
     {
         var (shownBody, withheldBodyChars) = TruncateBody(fact.Body);
-        var marker = MarkerFor(withheldBodyChars + fact.DetailsChars);
+        var withheld = withheldBodyChars + fact.DetailsChars;
+        var marker = MarkerFor(withheld);
         var version = fact.Versions > 1 ? $" · v{fact.Versions}" : string.Empty;
         var judged = fact.Judged ? " · judged" : string.Empty;
 
-        var location = fact.Scope == "code" && fact.SubjectPath is not null
-            && CodePaths.ElidedLocationText(fact.SubjectPath) is { } text
-                ? $" · {text}"
-                : string.Empty;
+        var locationText = fact.Scope == "code" && fact.SubjectPath is not null
+            ? CodePaths.ElidedLocationText(fact.SubjectPath)
+            : null;
+        var location = locationText is null ? string.Empty : $" · {locationText}";
 
-        return $"[{fact.Id}] {shownBody} ({fact.Scope}{location} · {fact.AgeDays}d{version}{judged}{marker})";
+        return new MeasuredLine(
+            $"[{fact.Id}] {shownBody} ({fact.Scope}{location} · {fact.AgeDays}d{version}{judged}{marker})",
+            withheld,
+            locationText);
     }
 
     /// <summary>
@@ -713,25 +741,30 @@ public static class RecallEngine
     /// and <c>engram_remember</c>'s own <c>details</c> lands in this tier, so an unmarked session
     /// line would be a hole in the ladder exactly where the model's own writes go.</para>
     /// </remarks>
-    internal static string FormatSessionFactLine(SessionFact fact)
+    internal static string FormatSessionFactLine(SessionFact fact) => MeasureSessionFactLine(fact).Line;
+
+    internal static MeasuredLine MeasureSessionFactLine(SessionFact fact)
     {
         var (shown, withheldBodyChars) = TruncateBody(fact.Statement);
-        var marker = MarkerFor(withheldBodyChars + fact.DetailsChars);
+        var withheld = withheldBodyChars + fact.DetailsChars;
         var scope = string.IsNullOrWhiteSpace(fact.Agent) ? "session" : $"session · {fact.Agent}";
-        return $"[{FactCatalog.HandleFor(fact.FactId)}] {shown} ({scope}{marker})";
+        return new MeasuredLine($"[{FactCatalog.HandleFor(fact.FactId)}] {shown} ({scope}{MarkerFor(withheld)})", withheld);
     }
 
     // The session discriminator sits in the annotation rather than inside the handle, where
     // it used to read "[s001@p1]". A handle is what a tool takes back; overloading it with
     // grouping meant the string the model saw was not the string engram_forget accepts.
-    internal static string FormatPriorSessionFactLine(SessionFact fact, string discriminator)
+    internal static string FormatPriorSessionFactLine(SessionFact fact, string discriminator) =>
+        MeasurePriorSessionFactLine(fact, discriminator).Line;
+
+    internal static MeasuredLine MeasurePriorSessionFactLine(SessionFact fact, string discriminator)
     {
         var (shown, withheldBodyChars) = TruncateBody(fact.Statement);
-        var marker = MarkerFor(withheldBodyChars + fact.DetailsChars);
+        var withheld = withheldBodyChars + fact.DetailsChars;
         var scope = string.IsNullOrWhiteSpace(fact.Agent)
             ? $"session · {discriminator} · {fact.AgeDays}d"
             : $"session · {discriminator} · {fact.Agent} · {fact.AgeDays}d";
-        return $"[{FactCatalog.HandleFor(fact.FactId)}] {shown} ({scope}{marker})";
+        return new MeasuredLine($"[{FactCatalog.HandleFor(fact.FactId)}] {shown} ({scope}{MarkerFor(withheld)})", withheld);
     }
 
     internal static string GapsMessage(string query, RecallCoverage coverage) => coverage switch
