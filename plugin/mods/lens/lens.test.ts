@@ -78,6 +78,7 @@ test('a header without an availability note shows none, and never infers one', a
 })
 
 test('tools other than recall are not observed', async ($, on) => {
+  mock.clock(on, { now: 1_700_000_000_000 })
   on('tool.call', () => ({ result: {}, text: DIGEST }) as never)
   await $.tool.call({ tool: ENGRAM_TOOLS.remember, tool_use_id: 't1' } as never)
   await $.tool.call({ tool: ENGRAM_TOOLS.expand, tool_use_id: 't2' } as never)
