@@ -16,6 +16,7 @@ import {
   statusText,
   wantsRememberButton,
 } from './lines'
+import { once } from '../shared/guard'
 
 const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, SHARED_INITIAL)
 const LENS = atom({ plugin: 'engram', key: 'lens' } as const, LENS_INITIAL)
@@ -56,61 +57,71 @@ export const register: Register = (on, options) => {
   }
 
   on('session.start', ANY_SESSION_START, async ($, e, next) => {
-    stop()
-    const mine = generation
-    const tick = async () => {
-      if (mine !== generation) return
-      let delay = pollIntervalMs(undefined)
-      try {
-        delay = await poll($, wantsStatusEntry)
-      } catch {
-        // A failed poll must not end the loop; the slow cadence is the retry.
+    const go = once(next)
+    try {
+      stop()
+      const mine = generation
+      const tick = async () => {
+        if (mine !== generation) return
+        let delay = pollIntervalMs(undefined)
+        try {
+          delay = await poll($, wantsStatusEntry)
+        } catch {
+          // A failed poll must not end the loop; the slow cadence is the retry.
+        }
+        if (mine === generation) timer = $.clock.after(delay, () => void tick())
       }
-      if (mine === generation) timer = $.clock.after(delay, () => void tick())
+      void tick()
+      return go(e)
+    } catch {
+      return go.fallback(e)
     }
-    void tick()
-    return next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
+    const go = once(next)
+    try {
+      if (e.props.hasSurvey) return go(e)
 
-    const lens = await read($, LENS)
-    const band = await read($, BAND)
-    const recall = currentRecall(lens)
-    const lines = [recall === undefined ? undefined : coverageText(recall), backlogText(band.backlog)].filter(
-      (line): line is string => line !== undefined,
-    )
-    if (lines.length === 0) return next(e)
+      const lens = await read($, LENS)
+      const band = await read($, BAND)
+      const recall = currentRecall(lens)
+      const lines = [recall === undefined ? undefined : coverageText(recall), backlogText(band.backlog)].filter(
+        (line): line is string => line !== undefined,
+      )
+      if (lines.length === 0) return go(e)
 
-    const { Box, Button, Text } = $.ui.resolve(e)
-    const offersButton = recall !== undefined && wantsRememberButton(recall, band, e.props.isWorking)
-    const shown = lines.slice(0, Math.max(1, e.props.maxRows))
+      const { Box, Button, Text } = $.ui.resolve(e)
+      const offersButton = recall !== undefined && wantsRememberButton(recall, band, e.props.isWorking)
+      const shown = lines.slice(0, Math.max(1, e.props.maxRows))
 
-    return (
-      <Box flexDirection="column">
-        {shown.map((line, i) => (
-          <Box key={`line-${i}`}>
-            <Text dimColor>{line} </Text>
-            {i === 0 && recall !== undefined && offersButton ? (
-              <Button
-                key="remember"
-                label="Remember the answer"
-                onPress={async () => {
-                  // Two presses before a redraw both run; only the one that records the id submits.
-                  // `update` retries its function, so `fresh` is decided on every attempt.
-                  let fresh = false
-                  await update($, BAND, (b) => {
-                    fresh = !b.pressed.includes(recall.toolUseId)
-                    return fresh ? { ...b, pressed: [...b.pressed, recall.toolUseId] } : b
-                  })
-                  if (fresh) await $.prompt.submit({ text: rememberPrompt(recall.query) })
-                }}
-              />
-            ) : null}
-          </Box>
-        ))}
-      </Box>
-    )
+      return (
+        <Box flexDirection="column">
+          {shown.map((line, i) => (
+            <Box key={`line-${i}`}>
+              <Text dimColor>{line} </Text>
+              {i === 0 && recall !== undefined && offersButton ? (
+                <Button
+                  key="remember"
+                  label="Remember the answer"
+                  onPress={async () => {
+                    // Two presses before a redraw both run; only the one that records the id submits.
+                    // `update` retries its function, so `fresh` is decided on every attempt.
+                    let fresh = false
+                    await update($, BAND, (b) => {
+                      fresh = !b.pressed.includes(recall.toolUseId)
+                      return fresh ? { ...b, pressed: [...b.pressed, recall.toolUseId] } : b
+                    })
+                    if (fresh) await $.prompt.submit({ text: rememberPrompt(recall.query) })
+                  }}
+                />
+              ) : null}
+            </Box>
+          ))}
+        </Box>
+      )
+    } catch {
+      return go.fallback(e)
+    }
   })
 }

@@ -3,6 +3,7 @@ import type { EngineInterface, PluginOptions, PromptSubmitInput, PromptSubmitRes
 import { SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
 import { ANY_PROMPT_SUBMIT } from '../shared/events'
+import { once } from '../shared/guard'
 
 // The scanner reads an atom's reference only from a const of the file that uses it.
 const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, SHARED_INITIAL)
@@ -101,12 +102,17 @@ export async function primePrompt(
 export const register: Register = (on, options) => {
   const config = jitConfig(options)
   on('prompt.submit', ANY_PROMPT_SUBMIT, async ($, e, next) => {
-    let io: ModIo
+    const go = once(next)
     try {
-      io = bindIo($)
+      let io: ModIo
+      try {
+        io = bindIo($)
+      } catch {
+        return go(e)
+      }
+      return await primePrompt(io, config, e, go)
     } catch {
-      return next(e)
+      return go.fallback(e)
     }
-    return primePrompt(io, config, e, next)
   })
 }

@@ -253,6 +253,58 @@ public class PluginSourceTests
         Assert.Contains(found, f => f.Contains("mods/b/index.ts:1"));
     }
 
+    // A hook that throws before `next` stops the hooks beneath it, and one that calls `next` twice
+    // re-runs the core, so every handler of every mod wraps `next` once and catches to the fallback.
+    [Fact]
+    public void ShippedModSources_WrapEveryHandlerInTheNoThrowGuard()
+    {
+        var sources = ModSourceFiles(PluginSandbox.PluginDirectory).ToList();
+
+        Assert.NotEmpty(sources);
+        Assert.Empty(HandlersOutsideTheNoThrowGuard(PluginSandbox.PluginDirectory, sources));
+    }
+
+    private const string CompliantHandler = "on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  const go = once(next)\n  try {\n    return await go(e)\n  } catch {\n    return go.fallback(e)\n  }\n})\n";
+
+    [Fact]
+    public void AHandlerThatCallsOnceAndFallsBack_IsNotReported()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", CompliantHandler + "on('tool.call', { tool: 'Edit' }, async ($, e, next) => {\n  const go = once(next)\n  try {\n    if (next.signal.aborted) return go(e)\n    return go(e)\n  } catch { return go.fallback(e) }\n})\n");
+        tree.Write("mods/shared/guard.ts", "next(e)\n");
+        tree.Write("mods/a/a.test.ts", "on('x', (_$, e) => next(e))\n");
+
+        Assert.Empty(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+    }
+
+    [Theory]
+    [InlineData("on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  return next(e)\n})\n", "once(next)")]
+    [InlineData("on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  const go = once(next)\n  return go(e)\n})\n", "go.fallback(e)")]
+    [InlineData("on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  const go = once(next)\n  try { return next(e) } catch { return go.fallback(e) }\n})\n", "next directly")]
+    [InlineData("on('command.run', { command: 'x' }, async ($) => {\n  return { text: 'x' }\n})\n", "once(next)")]
+    public void AHandlerOutsideTheGuard_IsReportedNamingTheFileAndWhatIsMissing(string source, string expected)
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", source);
+
+        var only = Assert.Single(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+
+        Assert.Contains("mods/a/index.ts:1", only);
+        Assert.Contains(expected, only);
+    }
+
+    // One compliant handler must not excuse the next one in the same file.
+    [Fact]
+    public void ASecondHandlerInTheSameFileThatIsNotWrapped_IsReportedAlone()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", CompliantHandler + "on('turn.complete', ANY_TURN_COMPLETE, async ($, e, next) => next(e))\n");
+
+        var only = Assert.Single(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+
+        Assert.Contains("mods/a/index.ts:9", only);
+    }
+
     [Fact]
     public void TwoBareRegistrationsOfOneEvent_AreReportedWithBothLocations()
     {
@@ -411,6 +463,60 @@ public class PluginSourceTests
 
                 var line = text.AsSpan(0, match.Index).Count('\n') + 1;
                 found.Add((relative, eventName, $"{relative}:{line}: on('{eventName}') must pass {constant} as its second argument (import it from ../shared/events)"));
+            }
+        }
+
+        return found;
+    }
+
+    private static readonly Regex HandlerRegistrationPattern = new(
+        @"^[ \t]*on\(\s*['""][A-Za-z][A-Za-z0-9.]*['""]",
+        RegexOptions.Compiled | RegexOptions.Multiline);
+
+    private static readonly Regex DirectNextCallPattern = new(@"(?<![\w.$])next\(", RegexOptions.Compiled);
+
+    // A handler's text runs from its `on(` to the next `on(` or the end of the file. Sharing a file
+    // with another handler therefore cannot excuse it, and a helper after the last one is the only
+    // way to confuse the check; none of the mods has one.
+    private static List<string> HandlersOutsideTheNoThrowGuard(string pluginDirectory, IEnumerable<string> files)
+    {
+        var found = new List<string>();
+        foreach (var file in files)
+        {
+            var relative = Path.GetRelativePath(pluginDirectory, file).Replace('\\', '/');
+            if (relative.StartsWith("mods/shared/", StringComparison.Ordinal)
+                || Path.GetFileName(file).Contains(".test.", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var text = File.ReadAllText(file);
+            var starts = HandlerRegistrationPattern.Matches(text);
+            for (var i = 0; i < starts.Count; i++)
+            {
+                var end = i + 1 < starts.Count ? starts[i + 1].Index : text.Length;
+                var handler = text.Substring(starts[i].Index, end - starts[i].Index);
+                var line = text.AsSpan(0, starts[i].Index).Count('\n') + 1;
+                var missing = new List<string>();
+                if (!handler.Contains("once(next)", StringComparison.Ordinal))
+                {
+                    missing.Add("wrap next with once(next)");
+                }
+
+                if (!handler.Contains(".fallback(", StringComparison.Ordinal))
+                {
+                    missing.Add("catch to go.fallback(e)");
+                }
+
+                if (DirectNextCallPattern.IsMatch(handler))
+                {
+                    missing.Add("stop calling next directly (call the once wrapper)");
+                }
+
+                if (missing.Count > 0)
+                {
+                    found.Add($"{relative}:{line}: handler must {string.Join(" and ", missing)} (see mods/shared/guard.ts)");
+                }
             }
         }
 

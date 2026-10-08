@@ -4,6 +4,7 @@ import { ENGRAM_TOOLS, SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
 import type { BeliefDiffState } from '../shared/state'
 import type { FactResponse } from '../shared/types'
+import { once } from '../shared/guard'
 
 const MOD = 'belief-diff'
 const APPROVE = 'Approve'
@@ -113,35 +114,40 @@ async function decide(
 }
 
 export const register: Register = (on, options) => {
-  on('tool.call', { tool: ENGRAM_TOOLS.revise }, ($, e, next) => {
-    const scope = scopeOf(options.belief_diff_scope)
-    if (scope === 'off') return next(e)
+  on('tool.call', { tool: ENGRAM_TOOLS.revise }, async ($, e, next) => {
+    const go = once(next)
+    try {
+      const scope = scopeOf(options.belief_diff_scope)
+      if (scope === 'off') return go(e)
 
-    return serialize(async () => {
-      // A hook whose budget ran out has already had its revise run on its behalf; a dialog now
-      // would ask about something that is done.
-      if (next.signal.aborted) return next(e)
+      return await serialize(async () => {
+        // A hook whose budget ran out has already had its revise run on its behalf; a dialog now
+        // would ask about something that is done.
+        if (next.signal.aborted) return go(e)
 
-      const factId = (e as { fact_id?: unknown }).fact_id
-      const statement = (e as { statement?: unknown }).statement
-      if (typeof factId !== 'string' || typeof statement !== 'string') return next(e)
+        const factId = (e as { fact_id?: unknown }).fact_id
+        const statement = (e as { statement?: unknown }).statement
+        if (typeof factId !== 'string' || typeof statement !== 'string') return go(e)
 
-      const found = await modApi(bindIo($), 'fact', { fact_id: factId }, { mod: MOD, signal: next.signal })
-      if (!found.ok || !found.value.live) return next(e)
-      const fact = found.value
-      if (scope === 'personal' && fact.scope !== 'user') return next(e)
+        const found = await modApi(bindIo($), 'fact', { fact_id: factId }, { mod: MOD, signal: next.signal })
+        if (!found.ok || !found.value.live) return go(e)
+        const fact = found.value
+        if (scope === 'personal' && fact.scope !== 'user') return go(e)
 
-      const question = questionFor(
-        fact,
-        statement,
-        (e as { details?: unknown }).details,
-        (e as { reason?: unknown }).reason,
-      )
-      const decision = await decide($, question, e.tool_use_id, fact.handle, next.signal)
+        const question = questionFor(
+          fact,
+          statement,
+          (e as { details?: unknown }).details,
+          (e as { reason?: unknown }).reason,
+        )
+        const decision = await decide($, question, e.tool_use_id, fact.handle, next.signal)
 
-      if (decision === 'keep') return { deny: `The user kept the existing belief [${bare(fact.handle)}]; do not retry this revision.` }
-      if (decision === 'unanswered') await toastSkipOnce($, fact.handle)
-      return next(e)
-    })
+        if (decision === 'keep') return { deny: `The user kept the existing belief [${bare(fact.handle)}]; do not retry this revision.` }
+        if (decision === 'unanswered') await toastSkipOnce($, fact.handle)
+        return go(e)
+      })
+    } catch {
+      return go.fallback(e)
+    }
   })
 }

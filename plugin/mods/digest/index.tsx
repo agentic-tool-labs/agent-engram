@@ -15,6 +15,7 @@ import {
   parseCandidates,
   shouldDigest,
 } from './digest'
+import { once } from '../shared/guard'
 
 const MOD = 'digest'
 
@@ -109,93 +110,123 @@ export const register: Register = (on, options) => {
   const every = digestEvery(options)
 
   on('session.start', ANY_SESSION_START, async ($, e, next) => {
-    // The event is shared with other mods; a failure here must not stop their hooks.
+    const go = once(next)
     try {
-      await $.command.register({
-        name: 'digest-review',
-        description: 'Review the memory candidates the auto-digest proposed',
-      })
-      await $.command.register({
-        name: 'remember-selection',
-        description: 'Put the selected text in the prompt as "Remember this: …" so you can edit it and submit',
-      })
+      // The event is shared with other mods; a failure here must not stop their hooks.
+      try {
+        await $.command.register({
+          name: 'digest-review',
+          description: 'Review the memory candidates the auto-digest proposed',
+        })
+        await $.command.register({
+          name: 'remember-selection',
+          description: 'Put the selected text in the prompt as "Remember this: …" so you can edit it and submit',
+        })
+      } catch {
+        // The commands are missing, nothing else is affected.
+      }
+      return go(e)
     } catch {
-      // The commands are missing, nothing else is affected.
+      return go.fallback(e)
     }
-    return next(e)
   })
 
   on('tool.call', { tool: EDIT_TOOLS }, async ($, e, next) => {
-    const ran = await next(e)
-    await update($, DIGEST, (s) => ({ ...s, editedThisTurn: true }))
-    return ran
+    const go = once(next)
+    try {
+      const ran = await go(e)
+      await update($, DIGEST, (s) => ({ ...s, editedThisTurn: true }))
+      return ran
+    } catch {
+      return go.fallback(e)
+    }
   })
 
   on('turn.complete', ANY_TURN_COMPLETE, async ($, e, next) => {
-    if (every === 0 || e.agentId !== undefined || e.isAborted || e.reason !== 'answer') return next(e)
-
-    // The event is shared with other mods; a failure here must not stop their hooks.
+    const go = once(next)
     try {
-      let isDue = false
-      await update($, DIGEST, (s) => {
-        const turns = s.turnsSinceDigest + 1
-        isDue = shouldDigest(every, turns, s.editedThisTurn)
-        return { ...s, turnsSinceDigest: isDue ? 0 : turns, editedThisTurn: false }
-      })
-      if (isDue) $.clock.after(0, () => runDigest($))
+      if (every === 0 || e.agentId !== undefined || e.isAborted || e.reason !== 'answer') return go(e)
+
+      // The event is shared with other mods; a failure here must not stop their hooks.
+      try {
+        let isDue = false
+        await update($, DIGEST, (s) => {
+          const turns = s.turnsSinceDigest + 1
+          isDue = shouldDigest(every, turns, s.editedThisTurn)
+          return { ...s, turnsSinceDigest: isDue ? 0 : turns, editedThisTurn: false }
+        })
+        if (isDue) $.clock.after(0, () => runDigest($))
+      } catch {
+        // This turn is not counted.
+      }
+      return go(e)
     } catch {
-      // This turn is not counted.
+      return go.fallback(e)
     }
-    return next(e)
   })
 
-  on('command.run', { command: 'digest-review' }, async ($) => {
-    const { candidates } = await read($, DIGEST)
-    if (candidates.length === 0) return { text: 'No memory candidates to review.' }
-    await $.ui.open({ id: PANE, title: 'Memory candidates', focus: true })
-    return {}
-  })
-
-  on('command.run', { command: 'remember-selection' }, async ($) => {
-    const selected = await $.ui.selection()
-    if (selected === undefined || selected.text.trim() === '') {
-      $.ui.toast(NO_SELECTION)
+  on('command.run', { command: 'digest-review' }, async ($, e, next) => {
+    const go = once(next)
+    try {
+      const { candidates } = await read($, DIGEST)
+      if (candidates.length === 0) return { text: 'No memory candidates to review.' }
+      await $.ui.open({ id: PANE, title: 'Memory candidates', focus: true })
       return {}
+    } catch {
+      return go.fallback(e)
     }
-    await $.prompt.fill({ text: `Remember this: "${selected.text}"` })
-    return {}
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button, Text } = $.ui.resolve(e)
-    const { candidates } = await read($, DIGEST)
-    if (candidates.length === 0) return <Text dimColor>No memory candidates.</Text>
+  on('command.run', { command: 'remember-selection' }, async ($, e, next) => {
+    const go = once(next)
+    try {
+      const selected = await $.ui.selection()
+      if (selected === undefined || selected.text.trim() === '') {
+        $.ui.toast(NO_SELECTION)
+        return {}
+      }
+      await $.prompt.fill({ text: `Remember this: "${selected.text}"` })
+      return {}
+    } catch {
+      return go.fallback(e)
+    }
+  })
 
-    return (
-      <Box flexDirection="column">
-        <Text dimColor>Tick what is worth keeping. Nothing is saved until you press Save.</Text>
-        {candidates.map((c, i) => (
-          <Box key={`row${i}`}>
-            <Button
-              key={`tick${i}`}
-              plain
-              label={c.ticked ? '[x]' : '[ ]'}
-              onPress={() =>
-                update($, DIGEST, (s) => ({
-                  ...s,
-                  candidates: s.candidates.map((one, j) => (j === i ? { ...one, ticked: !one.ticked } : one)),
-                }))
-              }
-            />
-            <Text> {c.text}</Text>
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const go = once(next)
+    try {
+      const { Box, Button, Text } = $.ui.resolve(e)
+      const { candidates } = await read($, DIGEST)
+      if (candidates.length === 0) return <Text dimColor>No memory candidates.</Text>
+
+      return (
+        <Box flexDirection="column">
+          <Text dimColor>Tick what is worth keeping. Nothing is saved until you press Save.</Text>
+          {candidates.map((c, i) => (
+            <Box key={`row${i}`}>
+              <Button
+                key={`tick${i}`}
+                plain
+                label={c.ticked ? '[x]' : '[ ]'}
+                onPress={() =>
+                  update($, DIGEST, (s) => ({
+                    ...s,
+                    candidates: s.candidates.map((one, j) => (j === i ? { ...one, ticked: !one.ticked } : one)),
+                  }))
+                }
+              />
+              <Text> {c.text}</Text>
+            </Box>
+          ))}
+          <Box>
+            <Button key="save" label="Save" variant="primary" onPress={() => saveTicked($)} />
+            <Text> </Text>
+            <Button key="skip" label="Skip" onPress={() => skipAll($)} />
           </Box>
-        ))}
-        <Box>
-          <Button key="save" label="Save" variant="primary" onPress={() => saveTicked($)} />
-          <Text> </Text>
-          <Button key="skip" label="Skip" onPress={() => skipAll($)} />
         </Box>
-      </Box>
-    )
+      )
+    } catch {
+      return go.fallback(e)
+    }
   })
 }
