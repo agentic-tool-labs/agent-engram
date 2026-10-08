@@ -30,7 +30,7 @@ export const ENGRAM_TOOLS = {
   expand: 'mcp__plugin_engram_engram__engram_expand',
 } as const
 
-export const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit'] as const
+export const EDIT_TOOLS = ['Edit', 'Write'] as const
 
 const NO_PORT_BACKOFF_MS = 60_000
 const DEFAULT_CLI_TIMEOUT_MS = 5_000
