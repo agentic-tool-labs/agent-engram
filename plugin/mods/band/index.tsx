@@ -1,6 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 import { SHARED_INITIAL, engramCli } from '../shared/client'
+import { ANY_SESSION_START } from '../shared/events'
 import type { ModIo } from '../shared/client'
 import {
   BAND_INITIAL,
@@ -54,7 +55,7 @@ export const register: Register = (on, options) => {
     timer = undefined
   }
 
-  on('session.start', async ($, e, next) => {
+  on('session.start', ANY_SESSION_START, async ($, e, next) => {
     stop()
     const mine = generation
     const tick = async () => {
