@@ -155,6 +155,13 @@ public static class TelemetryEventKind
     /// move.</summary>
     public const string Report = "report";
 
+    /// <summary>A call to the loopback mod API (<c>/mod/v1/*</c>) that read or wrote memory on a mod's
+    /// behalf — its own kind, never <see cref="Recall"/>, <see cref="Remember"/> or
+    /// <see cref="SessionOpen"/>, because D18 and D43 read those to answer whether <i>the model</i> reached
+    /// for memory and a mod calling on every prompt would inflate that in the direction that looks like
+    /// success. Carries Claude Code's session id, the id space the hook kinds use.</summary>
+    public const string ModCall = "mod-call";
+
     /// <summary>
     /// Every kind Engram emits.
     /// </summary>
@@ -168,7 +175,7 @@ public static class TelemetryEventKind
         Recall, Remember, Digest, Browse, Expand, Revise, Timeline, Judge,
         SessionStart, ServerStart, ServerStop, SessionOpen, SubagentStart, PreCompact, PostCompact,
         FileTouched, UserPrompt, MemoryGuard, LookupNudge, ToolObserved, Index, Embedding, Enrollment,
-        Sync, Navigate, Report,
+        Sync, Navigate, Report, ModCall,
     ];
 }
 
@@ -313,7 +320,14 @@ public sealed record TelemetryRecord(
     /// Size of the rendered document in bytes — the cheap signal of whether it is growing past
     /// usefulness. Only <see cref="TelemetryEventKind.Report"/> sets this.
     /// </summary>
-    [property: JsonPropertyName("report_bytes_written")] int? ReportBytesWritten = null);
+    [property: JsonPropertyName("report_bytes_written")] int? ReportBytesWritten = null,
+
+    /// <summary>The mod that made the call. Only <see cref="TelemetryEventKind.ModCall"/> sets this.</summary>
+    [property: JsonPropertyName("mod")] string? Mod = null,
+
+    /// <summary>The caller's stated recall mode (<c>shadow</c> or <c>inject</c>), recorded and never acted
+    /// on. Only <see cref="TelemetryEventKind.ModCall"/> sets this.</summary>
+    [property: JsonPropertyName("mode")] string? Mode = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

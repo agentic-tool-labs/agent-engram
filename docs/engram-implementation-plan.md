@@ -5461,3 +5461,55 @@ description change must trim. The guard is `McpToolSurfaceBudgetTests`, unchange
 **Not changed.** Schema, `AnalyzerVersion`, `code_index_version`, any fact body, predicate,
 evidence or path the indexer writes, the recall line, budget and markers (D30, D44, D57, D64), the
 `history` and `related` views, `MemoryBrowser`, and the pager's algorithm.
+
+## D76 — Mods reach memory through loopback JSON routes, never through MCP
+
+Claude Code mods (TS function-hook plugins) need to read and write Engram in a way that is
+distinguishable from the model's own use of memory, uses the running server's warm ranker and
+embedder, and returns structured JSON. `POST /mod/v1/<op>` on the existing `engram serve` loopback
+port carries seven operations: `recall`, `fact`, `history`, `forget`, `remember`, `captures` and
+`path-facts`. The logic is `ModApi` in Core, so tier 2 drives it against a real store without HTTP;
+the route in `ServeCommand` only enforces what is about HTTP itself.
+
+**Rejected, and why.** *Mods calling MCP tools* rides the engine's MCP connection, so the server
+records it as `recall`/`remember`/`expand` under the model's `Mcp-Session-Id` and writes
+`session-open` on the first call; D18, D43 and D56 read those kinds to answer "did the model reach
+for memory", and a per-prompt mod recall would inflate them in the direction that looks like
+success. *New CLI verbs* run one process per call with no warm state, and under `provider = "local"`
+the vector lane would load the GGUF each time — seconds and hundreds of MB per prompt. *An `origin`
+parameter on the MCP tools* has 14 characters of headroom under D75's surface ceiling, and the model
+would see and could set it.
+
+**Its own telemetry kind.** `mod-call` carries Claude Code's session id (the hook id space, D43/D73),
+the mod name and the recall mode the caller stated, so mod activity joins `session-start` and
+`tool-observed` for free. It is written for `recall`, `remember` and `forget` only, after the
+operation succeeded; a `forget` that closed nothing writes nothing. The four lookups write nothing —
+`captures` runs once per prompt and `path-facts` once per edit, and logging them would change what
+`telemetry.jsonl` is. It never carries `fact_count`, which on a `recall` record means facts returned
+to the model (D46). No `recall`, `remember` or `session-open` record is ever written by this API.
+
+**Security: same trust class as MCP, not quite the same surface.** The routes inherit the 127.0.0.1
+bind and the Origin→403 gate, which closes browser CSRF and DNS-rebinding POSTs identically. The one
+real difference is that MCP is stateful and needs two requests with custom headers and JSON-RPC
+framing before it can write, whereas a route that wrote a fact from one header-less POST is exactly
+what an SSRF or header-less POST primitive in another local tool can drive. Three rules close that,
+each checked before the body is read: `Content-Type: application/json` or 415; an `X-Engram-Mod`
+header matching `^[a-z0-9-]{1,32}$` and equal to the body's `mod` or 400 (which forces a CORS
+preflight in a browser, and the Origin gate 403s that); and a **global** Host check in the same
+middleware as the Origin gate — `127.0.0.1`, `localhost` or `[::1]`, optional port — which closes
+DNS-rebinding GETs where browsers omit Origin. The Host check changes existing routes: `/health` and
+MCP now answer 403 to any other Host. Claude Code's MCP client and `$.http.fetch` both send a
+loopback Host. The Origin gate stays presence-based; an allow-list would admit every local dev
+server.
+
+**Declined, and recorded as findings rather than fixed:** a per-home bearer token (the user declined
+it; it would also require generating `plugin/.mcp.json` at install), so any local uid reaches MCP and
+these routes; and the fixed-port squat — `ServerLifecycle.DoStart` adopts a same-version `/health`
+responder it did not launch.
+
+**Where it lives.** `LiveCodeFacts` holds the one definition of "live facts whose subject is this
+file or a `#` descendant", which the indexer's reconciliation and `path-facts` both bind;
+`CodeEntityResolver` maps a disk path to an entity path through `repo_registry` and the enrollment
+decision, with no subprocess and no file read, and is the entry point D77 consumes. Handlers log
+nothing from the request: the file logger writes formatted messages raw, so a logged `query` would be
+a log-injection path, whereas telemetry escapes control characters.

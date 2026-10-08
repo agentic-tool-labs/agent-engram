@@ -829,6 +829,15 @@ test still green. Read the loop before "simplifying" it, and re-verify with the 
 protocol (repeated-call RSS over hundreds of calls, or `GC.GetTotalMemory(forceFullCollection:true)`
 before/after) rather than trusting the test suite alone.
 
+**Mods never call Engram over MCP, and `mod-call` is its own kind.** A mod reaches memory through
+`POST /mod/v1/<op>` on the serve port, so what it does is recorded under Claude Code's session id as
+`mod-call` and never as `recall`, `remember` or `session-open`, which D18 and D43 read to answer
+whether the model used memory. Every request needs `Content-Type: application/json` and an
+`X-Engram-Mod` header equal to the body's `mod`, and the middleware that 403s any `Origin` also 403s
+any `Host` that is not loopback, on every route. Deleting any of those three guards leaves the rest
+of the suite green, which is why each has its own falsification row. Lookups (`fact`, `history`,
+`captures`, `path-facts`) write nothing, and handlers log nothing from the request (D76).
+
 ## Build constraints
 
 - .NET 10, `net10.0`. Warnings are errors.
