@@ -5462,6 +5462,93 @@ description change must trim. The guard is `McpToolSurfaceBudgetTests`, unchange
 evidence or path the indexer writes, the recall line, budget and markers (D30, D44, D57, D64), the
 `history` and `related` views, `MemoryBrowser`, and the pager's algorithm.
 
+## D76 — Mods reach memory through loopback JSON routes, never through MCP
+
+Claude Code mods (TS function-hook plugins) need to read and write Engram in a way that is
+distinguishable from the model's own use of memory, uses the running server's warm ranker and
+embedder, and returns structured JSON. `POST /mod/v1/<op>` on the existing `engram serve` loopback
+port carries seven operations: `recall`, `fact`, `history`, `forget`, `remember`, `captures` and
+`path-facts`. The logic is `ModApi` in Core, so tier 2 drives it against a real store without HTTP;
+the route in `ServeCommand` only enforces what is about HTTP itself.
+
+**Rejected, and why.** *Mods calling MCP tools* rides the engine's MCP connection, so the server
+records it as `recall`/`remember`/`expand` under the model's `Mcp-Session-Id` and writes
+`session-open` on the first call; D18, D43 and D56 read those kinds to answer "did the model reach
+for memory", and a per-prompt mod recall would inflate them in the direction that looks like
+success. *New CLI verbs* run one process per call with no warm state, and under `provider = "local"`
+the vector lane would load the GGUF each time — seconds and hundreds of MB per prompt. *An `origin`
+parameter on the MCP tools* has 14 characters of headroom under D75's surface ceiling, and the model
+would see and could set it.
+
+**Its own telemetry kind.** `mod-call` carries Claude Code's session id (the hook id space, D43/D73),
+the mod name and the recall mode the caller stated, so mod activity joins `session-start` and
+`tool-observed` for free. It is written for `recall`, `remember` and `forget` only, after the
+operation succeeded; a `forget` that closed nothing writes nothing. The four lookups write nothing —
+`captures` runs once per prompt and `path-facts` once per edit, and logging them would change what
+`telemetry.jsonl` is. It never carries `fact_count`, which on a `recall` record means facts returned
+to the model (D46). No `recall`, `remember` or `session-open` record is ever written by this API.
+
+**Security: same trust class as MCP, not quite the same surface.** The routes inherit the 127.0.0.1
+bind and the Origin→403 gate, which closes browser CSRF and DNS-rebinding POSTs identically. The one
+real difference is that MCP is stateful and needs two requests with custom headers and JSON-RPC
+framing before it can write, whereas a route that wrote a fact from one header-less POST is exactly
+what an SSRF or header-less POST primitive in another local tool can drive. Three rules close that,
+each checked before the body is read: `Content-Type: application/json` or 415; an `X-Engram-Mod`
+header matching `^[a-z0-9-]{1,32}$` and equal to the body's `mod` or 400 (which forces a CORS
+preflight in a browser, and the Origin gate 403s that); and a **global** Host check in the same
+middleware as the Origin gate — `127.0.0.1`, `localhost` or `[::1]`, optional port — which closes
+DNS-rebinding GETs where browsers omit Origin. The Host check changes existing routes: `/health` and
+MCP now answer 403 to any other Host. Claude Code's MCP client and `$.http.fetch` both send a
+loopback Host. The Origin gate stays presence-based; an allow-list would admit every local dev
+server.
+
+**Declined, and recorded as findings rather than fixed:** a per-home bearer token (the user declined
+it; it would also require generating `plugin/.mcp.json` at install), so any local uid reaches MCP and
+these routes; and the fixed-port squat — `ServerLifecycle.DoStart` adopts a same-version `/health`
+responder it did not launch.
+
+**Where it lives.** `LiveCodeFacts` holds the one definition of "live facts whose subject is this
+file or a `#` descendant", which the indexer's reconciliation and `path-facts` both bind;
+`CodeEntityResolver` maps a disk path to an entity path through `repo_registry` and the enrollment
+decision, with no subprocess and no file read, and is the entry point D77 consumes. Handlers log
+nothing from the request: the file logger writes formatted messages raw, so a logged `query` would be
+a log-injection path, whereas telemetry escapes control characters.
+
+## D77 — An invariant is a non-regenerable fact on a fingerprinted sub-entity of its file
+
+A person can mark a rule as load-bearing for one file with `engram invariant add <file> "<statement>"`.
+It is an ordinary fact: subject `<file entity path>#invariant-<8-char fingerprint of the statement>`,
+entity kind `convention`, predicate `invariant`, scope `project`, learned_via `stated`, regenerable 0,
+evidence `stated by the user via engram invariant`. No schema change, no migration, no new query.
+
+**Why a fingerprinted `#` sub-entity.** `ux_fact_live` allows one live fact per subject and predicate,
+so a file with two rules needs two subjects. The `#` descendant means the existing live-under-file read
+(`path = file OR path LIKE file#…`) already returns invariants beside the file's code facts.
+
+**Why not regenerable.** The indexer closes only regenerable facts, on file deletion and on a full
+reindex, so an invariant outlives its file and simply never matches a path again. Nothing authored is
+destroyed. Tagging was preferred to treating any authored fact at the path as an invariant, because a
+revised code fact becomes non-regenerable and still addresses its file (D2, D74), and would then surface
+as a rule. Path-scoped directives were rejected: directives are user-scope standing instructions
+delivered in every primer (D-6 to D-10), and invariants are delivered per edit.
+
+**CLI.** `add` resolves the file through `CodeEntityResolver` (the one disk-path-to-entity resolution
+shared with the mod API's `path-facts`), refuses a directory, a missing file, a path outside every
+indexed repository, and a statement over 250 tokens (the directive bound). Adding a statement already
+live on the file is a no-op that says so, tested before `FactStore.Remember`, which would otherwise
+close the incumbent and write a duplicate. `list [<file>]` shows live invariants; `remove <id>` follows
+`directive remove` exactly: a dry run unless `--apply`, and it refuses any fact that is not a live
+invariant. Revising goes through the existing revise paths.
+
+**Measured limits worth knowing.** `CodeEntityResolver` compares the canonicalised argument with the
+registry's `disk_path`. For a git checkout the registry holds git's canonical root, so they agree; for a
+plain directory it holds the path as given, which on macOS differs from the resolved one under `/var`,
+and `add` then answers "not inside an indexed repository" for a file that is indexed. Tier 3 therefore
+uses a git checkout. The resolver belongs to the mod API stream.
+
+**Not changed.** Schema, `AnalyzerVersion`, the indexer's deletion rule, directive behaviour, the primer
+(invariants are not delivered in it), and the MCP tool surface.
+
 ## D78 — User-prompt provenance is bound to the submission by its text, not by its position
 
 `user-prompt` captured nothing in Claude Code 2.1.294 interactive sessions: the real instance's last
