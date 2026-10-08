@@ -3,7 +3,8 @@ import type { On } from 'claude-code'
 import type { PromptSubmitInput, PromptSubmitResult } from 'claude-code'
 import { fakeModIo, installFakeEngine } from '../shared/testing'
 import type { FetchHandler, RoutingTable } from '../shared/testing'
-import { jitConfig, primePrompt } from './index'
+import { ANY_PROMPT_SUBMIT } from '../shared/events'
+import { jitConfig, primePrompt, register } from './index'
 import type { JitConfig } from './index'
 
 const BIN = '/fake/bin/engram'
@@ -286,6 +287,34 @@ for (const [budget, expected] of [
 }
 
 const answerSubmit = (on: On) => on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+
+type Registered = { event: string; matcher: unknown; handler: (...a: unknown[]) => Promise<unknown> }
+function registered(options: Record<string, string | number>): Registered[] {
+  const calls: Registered[] = []
+  register(((event: string, matcher: unknown, handler: Registered['handler']) => {
+    calls.push({ event, matcher, handler })
+  }) as unknown as On, options)
+  return calls
+}
+
+test('register: the only hook is prompt.submit on the shared match-all matcher', () => {
+  const calls = registered({ jit_mode: 'shadow' })
+  expect(calls.length).toBe(1)
+  expect(calls[0]!.event).toBe('prompt.submit')
+  expect(calls[0]!.matcher).toBe(ANY_PROMPT_SUBMIT)
+})
+
+test('a binding that throws passes the prompt on untouched and calls next once', async () => {
+  const hook = registered({ jit_mode: 'inject' })[0]!.handler
+  const seen: PromptSubmitInput[] = []
+  const next = Object.assign(async (x: PromptSubmitInput) => (seen.push(x), { text: x.text }), {
+    signal: new AbortController().signal,
+  })
+  const e = prompt()
+  await hook({}, e, next)
+  expect(seen.length).toBe(1)
+  expect(seen[0]).toBe(e)
+})
 
 test('manifest default is off: a plugin loaded with defaults makes no recall', async ($, on) => {
   const router = installFakeEngine(on, { ...RUNNING, ops: { recall: reply('high') } })
