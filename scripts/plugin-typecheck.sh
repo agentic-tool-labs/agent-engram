@@ -20,6 +20,9 @@
 
 set -u
 
+# The default plugin path is relative, so the script works from any directory.
+cd "$(dirname "$0")/.." || exit 2
+
 plugin=${PLUGIN_TYPECHECK_PLUGIN_DIR:-plugin}
 types="$plugin/.claude-plugin/types"
 stamp="$types/.engine-version"
@@ -32,7 +35,7 @@ cannot_find_types() {
     printf 'plugin-typecheck: cannot type-check — no engine types for Claude Code %s. tsc was not run.\n' "$version"
     printf '  tried: reuse of %s (stamp %s)\n' "$types" "$(cat "$stamp" 2>/dev/null || echo absent)"
     printf '         the engine lay-down (claude -p /help --plugin-dir %s)\n' "$plugin"
-    printf '         the engine'"'"'s bundled claude-code.d.ts under %s\n' "${bundle_roots[*]}"
+    printf '         the engine'"'"'s bundled claude-code.d.ts under %s\n' "${bundle_roots[*]:-none}"
     printf '  the bundled file exists once a process of this exact version has loaded the plugin-authoring skill;\n'
     printf '  run `claude -p /plugin-authoring --max-turns 1` once (it makes a model call) and re-run this script.\n'
     printf '  Recipe: spec engram-mods/10-shared-mod-client.md, section "Test plan", type-check gate.\n'
