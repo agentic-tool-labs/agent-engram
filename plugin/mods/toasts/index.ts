@@ -20,6 +20,8 @@ const bindIo = ($: EngineInterface): ModIo => ({
 })
 
 const UNDO_COMMAND = 'undo-capture'
+// TODO: $.audio.play refuses a file: URL and an absolute asset path, so the chime is a silent no-op
+// until the clip form for chime_sound is decided.
 const DEFAULT_CHIME = '/System/Library/Sounds/Tink.aiff'
 
 type RecallsValue = { recalls?: { toolUseId: string; coverage?: string }[] } | undefined
