@@ -28,10 +28,6 @@ const bindIo = ($: EngineInterface): ModIo => ({
   updateShared: (fn) => update($, SHARED, fn),
 })
 
-// EDIT_TOOLS names MultiEdit, which this engine's tool-name matcher type does not list; a pattern
-// built from the one definition keeps the matcher in step with it.
-const EDIT_MATCHER = new RegExp(`^(${EDIT_TOOLS.join('|')})$`)
-
 const PANE = 'engram-why'
 const LOOKUP_TIMEOUT_MS = 300
 const WHY_TIMEOUT_MS = 2_000
@@ -96,7 +92,7 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  on('tool.call', { tool: EDIT_MATCHER }, async ($, e, next) => {
+  on('tool.call', { tool: [...EDIT_TOOLS] }, async ($, e, next) => {
     const mode = modeOf(options.sentinel_mode)
     const given = 'file_path' in e ? e.file_path : undefined
     if (mode === 'off' || typeof given !== 'string' || given === '') return next(e)
@@ -136,11 +132,7 @@ export const register: Register = (on, options) => {
     const block = describe(rel, facts)
     if (mode === 'deny-once') return { deny: block + '\nRe-issue the edit if it respects these.' }
 
-    try {
-      $.ui.notice(e.tool_use_id, `${facts.length} invariant(s) for ${rel}`)
-    } catch {
-      // The notice only shows under an open dialog; a refused one changes nothing.
-    }
+    $.ui.toast(`${facts.length} invariant(s) recorded for ${rel}`)
     const ran = await next(e)
     if (ran.deny !== undefined) return ran
     return { ...ran, context: [...(ran.context ?? []), block] }
@@ -153,8 +145,9 @@ export const register: Register = (on, options) => {
     const text =
       ran === undefined
         ? 'Engram binary not found.'
-        : (firstLine(ran.stdout) ??
-          (ran.exitCode === 0 ? 'Recorded.' : `engram invariant add failed (exit ${ran.exitCode}).`))
+        : ran.exitCode === 0
+          ? (firstLine(ran.stdout) ?? 'Recorded.')
+          : (firstLine(ran.stderr) ?? `engram invariant add failed (exit ${ran.exitCode}).`)
     $.ui.toast(text)
     return { text }
   })

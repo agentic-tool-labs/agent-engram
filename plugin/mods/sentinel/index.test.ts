@@ -49,7 +49,6 @@ function rig(
   })
   const clock = mock.clock(on)
   const ran: Record<string, unknown>[] = []
-  const notices: { tool_use_id: string; text: string | undefined }[] = []
   const toasts: string[] = []
   const panes: { id: string; title?: string }[] = []
   on('session.cwd', () => ({ value: '/repo' }))
@@ -57,10 +56,6 @@ function rig(
     ran.push({ ...e })
     if (opts.toolDeny !== undefined) return { deny: opts.toolDeny }
     return { ref: 1, result: {}, text: 'ok', ...(opts.toolContext === undefined ? {} : { context: opts.toolContext }) }
-  })
-  on('ui.notice', (_$, e) => {
-    notices.push(e)
-    return { value: undefined }
   })
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
@@ -71,7 +66,7 @@ function rig(
     return { value: { isPlaced: true as const } }
   })
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
-  return { router, clock, ran, notices, toasts, panes }
+  return { router, clock, ran, toasts, panes }
 }
 
 const edit = (file_path: string, extra: object = {}) =>
@@ -83,14 +78,14 @@ const denyOf = (r: unknown) => (r as { deny?: string }).deny
 const BLOCK = 'Invariants recorded for src/a.ts:\n- [f12] keep the list sorted\n- [f13] never log secrets'
 const pathFactsCalls = (r: Rig) => r.router.fetchCalls.filter((c) => c.op === 'path-facts')
 
-test('inform: the edit runs untouched and the invariants are appended once, with one notice', async ($, on) => {
+test('inform: the edit runs untouched and the invariants are appended once, with one toast', async ($, on) => {
   const r = rig(on, { path: answer(TWO) })
   const out = await $.tool.call(edit(FILE))
   expect(denyOf(out)).toBeUndefined()
   expect(contextOf(out)).toEqual([BLOCK])
   expect(r.ran.length).toBe(1)
   expect(r.ran[0]).toMatchObject({ tool: 'Edit', file_path: FILE, old_string: 'a', new_string: 'b' })
-  expect(r.notices.map((n) => n.text)).toEqual(['2 invariant(s) for src/a.ts'])
+  expect(r.toasts).toEqual(['2 invariant(s) recorded for src/a.ts'])
   const [call] = pathFactsCalls(r)
   expect(call!.body).toEqual({ path: FILE, predicate: 'invariant', mod: 'sentinel' })
   expect(call!.headers['X-Engram-Mod']).toBe('sentinel')
@@ -102,7 +97,7 @@ test('a second edit of the same file makes no API call and adds nothing', async 
   const out = await $.tool.call(edit(FILE))
   expect(contextOf(out)).toBeUndefined()
   expect(pathFactsCalls(r).length).toBe(1)
-  expect(r.notices.length).toBe(1)
+  expect(r.toasts.length).toBe(1)
 })
 
 test('a file with no invariants costs one call, then is silent all session', async ($, on) => {
@@ -110,7 +105,7 @@ test('a file with no invariants costs one call, then is silent all session', asy
   expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
   expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
   expect(pathFactsCalls(r).length).toBe(1)
-  expect(r.notices.length).toBe(0)
+  expect(r.toasts.length).toBe(0)
 })
 
 test('a different file is a different once', async ($, on) => {
@@ -163,7 +158,7 @@ test('deny-once: the first edit is denied with the block, the next proceeds, the
   expect(contextOf(second)).toBeUndefined()
   expect(r.ran.length).toBe(1)
   expect(pathFactsCalls(r).length).toBe(1)
-  expect(r.notices.length).toBe(0)
+  expect(r.toasts.length).toBe(0)
 })
 
 test('deny-once on a file with no invariants never denies', { options: { sentinel_mode: 'deny-once' } }, async ($, on) => {
@@ -213,7 +208,7 @@ test('two concurrent edits of one file announce exactly once', async ($, on) => 
   const [a, b] = await Promise.all([$.tool.call(edit(FILE)), $.tool.call(edit(FILE))])
   expect([contextOf(a), contextOf(b)].filter((c) => c !== undefined).length).toBe(1)
   expect(r.ran.length).toBe(2)
-  expect(r.notices.length).toBe(1)
+  expect(r.toasts.length).toBe(1)
 })
 
 test('server down: the edit proceeds, the path is retried only after 60 s', async ($, on) => {
@@ -256,7 +251,7 @@ test('a slow server: the edit goes ahead at 300 ms, the late answer changes noth
   hold = false
   release()
   await r.clock.settle()
-  expect(r.notices.length).toBe(0)
+  expect(r.toasts.length).toBe(0)
   expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
   expect(pathFactsCalls(r).length).toBe(1)
   await r.clock.advance(61_000)
@@ -283,11 +278,25 @@ test('/invariant forwards file and statement to the CLI and toasts its line', as
   expect(r.toasts).toEqual(['[f9] added: "keep the list sorted"'])
 })
 
-test('/invariant: a failing CLI with no stdout still says it failed', async ($, on) => {
-  const r = rig(on, { cli: { 'invariant add src/a.ts x': { exitCode: 1, stdout: '', stderr: 'error: not enrolled' } } })
+test('/invariant: a failing CLI toasts its first stderr line', async ($, on) => {
+  const r = rig(on, {
+    cli: { 'invariant add src/a.ts x': { exitCode: 1, stdout: '', stderr: '\nerror: not enrolled\nsecond\n' } },
+  })
   const out = await run($, 'invariant', 'src/a.ts x')
-  expect(out.text).toBe('engram invariant add failed (exit 1).')
+  expect(out.text).toBe('error: not enrolled')
+  expect(r.toasts).toEqual(['error: not enrolled'])
+})
+
+test('/invariant: a failing CLI that printed nothing still says it failed', async ($, on) => {
+  const r = rig(on, { cli: { 'invariant add src/a.ts x': { exitCode: 2, stdout: 'noise', stderr: '  \n' } } })
+  const out = await run($, 'invariant', 'src/a.ts x')
+  expect(out.text).toBe('engram invariant add failed (exit 2).')
   expect(r.toasts.length).toBe(1)
+})
+
+test('/invariant: exit 0 with no stdout says Recorded, whatever stderr holds', async ($, on) => {
+  rig(on, { cli: { 'invariant add src/a.ts x': { exitCode: 0, stdout: '', stderr: 'warning: slow' } } })
+  expect((await run($, 'invariant', 'src/a.ts x')).text).toBe('Recorded.')
 })
 
 test('/invariant: no binary installed', async ($, on) => {
