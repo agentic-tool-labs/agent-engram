@@ -124,6 +124,56 @@ public class PluginSourceTests
         Assert.Equal(["band.test.ts", "register.tsx"], found);
     }
 
+    // The engine loads every mod through one hooks module and refuses an event registered twice
+    // there unless each registration has a matcher, so a second mod taking an event bare took the
+    // whole plugin down: validate failed and every plugin test with it. A registration is bare when
+    // the hook follows the event name directly.
+    [Fact]
+    public void ShippedModSources_RegisterNoEventBareMoreThanOnce()
+    {
+        var sources = ModSourceFiles(PluginSandbox.PluginDirectory).ToList();
+
+        Assert.NotEmpty(sources);
+        Assert.Empty(EventsRegisteredBareMoreThanOnce(sources));
+    }
+
+    [Fact]
+    public void TwoBareRegistrationsOfOneEvent_AreReportedWithBothLocations()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/band/index.tsx", "on('session.start', async ($, e, next) => next(e))\n");
+        tree.Write("mods/digest/index.tsx", "x\non(\"session.start\", ($, e, next) => next(e))\n");
+
+        var only = Assert.Single(EventsRegisteredBareMoreThanOnce(ModSourceFiles(tree.Root)));
+
+        Assert.StartsWith("session.start:", only);
+        Assert.Contains("band", only);
+        Assert.Contains("digest", only);
+    }
+
+    // The nearest inputs that must not be reported: one bare and one with a matcher, two with
+    // matchers, two different events, and a test file registering on the test's own hooks.
+    [Fact]
+    public void BareRegistrationsThatTheEngineAccepts_AreNotReported()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", "on('session.start', async ($, e, next) => next(e))\non('tool.call', { tool: ['Edit'] }, ($, e, next) => next(e))\n");
+        tree.Write("mods/b/index.ts", "on('session.start', ANY_SESSION_START, async ($, e, next) => next(e))\non('tool.call', { tool: ['Edit'] }, ($, e, next) => next(e))\n");
+        tree.Write("mods/c/index.ts", "on('turn.complete', ($, e, next) => next(e))\n");
+        tree.Write("mods/a/a.test.ts", "on('session.start', (_$, e) => ({ cwd: e.cwd }))\n");
+
+        Assert.Empty(EventsRegisteredBareMoreThanOnce(ModSourceFiles(tree.Root)));
+    }
+
+    [Fact]
+    public void TheSameEventRegisteredBareTwiceInOneFile_IsReported()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", "on('session.start', ($, e, next) => next(e))\non('session.start', async ($, e, next) => next(e))\n");
+
+        Assert.Single(EventsRegisteredBareMoreThanOnce(ModSourceFiles(tree.Root)));
+    }
+
     private static IEnumerable<string> ModSourceFiles(string pluginDirectory) =>
         new[] { "hooks", "mods" }
             .Select(d => Path.Combine(pluginDirectory, d))
@@ -152,6 +202,32 @@ public class PluginSourceTests
         }
 
         return found;
+    }
+
+    private static readonly Regex BareRegistrationPattern = new(
+        @"\bon\(\s*['""]([a-z][a-z0-9.]*)['""]\s*,\s*(?:async\s*)?(?:\(|[A-Za-z_$][\w$]*\s*=>)",
+        RegexOptions.Compiled);
+
+    private static List<string> EventsRegisteredBareMoreThanOnce(IEnumerable<string> files)
+    {
+        var byEvent = new Dictionary<string, List<string>>();
+        foreach (var file in files.Where(f => !Path.GetFileName(f).Contains(".test.", StringComparison.Ordinal)))
+        {
+            var text = File.ReadAllText(file);
+            foreach (Match match in BareRegistrationPattern.Matches(text))
+            {
+                var line = text.AsSpan(0, match.Index).Count('\n') + 1;
+                var name = match.Groups[1].Value;
+                if (!byEvent.TryGetValue(name, out var places))
+                {
+                    byEvent[name] = places = [];
+                }
+
+                places.Add($"{file}:{line}");
+            }
+        }
+
+        return byEvent.Where(e => e.Value.Count > 1).Select(e => $"{e.Key}: {string.Join(", ", e.Value)}").Order().ToList();
     }
 
     private static List<string> NumberDefaultsThatAreNotNumbers(string manifestJson)

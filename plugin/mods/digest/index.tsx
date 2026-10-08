@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { EDIT_TOOLS, SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
+import { ANY_SESSION_START } from '../shared/events'
 import {
   DIGEST_INITIAL,
   DIGEST_SYSTEM,
@@ -99,7 +100,7 @@ async function skipAll($: EngineInterface): Promise<void> {
 export const register: Register = (on, options) => {
   const every = digestEvery(options)
 
-  on('session.start', async ($, e, next) => {
+  on('session.start', ANY_SESSION_START, async ($, e, next) => {
     await $.command.register({
       name: 'digest-review',
       description: 'Review the memory candidates the auto-digest proposed',

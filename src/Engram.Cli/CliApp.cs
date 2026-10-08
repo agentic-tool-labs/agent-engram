@@ -65,6 +65,7 @@ public static class CliApp
             "import" => ImportCommand.Run(homePath, rest, stdout, stderr),
             "sync" => SyncCommand.Run(homePath, rest, stdout, stderr),
             "directive" => DirectiveCommand.Run(homePath, rest, stdout, stderr),
+            "invariant" => InvariantCommand.Run(homePath, rest, stdout, stderr),
             "profile" => ProfileCommand.Run(homePath, rest, stdout, stderr),
             "report" => ReportCommand.Run(homePath, rest, stdout, stderr),
             _ => Usage(stderr),
