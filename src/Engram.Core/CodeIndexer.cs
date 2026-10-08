@@ -796,15 +796,14 @@ public static class CodeIndexer
 
         using var command = connection.CreateCommand();
         command.CommandText =
-            """
+            $"""
             SELECT fact.id, fact.path, fact.predicate, o.path, fact.body, fact.regenerable, fact.analyzer_tier
             FROM fact
             LEFT JOIN entity o ON o.id = fact.object_id
             WHERE fact.valid_to IS NULL
-              AND (fact.path = $p OR (substr(fact.path, 1, $len) = $p AND substr(fact.path, $len + 1, 1) = '#'));
+              AND {LiveCodeFacts.UnderFilePredicate};
             """;
-        command.Parameters.AddWithValue("$p", filePath);
-        command.Parameters.AddWithValue("$len", filePath.Length);
+        LiveCodeFacts.BindFile(command, filePath);
 
         using var reader = command.ExecuteReader();
         while (reader.Read())
