@@ -62,13 +62,13 @@ export type LensState = {
   recalls: LensRecall[]
   currentTurnId?: string
   /** Keyed by fact handle. */
-  history: Record<string, HistoryView | 'loading' | 'unavailable'>
-  /** Index into a loaded history's versions, keyed by fact handle; absent means the newest. */
-  selected: Record<string, number>
+  history: Record<string, HistoryView | 'loading' | 'unavailable' | 'failed'>
+  /** Index into a loaded history's versions, keyed by fact handle; absent means the newest. Optional so readers of the recalls (the band) can build a LensState without it. */
+  selected?: Record<string, number>
   /** Whether `/lens` last left the pane open. */
-  paneOpen: boolean
+  paneOpen?: boolean
   /** The pane has already been opened by `lens_auto_open` this session. */
-  autoOpened: boolean
+  autoOpened?: boolean
 }
 
 /** The JSON of `engram embed --status --json`. */

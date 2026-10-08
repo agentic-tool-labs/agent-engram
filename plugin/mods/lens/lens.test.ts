@@ -5,7 +5,6 @@ import type { On } from 'claude-code'
 import { ENGRAM_TOOLS } from '../shared/client'
 import { installFakeEngine } from '../shared/testing'
 import type { RoutingTable } from '../shared/testing'
-import { MAX_RECALLS } from './model'
 
 const DIGEST = [
   'RECALL "kestrel" · 2 facts · 40/500 tokens · coverage: partial · overlap lane did not run (token index not built yet)',
@@ -116,12 +115,12 @@ test('text without a RECALL header is shown raw, not dropped', async ($, on) => 
 
 test('the pane keeps the newest twenty of twenty-five recalls', async ($, on) => {
   answerEachRecall(on)
-  for (let i = 0; i < MAX_RECALLS + 5; i++) await $.tool.call(recallCall(`t${i}`, { query: `q${i}` }))
+  for (let i = 0; i < 25; i++) await $.tool.call(recallCall(`t${i}`, { query: `q${i}` }))
 
   const headers = (await shown($)).filter((t) => /^"q\d+" · /.test(t))
-  expect(headers.length).toBe(MAX_RECALLS)
-  expect(headers[0]!.startsWith(`"q${MAX_RECALLS + 4}" · `)).toBe(true)
-  expect(headers[MAX_RECALLS - 1]!.startsWith('"q5" · ')).toBe(true)
+  expect(headers.length).toBe(20)
+  expect(headers[0]!.startsWith('"q24" · ')).toBe(true)
+  expect(headers[19]!.startsWith('"q5" · ')).toBe(true)
 })
 
 test('turn.start passes through', async ($, on) => {
@@ -192,6 +191,19 @@ test('History against an older server says so and does not retry', async ($, on)
   expect(await pane.find({ text: /history unavailable/ })).toBeDefined()
   expect(await pane.find({ type: 'Button', key: 'h-t1-f3' })).toBeUndefined()
   expect(router.fetchCalls.length).toBe(1)
+})
+
+test('History while the server is down offers a retry; an old server does not', async ($, on) => {
+  const { pane } = await openedLens($, on, {
+    binary: '/fake/bin/engram',
+    cli: { 'status --json': { exitCode: 1, stdout: JSON.stringify({ Home: '/h', Server: 'NotRunning' }) } },
+  })
+
+  await pane.press({ key: 'h-t1-f3' })
+
+  expect(await pane.find({ text: /history lookup failed/ })).toBeDefined()
+  expect(await pane.find({ type: 'Button', key: 'h-t1-f3' })).toBeDefined()
+  expect(await pane.find({ text: /history unavailable/ })).toBeUndefined()
 })
 
 test('History for a handle the server does not know says unavailable', async ($, on) => {

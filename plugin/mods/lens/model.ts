@@ -46,6 +46,6 @@ export function versionLine(v: HistoryVersion, index: number): string {
 
 /** The version the scrubber shows: the stored choice clamped into range, else the newest. */
 export function selectedIndex(state: LensState, handle: string, count: number): number {
-  const chosen = state.selected[handle]
+  const chosen = state.selected?.[handle]
   return Math.min(Math.max(chosen ?? count - 1, 0), count - 1)
 }

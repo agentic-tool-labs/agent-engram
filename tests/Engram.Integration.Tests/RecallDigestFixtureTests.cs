@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Engram.Core;
 using Microsoft.Data.Sqlite;
 
@@ -14,9 +15,13 @@ public class RecallDigestFixtureTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
 
-    private const string HighPath = "high.txt";
-    private const string PartialPath = "partial.txt";
-    private const string NoneBothLanesPath = "none-both-lanes.txt";
+    private const string FixtureFile = "recall-digests.ts";
+    private const string FixturePrefix = "export default ";
+    private const string FixtureSuffix = ";\n";
+
+    private const string High = "high";
+    private const string Partial = "partial";
+    private const string NoneBothLanes = "none-both-lanes";
 
     [Fact]
     public void High_CarriesEveryMarker_AndMatchesItsFixture()
@@ -48,7 +53,7 @@ public class RecallDigestFixtureTests
         Assert.Contains(" · +", text, StringComparison.Ordinal);
         Assert.Contains("(code · r:src/kestrel.cs · 0d", text, StringComparison.Ordinal);
 
-        AssertMatchesFixture(HighPath, text);
+        AssertMatchesFixture(High, text);
     }
 
     [Fact]
@@ -64,7 +69,7 @@ public class RecallDigestFixtureTests
         Assert.Contains("coverage: partial", text, StringComparison.Ordinal);
         Assert.Contains("\ngaps: only partial matches", text, StringComparison.Ordinal);
 
-        AssertMatchesFixture(PartialPath, text);
+        AssertMatchesFixture(Partial, text);
     }
 
     [Fact]
@@ -87,17 +92,27 @@ public class RecallDigestFixtureTests
         Assert.Contains("overlap lane did not run (token index not built yet)", text, StringComparison.Ordinal);
         Assert.Contains("vector lane did not run (sqlite-vec is not installed)", text, StringComparison.Ordinal);
 
-        AssertMatchesFixture(NoneBothLanesPath, text);
+        AssertMatchesFixture(NoneBothLanes, text);
     }
 
+    /// <summary>
+    /// The plugin tests import the same file as code, because an engine test can load only code files;
+    /// so the file is one JSON object wrapped in a fixed prefix and suffix, and this reads the JSON.
+    /// </summary>
     private static void AssertMatchesFixture(string name, string actual)
     {
-        var path = Path.Combine(FixtureDirectory(), name);
-        Assert.True(File.Exists(path), $"fixture {path} is missing");
+        var path = Path.Combine(FixtureDirectory(), FixtureFile);
+        Assert.True(File.Exists(path), $"fixture file {path} is missing");
 
-        // Compared exactly, with a trailing newline stripped on the file side only: editors add one
-        // and the digest never ends with one.
-        Assert.Equal(File.ReadAllText(path).TrimEnd('\n'), actual);
+        var file = File.ReadAllText(path);
+        Assert.StartsWith(FixturePrefix, file, StringComparison.Ordinal);
+        Assert.EndsWith(FixtureSuffix, file, StringComparison.Ordinal);
+
+        var digests = JsonNode.Parse(file[FixturePrefix.Length..^FixtureSuffix.Length])!.AsObject();
+        var expected = digests[name]?.GetValue<string>();
+
+        Assert.True(expected is not null, $"{FixtureFile} has no entry named '{name}'");
+        Assert.Equal(expected, actual);
     }
 
     private static string FixtureDirectory()

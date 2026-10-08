@@ -94,14 +94,20 @@ export const register: Register = (on, options) => {
     const state = await read($, LENS)
 
     const loadHistory = async (handle: string) => {
-      const current = await read($, LENS)
-      if (current.history[handle] !== undefined) return
+      const current = (await read($, LENS)).history[handle]
+      if (current !== undefined && current !== 'failed') return
 
       await update($, LENS, (s) => ({ ...s, history: { ...s.history, [handle]: 'loading' as const } }))
       const result = await modApi(bindIo($), 'history', { fact_id: handle }, { mod: 'lens' })
+      // A server that is down or slow may be back by the next press; one that lacks the op or
+      // does not know the handle will answer the same way again.
+      const retriable = !result.ok && (result.reason === 'server-down' || result.reason === 'timeout')
       await update($, LENS, (s) => ({
         ...s,
-        history: { ...s.history, [handle]: result.ok ? result.value : ('unavailable' as const) },
+        history: {
+          ...s.history,
+          [handle]: result.ok ? result.value : retriable ? ('failed' as const) : ('unavailable' as const),
+        },
       }))
     }
 
@@ -122,7 +128,7 @@ export const register: Register = (on, options) => {
             <Text bold>{headerLine(recall)}</Text>
             {recall.isError || !recall.parsed ? <Text dimColor>{recall.raw}</Text> : null}
             {recall.notes.map((note) => (
-              <Text dimColor>{note}</Text>
+              <Text key={note} dimColor>{note}</Text>
             ))}
             {recall.facts.map((fact) => {
               const view = state.history[fact.handle]
@@ -132,15 +138,16 @@ export const register: Register = (on, options) => {
                     {fact.handle} {fact.body}
                     <Text dimColor> ({fact.meta})</Text>
                   </Text>
-                  {fact.versions > 1 && view === undefined ? (
+                  {fact.versions > 1 && (view === undefined || view === 'failed') ? (
                     <Button key={`h-${recall.toolUseId}-${fact.handle}`} label="History" onPress={() => loadHistory(fact.handle)} />
                   ) : null}
                   {view === 'loading' ? <Text dimColor>loading history…</Text> : null}
+                  {view === 'failed' ? <Text dimColor>history lookup failed (server down or slow) — press History to retry</Text> : null}
                   {view === 'unavailable' ? <Text dimColor>history unavailable (server down / older Engram)</Text> : null}
                   {typeof view === 'object' ? (
                     <Box flexDirection="column" paddingLeft={2}>
                       {view.versions.map((v, i) => (
-                        <Text dimColor={i !== selectedIndex(state, fact.handle, view.versions.length)}>{versionLine(v, i)}</Text>
+                        <Text key={`v${i}`} dimColor={i !== selectedIndex(state, fact.handle, view.versions.length)}>{versionLine(v, i)}</Text>
                       ))}
                       <Text>{view.versions[selectedIndex(state, fact.handle, view.versions.length)]?.body ?? ''}</Text>
                       {view.versions.length > 1 ? (

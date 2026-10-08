@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
+import digests from './fixtures/recall-digests'
 import { parseDigest } from './parser'
 
 const header = (rest = 'coverage: high', facts = 1) => `RECALL "q" · ${facts} facts · 10/500 tokens · ${rest}`
@@ -97,4 +98,47 @@ test('a fact line without a closing parenthesis keeps its whole text as the body
   const [fact] = parseDigest([header(), '[f1] body with no markers'].join('\n')).facts
 
   expect(fact).toMatchObject({ body: 'body with no markers', meta: '' })
+})
+
+// The digests below are rendered by the C# formatter and held by RecallDigestFixtureTests; this file
+// asserts what the parser makes of each, so a format change reds one side or the other.
+test('every fixture digest parses', () => {
+  expect(Object.keys(digests).sort()).toEqual(['high', 'none-both-lanes', 'partial'])
+  for (const [name, text] of Object.entries(digests)) {
+    expect([name, parseDigest(text).parsed]).toEqual([name, true])
+  }
+})
+
+test('fixture high: every marker, in order, with the code location', () => {
+  const parsed = parseDigest(digests.high)
+
+  expect(parsed).toMatchObject({ query: 'kestrel listener', coverage: 'high', factCount: 6, notes: [] })
+  expect(parsed.gaps).toBeUndefined()
+  expect(parsed.facts.map((f) => f.handle)).toEqual(['f1', 'f3', 'f6', 'f4', 'f5', 'f7'])
+  expect(parsed.facts.filter((f) => f.pinned).map((f) => f.handle)).toEqual(['f1'])
+  expect(parsed.facts.filter((f) => f.judged).map((f) => f.handle)).toEqual(['f4', 'f5'])
+  expect(parsed.facts.filter((f) => f.versions > 1).map((f) => [f.handle, f.versions])).toEqual([['f3', 2]])
+  expect(parsed.facts.find((f) => f.handle === 'f6')?.withheld).toBe('1.6k')
+  expect(parsed.facts.find((f) => f.handle === 'f7')).toMatchObject({
+    location: 'r:src/kestrel.cs',
+    body: 'Bind(port) — kestrel listener binder.',
+  })
+})
+
+test('fixture partial: one fact and the gaps text', () => {
+  const parsed = parseDigest(digests.partial)
+
+  expect(parsed).toMatchObject({ coverage: 'partial', factCount: 1 })
+  expect(parsed.gaps).toBe('only partial matches for "kestrel listener" — verify before relying on this')
+  expect(parsed.notes).toEqual([])
+})
+
+test('fixture none-both-lanes: no facts and both notes verbatim', () => {
+  const parsed = parseDigest(digests['none-both-lanes'])
+
+  expect(parsed).toMatchObject({ coverage: 'none', factCount: 0, facts: [] })
+  expect(parsed.notes).toEqual([
+    'overlap lane did not run (token index not built yet)',
+    'vector lane did not run (sqlite-vec is not installed)',
+  ])
 })
