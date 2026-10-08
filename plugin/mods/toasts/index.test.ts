@@ -198,6 +198,7 @@ test('a play that is refused is silent and the toasts still show', { options: { 
   r.deny.audio = true
   await submit($, 'I like tea')
   expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT])
+  expect(r.commands).toEqual(['undo-capture'])
 })
 
 test('the first capture toast of a session carries the undo hint; the second does not', async ($, on) => {

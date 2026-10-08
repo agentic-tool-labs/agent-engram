@@ -67,9 +67,7 @@ export const register: Register = (on, options) => {
         fresh.forEach((c, i) => $.ui.toast(`Remembered [${c.handle}]: ${c.body}${isFirst && i === 0 ? UNDO_HINT : ''}`))
         if (chimeOnCaptures && fresh.length > 0) $.audio.play(CHIME).catch(() => {})
         if (isFirst) {
-          await $.command
-            .register({ name: UNDO_COMMAND, description: 'Forget the memory Engram captured most recently' })
-            .catch(() => {})
+          await $.command.register({ name: UNDO_COMMAND, description: 'Forget the memory Engram captured most recently' })
         }
       } catch {
         // A failed lookup costs the toast and nothing else.
