@@ -5461,3 +5461,55 @@ description change must trim. The guard is `McpToolSurfaceBudgetTests`, unchange
 **Not changed.** Schema, `AnalyzerVersion`, `code_index_version`, any fact body, predicate,
 evidence or path the indexer writes, the recall line, budget and markers (D30, D44, D57, D64), the
 `history` and `related` views, `MemoryBrowser`, and the pager's algorithm.
+
+## D78 — User-prompt provenance is bound to the submission by its text, not by its position
+
+`user-prompt` captured nothing in Claude Code 2.1.294 interactive sessions: the real instance's last
+`user-prompt` record is 2026-08-10T00:40:25Z against 3,271 `session-start` records since. The hook
+accepted a prompt only when the **last** transcript line carried `promptSource == "typed"`, and Claude
+Code now writes attachment lines (`environment`, `model`, `skill_listing`, `hook_additional_context`, …)
+after the user record, at its timestamp, before the hook runs. The same sentence with a one-line
+transcript was captured, so the classifier and the write were never at fault. Every fixture was a
+one-line transcript — the shape the defect assumes — and `UsesTheLastTranscriptLineNotAnEarlierOne`
+pinned the rule as intended.
+
+**The rule.** Provenance is the `promptSource` of the newest `type:"user"` record in the 262,144-byte
+tail whose text equals the hook's `prompt` (both trimmed, ordinal; `message.content` as a string, or the
+concatenated `text` blocks of an array). Capture only for `typed`; `system`, `sdk` and unknown values
+do not. Lines without `"promptSource"` are skipped unparsed, at most 16 candidates are examined, and no
+match or any read/parse failure is "not genuine". The classifier still runs first and the transcript is
+opened only when it found something.
+
+**The tail window escalates once.** The first read is the last 262,144 bytes; only a walk that reached no
+decision (nothing matched, fewer than 16 candidates, no failure) over a window that did not begin at
+offset 0 is read again, over the last 1,048,576 bytes with the candidate count restarted. A window that
+does not begin at offset 0 drops its first line unparsed, since it is partial by construction. Nothing
+beyond 1,048,576 bytes is examined and there is no third read. The 262,144 figure was sized for a last
+line; the window now also has to hold every attachment written after the typed record. Measured by the
+reviewer over 1,538 real typed records (1,895 transcripts, 30 days): bytes after the typed record p50
+8 KB, p95 103 KB, p99 212 KB, max 361 KB, and 18 of 1,538 (1.2%) typed records started outside 262,144
+bytes, mostly a session's first prompt, whose trailer carries `instructions` (168 KB), `skill_listing`
+(65 KB) and `agent_listing_delta` (59 KB). A flat 1 MiB read would charge every classifier hit four
+times the read to serve those 1.2%; escalating leaves the common path one 256 KiB read and pays the
+second only on a walk that would otherwise fail closed anyway. 1 MiB is 2.9 times the measured maximum.
+A typed record starting more than 1,048,576 bytes from the end still fails closed (no capture, no
+error); E15 re-measures the count against that bound.
+
+**Why text, not "the newest `promptSource` line".** A peer message's own record may not be written yet;
+the newest `promptSource` line is then the previous typed prompt, which would vouch for prose that
+looks exactly like a first-person statement — the 16-of-16 mis-capture class this check exists to stop.
+Binding to the text makes a missing record fail closed. The falsifying arm that drops the binding
+(`if (true)`) reddens `DoesNotCaptureWhenNoRecordMatchesThePromptText`,
+`DoesNotCaptureWhenTheTextDiffersInTheMiddle` and the 17-record bound test, and leaves
+`DoesNotCaptureAPeerMessageAfterAnEarlierTypedPrompt` green: that test's peer record *is* the newest
+`promptSource` line, so a newest-line rule rejects it too. The no-match test is what holds the binding.
+
+**Residual, accepted.** An earlier typed record with the *same* text can vouch for a submission whose own
+record is absent; the restatement guard makes that a no-op when the statement is already stored. A prompt
+whose stdin text differs from the recorded text (an expanded paste, an `@file` mention) is not captured.
+Whether either happens in practice, and whether queued prompts are recorded before the hook runs, is not
+yet measured (E13, E14).
+
+**Not changed.** `UserStatementClassifier`, what a capture writes, the D56 `user-prompt` record and its
+placement after the "stored" guard, the restatement no-op, the 262,144-byte first read, the database-open count on the
+path, and the rule that `-p` prompts are never captured.

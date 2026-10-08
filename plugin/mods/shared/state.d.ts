@@ -116,7 +116,18 @@ export type BeliefDiffState = {
   skipToastShown: boolean
 }
 
-export type DigestState = Record<string, never>
+export type DigestCandidate = { text: string; ticked: boolean }
+
+export type DigestState = {
+  /** Main-session turns completed since the last digest ran. */
+  turnsSinceDigest: number
+  /** A main-session edit tool ran during the current turn. */
+  editedThisTurn: boolean
+  /** Length of the main conversation when the last digest read it. */
+  seenMessages: number
+  /** The latest batch awaiting Save or Skip, in display order. */
+  candidates: DigestCandidate[]
+}
 
 declare module 'claude-code' {
   interface PluginState {
