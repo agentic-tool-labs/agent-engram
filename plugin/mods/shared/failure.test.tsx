@@ -189,6 +189,10 @@ for (const mode of MODES) {
     })
   }
 
+  // The engine does not run a hook again once it has failed in a dispatch, so a core that rejects
+  // cannot show a second `next` call here (measured: a resolving core is re-run, a failed one is
+  // not). guard.test.ts holds `once` against a rejecting next, and PluginSourceTests holds every
+  // handler to calling `next` only through it; this row holds that the failure surfaces unchanged.
   test(`${mode}: a slash prompt whose next rejects runs the core once (its failure surfaces; it is not retried)`, async (eng, on) => {
     const rig = inject(on, mode, () => Promise.reject(new Error('core failed')))
     await expect(eng.classic.UserPromptSubmit({ prompt: '/clear' })).rejects.toThrow()
