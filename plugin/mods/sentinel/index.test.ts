@@ -52,6 +52,7 @@ function rig(
   const clock = opts.clockThrows === true ? undefined : mock.clock(on)
   if (opts.clockThrows === true) {
     on('clock.now', () => {
+      injected.push('clock')
       throw new Error('clock down')
     })
   }
@@ -66,13 +67,20 @@ function rig(
     failSet?: (key: string) => boolean
   } = { deny: opts.toolDeny }
   const digestWrites: string[] = []
+  const injected: string[] = []
   on('state.get', ($$, e, next) => {
-    if (control.failGet?.(e.key) === true) throw new Error('state down')
+    if (control.failGet?.(e.key) === true) {
+      injected.push('get:' + e.key)
+      return { deny: 'state down' }
+    }
     return next(e)
   })
   on('state.set', ($$, e, next) => {
     if (e.key === 'digest') digestWrites.push(JSON.stringify(e))
-    if (control.failSet?.(e.key) === true) throw new Error('state down')
+    if (control.failSet?.(e.key) === true) {
+      injected.push('set:' + e.key)
+      return { deny: 'state down' }
+    }
     return next(e)
   })
   const panes: { id: string; title?: string }[] = []
@@ -84,7 +92,10 @@ function rig(
     return { ref: 1, result: {}, text: 'ok', ...(opts.toolContext === undefined ? {} : { context: opts.toolContext }) }
   })
   on('ui.toast', (_$, e) => {
-    if (control.failToast === true) throw new Error('toast down')
+    if (control.failToast === true) {
+      injected.push('toast')
+      return { deny: 'toast down' }
+    }
     toasts.push(e.text)
     toastedAfterRuns.push(ran.length)
     return { value: undefined }
@@ -98,7 +109,7 @@ function rig(
     registered.push(e.name)
     return { value: { command: e.name } }
   })
-  return { router, clock: clock as NonNullable<typeof clock>, ran, toasts, toastedAfterRuns, control, panes, registered, digestWrites }
+  return { router, clock: clock as NonNullable<typeof clock>, ran, toasts, toastedAfterRuns, control, panes, registered, digestWrites, injected }
 }
 
 const edit = (file_path: string, extra: object = {}) =>
@@ -467,6 +478,7 @@ test('a session.cwd failure: the edit runs and the other mods still see it', asy
 test('a clock failure: the edit runs and the other mods still see it', async ($, on) => {
   const r = rig(on, { path: answer(TWO), clockThrows: true })
   const out = await $.tool.call(edit(FILE))
+  expect(r.injected).toContain('clock')
   expect(denyOf(out)).toBeUndefined()
   expect(r.ran.length).toBe(1)
   expect(digestSawEdit(r)).toBe(true)
@@ -476,6 +488,7 @@ test('a failing read of the sentinel state: the edit runs and the other mods sti
   const r = rig(on, { path: answer(TWO) })
   r.control.failGet = (key) => key === 'sentinel'
   const out = await $.tool.call(edit(FILE))
+  expect(r.injected).toContain('get:sentinel')
   expect(denyOf(out)).toBeUndefined()
   expect(r.ran.length).toBe(1)
   expect(digestSawEdit(r)).toBe(true)
@@ -485,6 +498,7 @@ test('a failing write of the sentinel state (the claim): the edit runs and the o
   const r = rig(on, { path: answer(TWO) })
   r.control.failSet = (key) => key === 'sentinel'
   const out = await $.tool.call(edit(FILE))
+  expect(r.injected).toContain('set:sentinel')
   expect(denyOf(out)).toBeUndefined()
   expect(r.ran.length).toBe(1)
   expect(digestSawEdit(r)).toBe(true)
@@ -494,6 +508,7 @@ test('a failing toast after the edit: the block is still delivered and the other
   const r = rig(on, { path: answer(TWO) })
   r.control.failToast = true
   const out = await $.tool.call(edit(FILE))
+  expect(r.injected).toContain('toast')
   expect(contextOf(out)).toEqual([BLOCK])
   expect(digestSawEdit(r)).toBe(true)
 })
@@ -503,6 +518,7 @@ test('a failing release after a refusal from below: the refusal still comes back
   let writes = 0
   r.control.failSet = (key) => key === 'sentinel' && ++writes > 1
   const out = await $.tool.call(edit(FILE))
+  expect(r.injected).toContain('set:sentinel')
   expect(denyOf(out)).toBe('no')
   expect(r.toasts.length).toBe(0)
 })
