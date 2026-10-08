@@ -48,16 +48,17 @@ const cli = (stdout: object | string, exitCode = 0) => ({
   stdout: typeof stdout === 'string' ? stdout : JSON.stringify(stdout),
 })
 
-type World = { statuses: (string | undefined)[]; submits: string[]; processes: () => string[]; advance: (ms: number) => Promise<void> }
+type World = { setLens: (lens: LensState) => void; statuses: (string | undefined)[]; submits: string[]; processes: () => string[]; advance: (ms: number) => Promise<void> }
 
 function world(on: On, lens: LensState | undefined, table: RoutingTable = { binary: BIN }): World {
   const router = installFakeEngine(on, table)
   const clock = mock.clock(on, { now: 1_000_000 })
   const statuses: (string | undefined)[] = []
   const submits: string[] = []
-  if (lens !== undefined) on('state.get', { plugin: 'engram', key: 'lens' }, () => ({ value: { value: lens, version: 1 } }))
+  let currentLens = lens
+  if (lens !== undefined) on('state.get', { plugin: 'engram', key: 'lens' }, () => ({ value: { value: currentLens, version: 1 } }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  on('session.end', () => ({}) as never)
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return <Box />
@@ -71,6 +72,9 @@ function world(on: On, lens: LensState | undefined, table: RoutingTable = { bina
     return { text: e.text }
   })
   return {
+    setLens: (next) => {
+      currentLens = next
+    },
     statuses,
     submits,
     processes: () => router.processCalls.map((c) => c.argv.slice(1).join(' ')).filter((a) => a !== ''),
@@ -150,13 +154,27 @@ for (const surface of SURFACES) {
     expect(w.submits.length).toBe(1)
   })
 
-  test(`${surface}: a different recall still gets its own button after another was pressed`, async (eng, on) => {
-    const w = world(on, lensOf([recall({ toolUseId: 'tu2', coverage: 'none', factCount: 0 }), recall({ toolUseId: 'tu1', coverage: 'none' })]))
+  test(`${surface}: a newer recall in the current turn gets its own button after an older one was pressed`, async (eng, on) => {
+    const w = world(on, lensOf([recall({ toolUseId: 'tu1', coverage: 'none', factCount: 0 })]))
     const first = await draw(eng, surface)
     await first.press({ key: 'remember' })
     expect(w.submits.length).toBe(1)
+
+    w.setLens(lensOf([recall({ toolUseId: 'tu2', query: 'second question', coverage: 'none', factCount: 0 }), recall({ toolUseId: 'tu1', coverage: 'none' })]))
     const second = await draw(eng, surface)
-    expect(await second.find({ type: 'Button', key: 'remember' })).toBeUndefined()
+    expect(await second.find({ type: 'Button', key: 'remember' })).toBeDefined()
+    await second.press({ key: 'remember' })
+    expect(w.submits).toEqual([
+      `Once you've worked out the answer to "where is the thing", save it to memory.`,
+      `Once you've worked out the answer to "second question", save it to memory.`,
+    ])
+  })
+
+  test(`${surface}: pressing twice before a redraw submits once`, async (eng, on) => {
+    const w = world(on, lensOf([recall({ coverage: 'none', factCount: 0 })]))
+    const ui = await draw(eng, surface)
+    await Promise.all([ui.press({ key: 'remember' }), ui.press({ key: 'remember' })])
+    expect(w.submits.length).toBe(1)
   })
 
   test(`${surface}: the button is hidden while a turn is running, the line stays`, async (eng, on) => {
@@ -260,6 +278,16 @@ test('no binary installed: no backlog line, no status call, no retry storm', asy
   await w.advance(30_000)
   expect(w.processes().filter((a) => a.includes('--status')).length).toBe(0)
   expect(w.statuses).toEqual([])
+})
+
+test('the poller outlives session.end, which also fires on /clear', async (eng, on) => {
+  const w = world(on, lensOf([]), TABLE(embed({ remaining: 0, embedded: 100 })))
+  await start(eng, w)
+  const polls = () => w.processes().filter((a) => a === 'embed --status --json').length
+  expect(polls()).toBe(1)
+  await eng.session.end({ reason: 'clear', sessionId: 'old-session' } as never)
+  await w.advance(60_000)
+  expect(polls()).toBe(2)
 })
 
 test('while a backlog is draining under a running loop it is polled every 5 s', async (eng, on) => {

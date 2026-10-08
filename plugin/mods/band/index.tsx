@@ -71,11 +71,6 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('session.end', async ($, e, next) => {
-    stop()
-    return next(e)
-  })
-
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
 
@@ -101,8 +96,14 @@ export const register: Register = (on, options) => {
                 key="remember"
                 label="Remember the answer"
                 onPress={async () => {
-                  await update($, BAND, (b) => ({ ...b, pressed: [...b.pressed, recall.toolUseId] }))
-                  await $.prompt.submit({ text: rememberPrompt(recall.query) })
+                  // Two presses before a redraw both run; only the one that records the id submits.
+                  // `update` retries its function, so `fresh` is decided on every attempt.
+                  let fresh = false
+                  await update($, BAND, (b) => {
+                    fresh = !b.pressed.includes(recall.toolUseId)
+                    return fresh ? { ...b, pressed: [...b.pressed, recall.toolUseId] } : b
+                  })
+                  if (fresh) await $.prompt.submit({ text: rememberPrompt(recall.query) })
                 }}
               />
             ) : null}
