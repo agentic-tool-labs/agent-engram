@@ -4,6 +4,7 @@ import { ENGRAM_TOOLS, SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
 import type { BeliefDiffState } from '../shared/state'
 import type { FactResponse } from '../shared/types'
+import { once } from '../shared/guard'
 
 const MOD = 'belief-diff'
 const APPROVE = 'Approve'
@@ -134,7 +135,12 @@ async function review(
 
 export const register: Register = (on, options) => {
   on('tool.call', { tool: ENGRAM_TOOLS.revise }, async ($, e, next) => {
-    const refusal = await review($, scopeOf(options.belief_diff_scope), e, next.signal)
-    return refusal ?? next(e)
+    const go = once(next)
+    try {
+      const refusal = await review($, scopeOf(options.belief_diff_scope), e, next.signal)
+      return refusal ?? go(e)
+    } catch {
+      return go.fallback(e)
+    }
   })
 }
