@@ -27,7 +27,6 @@ public static class ModApi
     private const int MaxModChars = 32;
     private const int MaxCaptures = 20;
     private const int MaxPathFacts = 50;
-    private const int MaxDetailsTokens = 2000;
     private const string ForgetReason = "retracted by the user";
 
     private static readonly string[] Operations =
@@ -117,22 +116,32 @@ public static class ModApi
             throw Bad("mode must be 'shadow' or 'inject'");
         }
 
-        var config = ConfigFile.Load(home.ConfigPath);
-        var settings = RetrievalSettings.Read(config);
-        var budget = request.BudgetTokens ?? settings.BudgetTokens;
-
-        using var connection = EngramDatabase.OpenInitialized(home);
-        var currentSessionId = SessionStore.FindSession(connection, sessionId);
-        var vectorQuery = VectorLane.PrepareQuery(
-            connection, home, EmbeddingSettings.Read(config), query, Environment.GetEnvironmentVariable, local);
-
-        var result = RecallRanker.Pack(
-            connection, query, budget, settings.SeedK, currentSessionId, DateTimeOffset.UtcNow, vectorQuery);
+        var detail = RecallSearch.Run(home, local, query, request.BudgetTokens, sessionId, pinnedFactIds: null);
+        var result = detail.Result;
 
         var coverage = RecallEngine.ToText(result.Coverage);
         RecordCall(home, request, sessionId, "recall", query, coverage);
 
-        return Ok(JsonSerializer.Serialize(new ModRecallResponse(coverage, result.FactCount, result.Text), ModApiJsonContext.Default.ModRecallResponse));
+        var response = new ModRecallResponse(
+            coverage, result.FactCount, [.. detail.Notes], detail.Gaps, result.Text,
+            [.. detail.Packed.Select(ToRecallFact)]);
+        return Ok(JsonSerializer.Serialize(response, ModApiJsonContext.Default.ModRecallResponse));
+    }
+
+    /// <summary>A packed candidate as the API reports it, from the values its line was built from.</summary>
+    internal static ModRecallFact ToRecallFact(RecallCandidate candidate)
+    {
+        var source = candidate.Source
+            ?? throw new InvalidOperationException($"candidate {candidate.Handle} carries no source record");
+        return new ModRecallFact(
+            candidate.Handle,
+            candidate.FactId ?? throw new InvalidOperationException($"candidate {candidate.Handle} has no fact id"),
+            source.Body,
+            source.Scope,
+            source.Versions,
+            source.WithheldChars,
+            source.Location,
+            new ModRecallLanes(candidate.LexicalRank, candidate.OverlapRank, candidate.VectorRank));
     }
 
     private static ModApiResult Fact(EngramHome home, ModRequest request)
@@ -209,12 +218,9 @@ public static class ModApi
             throw Bad($"evidence is required, 1 to {MaxEvidenceChars} characters");
         }
 
-        if (request.Details is { } details && TokenEstimator.Estimate(details) is var tokens and > MaxDetailsTokens)
+        if (DetailsCeiling.Error(request.Details) is { } ceilingError)
         {
-            throw Bad(
-                $"details is ~{tokens} tokens against the 2,000-token ceiling — a memory that large is a "
-                + "document; store where to find it (evidence, a path) rather than its contents. Nothing "
-                + "was stored.");
+            throw Bad(ceilingError);
         }
 
         using var connection = EngramDatabase.OpenInitialized(home);

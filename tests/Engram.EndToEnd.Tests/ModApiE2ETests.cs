@@ -53,6 +53,11 @@ public class ModApiE2ETests
         Assert.Contains(handle, (string)recall.Body["text"]!, StringComparison.Ordinal);
         Assert.Contains((string)recall.Body["coverage"]!, new[] { "high", "partial", "none" });
         Assert.True((int)recall.Body["fact_count"]! >= 1);
+        var recalled = Assert.Single(recall.Body["facts"]!.AsArray(), f => (string)f!["handle"]! == handle)!;
+        Assert.Contains(UniqueWord, (string)recalled["body"]!, StringComparison.Ordinal);
+        Assert.Equal(0, (int)recalled["withheld_chars"]!);
+        Assert.NotNull(recalled["lanes"]!["lexical"]);
+        Assert.IsType<JsonArray>(recall.Body["notes"]);
 
         var captures = await Post(http, server.Port, "captures", new JsonObject { ["session_id"] = Session, ["since"] = 0 });
         Assert.Equal(HttpStatusCode.OK, captures.Status);

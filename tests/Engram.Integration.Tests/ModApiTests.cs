@@ -627,10 +627,13 @@ public class ModApiTests
     }
 
     [Fact]
-    public void PathFacts_FileInAnUnenrolledDirectory_IsEmptyWithNullEntityPath()
+    public void PathFacts_FileInADirectoryNoRepoCovers_IsEmptyWithNullEntityPath()
     {
         using var sandbox = new SandboxHome();
-        var (repo, file) = IndexedRepo(sandbox, enroll: false);
+        var directory = Path.Combine(sandbox.Home.Root, "never-indexed");
+        Directory.CreateDirectory(directory);
+        var file = Path.Combine(directory, "NOTES.md");
+        File.WriteAllText(file, "# Notes\n");
 
         var (status, body) = Call(sandbox, "path-facts", new JsonObject { ["path"] = file });
 
@@ -638,11 +641,23 @@ public class ModApiTests
         Assert.Null(body["entity_path"]);
         Assert.Null(body["repo"]);
         Assert.Empty(body["facts"]!.AsArray());
-        Assert.True(Directory.Exists(repo));
     }
 
     [Fact]
-    public void PathFacts_EnrolledFile_ReturnsLiveFactsUnderItsEntityAndNotItsNeighbours()
+    public void PathFacts_AnIndexedRepoThatWasNeverEnrolled_IsStillServed()
+    {
+        using var sandbox = new SandboxHome();
+        var (_, file) = IndexedRepo(sandbox, enroll: false);
+
+        var (status, body) = Call(sandbox, "path-facts", new JsonObject { ["path"] = file });
+
+        Assert.Equal(200, status);
+        Assert.NotNull(body["entity_path"]);
+        Assert.NotEmpty(body["facts"]!.AsArray());
+    }
+
+    [Fact]
+    public void PathFacts_IndexedFile_ReturnsLiveFactsUnderItsEntityAndNotItsNeighbours()
     {
         using var sandbox = new SandboxHome();
         var (repo, file) = IndexedRepo(sandbox, enroll: true);

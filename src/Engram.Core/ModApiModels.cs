@@ -26,10 +26,28 @@ public sealed record ModError(
     [property: JsonPropertyName("error")] string Error,
     [property: JsonPropertyName("detail")] string? Detail = null);
 
+public sealed record ModRecallLanes(
+    [property: JsonPropertyName("lexical")] int? Lexical,
+    [property: JsonPropertyName("overlap")] int? Overlap,
+    [property: JsonPropertyName("vector")] int? Vector);
+
+public sealed record ModRecallFact(
+    [property: JsonPropertyName("handle")] string Handle,
+    [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("body")] string Body,
+    [property: JsonPropertyName("scope")] string Scope,
+    [property: JsonPropertyName("versions")] int Versions,
+    [property: JsonPropertyName("withheld_chars")] int WithheldChars,
+    [property: JsonPropertyName("location")] string? Location,
+    [property: JsonPropertyName("lanes")] ModRecallLanes Lanes);
+
 public sealed record ModRecallResponse(
     [property: JsonPropertyName("coverage")] string Coverage,
     [property: JsonPropertyName("fact_count")] int FactCount,
-    [property: JsonPropertyName("text")] string Text);
+    [property: JsonPropertyName("notes")] string[] Notes,
+    [property: JsonPropertyName("gaps")] string? Gaps,
+    [property: JsonPropertyName("text")] string Text,
+    [property: JsonPropertyName("facts")] ModRecallFact[] Facts);
 
 public sealed record ModFactResponse(
     [property: JsonPropertyName("handle")] string Handle,
