@@ -6,6 +6,7 @@
     "name": "Jim Cline"
   },
   "license": "Apache-2.0",
+  "types": "./mods/shared/state.d.ts",
   "keywords": [
     "memory",
     "mcp",
@@ -14,5 +15,71 @@
     "local-first",
     "context",
     "knowledge-graph"
-  ]
+  ],
+  "userConfig": {
+    "lens_auto_open": {
+      "type": "boolean",
+      "title": "Open the memory lens automatically",
+      "description": "Open the memory lens pane at session start instead of waiting for the lens command.",
+      "default": false
+    },
+    "status_entry": {
+      "type": "boolean",
+      "title": "Show memory status in the status line",
+      "description": "Add an Engram entry (embedding backlog and server state) to the status line.",
+      "default": false
+    },
+    "toasts_enabled": {
+      "type": "boolean",
+      "title": "Toast when Engram captures a fact",
+      "description": "Show a short notice when a fact stated in a prompt is stored.",
+      "default": true
+    },
+    "chime": {
+      "type": "string",
+      "title": "Chime on memory activity",
+      "description": "Play a sound when Engram captures a fact, answers a recall, or both.",
+      "default": "off",
+      "options": ["off", "captures", "recalls", "both"]
+    },
+    "chime_sound": {
+      "type": "string",
+      "title": "Chime sound file",
+      "description": "Absolute path of the sound file the chime plays.",
+      "default": "/System/Library/Sounds/Tink.aiff"
+    },
+    "jit_mode": {
+      "type": "string",
+      "title": "Just-in-time primer mode",
+      "description": "off does nothing; shadow records what a per-prompt recall would have injected without injecting it; inject adds it to the prompt.",
+      "default": "off",
+      "options": ["off", "shadow", "inject"]
+    },
+    "jit_budget_tokens": {
+      "type": "number",
+      "title": "Just-in-time primer budget (tokens)",
+      "description": "Token budget for the per-prompt recall the just-in-time primer runs.",
+      "default": 400
+    },
+    "sentinel_mode": {
+      "type": "string",
+      "title": "Invariant sentinel mode",
+      "description": "What happens when an edit touches a file that has invariant facts: off, inform the model, or deny the first attempt once.",
+      "default": "inform",
+      "options": ["off", "inform", "deny-once"]
+    },
+    "belief_diff_scope": {
+      "type": "string",
+      "title": "Belief diff scope",
+      "description": "Which revised facts the belief diff shows: none, only the user's own, or all.",
+      "default": "personal",
+      "options": ["off", "personal", "all"]
+    },
+    "digest_every_n_turns": {
+      "type": "number",
+      "title": "Automatic digest interval (turns)",
+      "description": "Run a memory digest every N turns; 0 disables it.",
+      "default": 0
+    }
+  }
 }
