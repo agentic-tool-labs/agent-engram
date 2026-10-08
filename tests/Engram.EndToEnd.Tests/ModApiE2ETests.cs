@@ -137,7 +137,7 @@ public class ModApiE2ETests
         foreach (var (method, path, body) in new[]
         {
             (HttpMethod.Get, "/health", null),
-            (HttpMethod.Post, "/mod/v1/captures", """{"mod":"lens","session_id":"s","since":0}"""),
+            (HttpMethod.Post, "/mod/v1/recall", """{"mod":"lens","session_id":"s","query":"transaction"}"""),
         })
         {
             using var request = JsonRequest(server.Port, method, path, body);
@@ -187,7 +187,7 @@ public class ModApiE2ETests
 
         Assert.Equal(HttpStatusCode.UnsupportedMediaType, result.Status);
         Assert.Equal("unsupported_media_type", (string)result.Body["error"]!);
-        await AssertNothingWasStored(http, server);
+        await AssertNothingWasStored(http, server, home);
     }
 
     [Theory]
@@ -207,7 +207,7 @@ public class ModApiE2ETests
     }
 
     [Fact]
-    public async Task MissingModHeader_Is400_AndWritesNothing()
+    public async Task MissingModHeader_WithABodyModThatEqualsIt_Is400_AndWritesNothing()
     {
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
 
@@ -215,10 +215,70 @@ public class ModApiE2ETests
         using var server = StartedServer.Begin(home);
         using var http = new HttpClient();
 
-        var result = await Post(http, server.Port, "remember", RememberBody(), mod: null);
+        // The body's mod is empty, which is exactly what a missing header reads as, so the
+        // body-equals-header check alone would let this through: only the header guard refuses it.
+        var body = RememberBody();
+        body["mod"] = string.Empty;
+        var result = await Post(http, server.Port, "remember", body, mod: null);
 
         Assert.Equal(HttpStatusCode.BadRequest, result.Status);
-        await AssertNothingWasStored(http, server);
+        await AssertNothingWasStored(http, server, home);
+    }
+
+    [Fact]
+    public async Task MissingModHeader_WithABodyThatNamesAMod_Is400_AndWritesNothing()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        using var server = StartedServer.Begin(home);
+        using var http = new HttpClient();
+
+        var result = await Post(http, server.Port, "remember", RememberBody(), mod: null, bodyMod: "lens");
+
+        Assert.Equal(HttpStatusCode.BadRequest, result.Status);
+        await AssertNothingWasStored(http, server, home);
+    }
+
+    [Fact]
+    public async Task UnknownOp_WithANonJsonContentType_Is404BeforeTheContentTypeIsLookedAt()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        using var server = StartedServer.Begin(home);
+        using var http = new HttpClient();
+
+        var result = await Post(http, server.Port, "foo", new JsonObject(), contentType: "text/plain");
+
+        Assert.Equal(HttpStatusCode.NotFound, result.Status);
+        Assert.Equal("not_found", (string)result.Body["error"]!);
+    }
+
+    [Theory]
+    [InlineData(65536, HttpStatusCode.OK)]
+    [InlineData(65537, HttpStatusCode.RequestEntityTooLarge)]
+    public async Task ChunkedBodyWithNoContentLength_IsBoundedAt64KiBWhileItIsRead(int bytes, HttpStatusCode expected)
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        using var server = StartedServer.Begin(home);
+        using var http = new HttpClient();
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{server.Port}/mod/v1/captures")
+        {
+            Content = new StreamContent(new ForwardOnlyStream(Encoding.UTF8.GetBytes(PaddedCapturesBody(bytes)))),
+        };
+        request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse("application/json");
+        request.Headers.Add("X-Engram-Mod", "lens");
+        request.Headers.TransferEncodingChunked = true;
+
+        var response = await http.SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Null(request.Content.Headers.ContentLength);
+        Assert.Equal(expected, response.StatusCode);
+        Assert.Equal(0, KindCount(home, "mod-call"));
     }
 
     [Theory]
@@ -252,7 +312,7 @@ public class ModApiE2ETests
         var result = await Post(http, server.Port, "remember", body, mod: "lens");
 
         Assert.Equal(HttpStatusCode.BadRequest, result.Status);
-        await AssertNothingWasStored(http, server);
+        await AssertNothingWasStored(http, server, home);
     }
 
     [Theory]
@@ -266,10 +326,7 @@ public class ModApiE2ETests
         using var server = StartedServer.Begin(home);
         using var http = new HttpClient();
 
-        const string prefix = """{"mod":"lens","session_id":"s","since":0,"pad":"{0}"}""";
-        var overhead = Encoding.UTF8.GetByteCount(prefix.Replace("{0}", string.Empty, StringComparison.Ordinal));
-        var json = prefix.Replace("{0}", new string('p', bytes - overhead), StringComparison.Ordinal);
-        Assert.Equal(bytes, Encoding.UTF8.GetByteCount(json));
+        var json = PaddedCapturesBody(bytes);
 
         using var request = JsonRequest(server.Port, HttpMethod.Post, "/mod/v1/captures", json);
         request.Headers.Add("X-Engram-Mod", "lens");
@@ -346,6 +403,53 @@ public class ModApiE2ETests
         Assert.Equal(logBefore, ReadLog(home));
     }
 
+    private static string PaddedCapturesBody(int bytes)
+    {
+        const string prefix = """{"mod":"lens","session_id":"s","since":0,"pad":"{0}"}""";
+        var overhead = Encoding.UTF8.GetByteCount(prefix.Replace("{0}", string.Empty, StringComparison.Ordinal));
+        var json = prefix.Replace("{0}", new string('p', bytes - overhead), StringComparison.Ordinal);
+        Assert.Equal(bytes, Encoding.UTF8.GetByteCount(json));
+        return json;
+    }
+
+    /// <summary>A readable stream that cannot report its length or seek, so HttpClient must chunk it.</summary>
+    private sealed class ForwardOnlyStream(byte[] data) : Stream
+    {
+        private int _position;
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var n = Math.Min(Math.Min(count, 4096), data.Length - _position);
+            Array.Copy(data, _position, buffer, offset, n);
+            _position += n;
+            return n;
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     private static string ReadLog(TestHome home)
     {
         var path = Path.Combine(home.Root, "engram.log");
@@ -359,8 +463,9 @@ public class ModApiE2ETests
         ["evidence"] = "an e2e test",
     };
 
-    private static async Task AssertNothingWasStored(HttpClient http, StartedServer server)
+    private static async Task AssertNothingWasStored(HttpClient http, StartedServer server, TestHome home)
     {
+        Assert.Equal(0, KindCount(home, "mod-call"));
         var recall = await Post(http, server.Port, "recall", new JsonObject { ["session_id"] = "other-session", ["query"] = UniqueWord });
 
         Assert.DoesNotContain($"The {UniqueWord} cache", (string)recall.Body["text"]!, StringComparison.Ordinal);
@@ -383,11 +488,12 @@ public class ModApiE2ETests
         string op,
         JsonObject body,
         string? mod = "lens",
-        string? contentType = "application/json")
+        string? contentType = "application/json",
+        string? bodyMod = null)
     {
-        if (mod is not null)
+        if ((bodyMod ?? mod) is { } nameInBody)
         {
-            body["mod"] ??= mod;
+            body["mod"] ??= nameInBody;
         }
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{port}/mod/v1/{op}")

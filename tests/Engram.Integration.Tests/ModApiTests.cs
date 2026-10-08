@@ -357,6 +357,56 @@ public class ModApiTests
     }
 
     [Fact]
+    public void History_ClosedReason_IsWhatTheMemoryBrowserReportsForEachClosedVersion()
+    {
+        using var sandbox = new SandboxHome();
+        var first = Remember(sandbox, "The retry limit is three.");
+        var revised = EngramMcpTools.Revise(
+            sandbox.Home, new McpSessionId(Session), new McpHomeState(true), first, "The retry limit is five.", "raised after an outage");
+        var second = System.Text.RegularExpressions.Regex.Match(revised, @"\[(f\d+)\]").Groups[1].Value;
+        Call(sandbox, "forget", new JsonObject { ["session_id"] = Session, ["fact_id"] = second });
+
+        Dictionary<long, string> expected;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            expected = MemoryBrowser.Reasons(connection, [long.Parse(first[1..]), long.Parse(second[1..])]);
+        }
+
+        var (_, body) = Call(sandbox, "history", new JsonObject { ["fact_id"] = second });
+        var versions = body["versions"]!.AsArray();
+
+        Assert.Equal(2, versions.Count);
+        Assert.Equal(expected[long.Parse(first[1..])], (string)versions[0]!["closed_reason"]!);
+        Assert.Equal(expected[long.Parse(second[1..])], (string)versions[1]!["closed_reason"]!);
+        Assert.NotEqual((string)versions[0]!["closed_reason"]!, (string)versions[1]!["closed_reason"]!);
+    }
+
+    [Fact]
+    public void PathFacts_NulInThePath_IsAJsonErrorAndNeverAThrow()
+    {
+        using var sandbox = new SandboxHome();
+
+        var (status, body) = Call(sandbox, "path-facts", new JsonObject { ["path"] = "/a\u0000b" });
+
+        Assert.True(status is 400 or 500, status.ToString());
+        Assert.NotNull(body["error"]);
+        Assert.DoesNotContain(" at ", body.ToJsonString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Remember_RepeatedStatement_WritesAModCallEachTimeBecauseEachSucceeded()
+    {
+        using var sandbox = new SandboxHome();
+
+        Remember(sandbox, "Same words again.");
+        Assert.Single(Telemetry(sandbox, TelemetryEventKind.ModCall));
+        Remember(sandbox, "Same words again.");
+
+        Assert.Equal(2, Telemetry(sandbox, TelemetryEventKind.ModCall).Count);
+        Assert.Equal(2, Telemetry(sandbox, TelemetryEventKind.ModCall).Count(c => c.Tool == "remember"));
+    }
+
+    [Fact]
     public void History_RejectsMalformedAndAbsentHandles()
     {
         using var sandbox = new SandboxHome();

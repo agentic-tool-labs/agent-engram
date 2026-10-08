@@ -91,8 +91,10 @@ public static class ModApi
         {
             return Error(e.Status, e.Code, e.Message);
         }
-        catch (Exception e) when (e is SqliteException or IOException or InvalidOperationException)
+        catch (Exception)
         {
+            // Anything else would reach ASP.NET as a bare 500 with no JSON body and an error-level
+            // log line carrying the exception text, which can include request data.
             return Error(500, "internal", "the operation failed");
         }
     }
@@ -163,25 +165,15 @@ public static class ModApi
         using var connection = EngramDatabase.OpenInitialized(home);
         var fact = FactStore.ReadById(connection, factId) ?? throw NotFound(request.FactId!);
 
-        var versions = FactStore.History(connection, fact.SubjectPath, fact.Predicate)
+        var chain = FactStore.History(connection, fact.SubjectPath, fact.Predicate);
+        var reasons = MemoryBrowser.Reasons(connection, chain.Where(v => v.ValidTo is not null).Select(v => v.Id));
+        var versions = chain
             .Select(v => new ModHistoryVersion(
-                FactCatalog.HandleFor(v.Id), v.Body, v.ValidFrom, v.ValidTo, v.LearnedVia, ClosedReason(connection, v)))
+                FactCatalog.HandleFor(v.Id), v.Body, v.ValidFrom, v.ValidTo, v.LearnedVia, reasons.GetValueOrDefault(v.Id)))
             .ToArray();
 
-        return Ok(JsonSerializer.Serialize(new ModHistoryResponse(fact.SubjectPath, fact.Predicate, versions), ModApiJsonContext.Default.ModHistoryResponse));
-    }
-
-    private static string? ClosedReason(SqliteConnection connection, StoredFact version)
-    {
-        if (version.ValidTo is null)
-        {
-            return null;
-        }
-
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT reason FROM supersession WHERE old_fact_id = $id ORDER BY created_at DESC LIMIT 1;";
-        command.Parameters.AddWithValue("$id", version.Id);
-        return command.ExecuteScalar() is string reason ? reason : null;
+        var response = new ModHistoryResponse(fact.SubjectPath, fact.Predicate, versions);
+        return Ok(JsonSerializer.Serialize(response, ModApiJsonContext.Default.ModHistoryResponse));
     }
 
     private static ModApiResult Forget(EngramHome home, ModRequest request)
