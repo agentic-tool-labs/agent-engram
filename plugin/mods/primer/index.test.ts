@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { PromptSubmitInput, PromptSubmitResult } from 'claude-code'
 import { fakeModIo, installFakeEngine } from '../shared/testing'
@@ -102,22 +102,17 @@ test('shadow, API down: the prompt is passed on at once, nothing thrown', async 
   expect(seen[0]).toBe(e)
 })
 
-test('shadow, the detached request failing in any way leaves no unhandled rejection', async () => {
-  const unhandled: unknown[] = []
-  const onUnhandled = (reason: unknown) => unhandled.push(reason)
-  const proc = (globalThis as { process?: { on(e: string, f: (r: unknown) => void): void; off(e: string, f: (r: unknown) => void): void } }).process
-  proc?.on('unhandledRejection', onUnhandled)
-  try {
-    const r = rig(reply('high'))
-    const failing = { ...r.io, sessionId: () => Promise.reject(new Error('no session')) }
-    await primePrompt(failing, config('shadow'), prompt(), r.next)
-    await r.clock.settle()
-    await pause(5)
-    expect(r.seen.length).toBe(1)
-    expect(unhandled.length).toBe(0)
-  } finally {
-    proc?.off('unhandledRejection', onUnhandled)
-  }
+// A rejection nobody handles fails the whole file in the runner ("the file ran to its end"), which
+// is the guard on the detached request's `.catch`; this test makes that rejection happen and then
+// lets it surface.
+test('shadow, a detached request that rejects still passes the prompt on, once', async () => {
+  const r = rig(reply('high'))
+  const failing = { ...r.io, sessionId: () => Promise.reject(new Error('no session')) }
+  await primePrompt(failing, config('shadow'), prompt(), r.next)
+  await r.clock.settle()
+  await pause(5)
+  expect(r.seen.length).toBe(1)
+  expect(r.router.fetchCalls.length).toBe(0)
 })
 
 test('shadow: the request does not depend on the dispatch signal, which may abort once the hook returns', async () => {
@@ -275,17 +270,26 @@ test('jitConfig: defaults, unknown mode and bad budget fall back', () => {
   expect(jitConfig({ jit_mode: 'loud', jit_budget_tokens: 0 })).toEqual({ mode: 'off', budgetTokens: 400 })
 })
 
-// The kit answers neither clock event; a hook that reaches the clock without these fails open silently.
-const answerClock = (on: On) => {
-  on('clock.now', () => ({ value: 1_000_000 }))
-  on('clock.sleep', () => new Promise<never>(() => {}))
+for (const [budget, expected] of [
+  [50, 50],
+  [4_000, 4_000],
+  [49, 400],
+  [4_001, 400],
+  [120.5, 400],
+  [Number.NaN, 400],
+  [-1, 400],
+  ['300', 400],
+] as const) {
+  test(`jitConfig: budget ${String(budget)} resolves to ${expected}`, () => {
+    expect(jitConfig({ jit_mode: 'shadow', jit_budget_tokens: budget as never }).budgetTokens).toBe(expected)
+  })
 }
 
 const answerSubmit = (on: On) => on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
 
 test('manifest default is off: a plugin loaded with defaults makes no recall', async ($, on) => {
   const router = installFakeEngine(on, { ...RUNNING, ops: { recall: reply('high') } })
-  answerClock(on)
+  mock.clock(on)
   answerSubmit(on)
   await $.prompt.submit(prompt())
   expect(router.fetchCalls.length).toBe(0)
@@ -293,7 +297,7 @@ test('manifest default is off: a plugin loaded with defaults makes no recall', a
 
 test('engine: a plugin-origin prompt is skipped even in inject mode', { options: { jit_mode: 'inject' } }, async ($, on) => {
   const router = installFakeEngine(on, { ...RUNNING, ops: { recall: reply('high') } })
-  answerClock(on)
+  mock.clock(on)
   answerSubmit(on)
   await $.prompt.submit(prompt(PROMPT, { origin: { kind: 'plugin', name: 'other' } as never }))
   expect(router.fetchCalls.length).toBe(0)
@@ -301,7 +305,7 @@ test('engine: a plugin-origin prompt is skipped even in inject mode', { options:
 
 test('real binding: a composer prompt in inject mode reaches the API and gains one block', { options: { jit_mode: 'inject' } }, async ($, on) => {
   const router = installFakeEngine(on, { ...RUNNING, ops: { recall: reply('high') } })
-  answerClock(on)
+  mock.clock(on)
   answerSubmit(on)
   const entered = await $.prompt.submit(prompt())
   expect(router.fetchCalls.length).toBe(1)
@@ -312,7 +316,7 @@ test('real binding: a composer prompt in inject mode reaches the API and gains o
 
 test('real binding: shadow mode calls the API and attaches nothing', { options: { jit_mode: 'shadow' } }, async ($, on) => {
   const router = installFakeEngine(on, { ...RUNNING, ops: { recall: reply('high') } })
-  answerClock(on)
+  mock.clock(on)
   answerSubmit(on)
   const entered = await $.prompt.submit(prompt())
   for (let i = 0; i < 100 && router.fetchCalls.length === 0; i++) await pause(5)

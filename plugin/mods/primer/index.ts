@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, PromptSubmitInput, PromptSubmitResult, Register } from 'claude-code'
 import { SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
+import { ANY_PROMPT_SUBMIT } from '../shared/events'
 
 // The scanner reads an atom's reference only from a const of the file that uses it.
 const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, SHARED_INITIAL)
@@ -24,6 +25,10 @@ export type JitConfig = { mode: JitMode; budgetTokens: number }
 const QUERY_CHARS = 2_000
 const MIN_PROMPT_CHARS = 12
 const RECALL_TIMEOUT_MS = 800
+// The recall API rejects a budget outside this integer range, which in shadow would measure nothing.
+const MIN_BUDGET = 50
+const MAX_BUDGET = 4_000
+const DEFAULT_BUDGET = 400
 const BLOCK_HEADER = 'Memory relevant to this message (recalled automatically):\n'
 
 export function jitConfig(options: PluginOptions): JitConfig {
@@ -31,7 +36,10 @@ export function jitConfig(options: PluginOptions): JitConfig {
   const budget = options.jit_budget_tokens
   return {
     mode: mode === 'shadow' || mode === 'inject' ? mode : 'off',
-    budgetTokens: typeof budget === 'number' && budget > 0 ? budget : 400,
+    budgetTokens:
+      typeof budget === 'number' && Number.isInteger(budget) && budget >= MIN_BUDGET && budget <= MAX_BUDGET
+        ? budget
+        : DEFAULT_BUDGET,
   }
 }
 
@@ -92,5 +100,13 @@ export async function primePrompt(
 
 export const register: Register = (on, options) => {
   const config = jitConfig(options)
-  on('prompt.submit', ($, e, next) => primePrompt(bindIo($), config, e, next))
+  on('prompt.submit', ANY_PROMPT_SUBMIT, async ($, e, next) => {
+    let io: ModIo
+    try {
+      io = bindIo($)
+    } catch {
+      return next(e)
+    }
+    return primePrompt(io, config, e, next)
+  })
 }
