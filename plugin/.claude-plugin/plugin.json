@@ -42,12 +42,6 @@
       "default": "off",
       "options": ["off", "captures", "recalls", "both"]
     },
-    "chime_sound": {
-      "type": "string",
-      "title": "Chime sound file",
-      "description": "Absolute path of the sound file the chime plays.",
-      "default": "/System/Library/Sounds/Tink.aiff"
-    },
     "jit_mode": {
       "type": "string",
       "title": "Just-in-time primer mode",
