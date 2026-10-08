@@ -94,61 +94,85 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: [...EDIT_TOOLS] }, async ($, e, next) => {
-    const mode = modeOf(options.sentinel_mode)
-    const given = 'file_path' in e ? e.file_path : undefined
-    if (mode === 'off' || typeof given !== 'string' || given === '') return next(e)
-
-    const cwd = (await $.session.cwd()).replace(/\/+$/, '')
-    const path = absolute(given, cwd)
-    const key = `${e.agentId ?? ''}\0${path}`
-    const state = await read($, SENTINEL)
-    if (state.seen.includes(key)) return next(e)
-
-    const io = bindIo($)
-    const now = await io.now()
-    const failedAt = state.failedAt[key]
-    if (failedAt !== undefined && now - failedAt < FAILURE_SKIP_MS) return next(e)
-
-    const res = await modApi(io, 'path-facts', { path, predicate: 'invariant' }, {
-      mod: 'sentinel',
-      timeoutMs: LOOKUP_TIMEOUT_MS,
-      signal: next.signal,
-    })
-    if (!res.ok) {
-      await update($, SENTINEL, (s) => ({ ...s, failedAt: { ...s.failedAt, [key]: now } }))
-      return next(e)
+    // Every mod shares this plugin, and a throwing tool.call hook takes the plugin's whole chain
+    // down with it, `.catch` or not. So nothing before or after `next` may throw: the lookup is
+    // planned inside a guard, `next` is called exactly once, and the bookkeeping after it is guarded.
+    let key: string | undefined
+    const release = () => update($, SENTINEL, (s) => ({ ...s, seen: s.seen.filter((k) => k !== key) }))
+    const quietly = async (work: () => Promise<unknown> | void) => {
+      try {
+        await work()
+      } catch {
+        // Bookkeeping that fails leaves the edit as it was.
+      }
     }
 
-    // The claim is made inside the update so two concurrent edits of one file cannot both announce.
-    // ponytail: `seen` grows with the files edited in a session; cap it if that ever matters.
-    let claimed = false
-    await update($, SENTINEL, (s) => {
-      claimed = !s.seen.includes(key)
-      return claimed ? { ...s, seen: [...s.seen, key] } : s
-    })
-    const facts = res.value.facts
-    if (!claimed || facts.length === 0) return next(e)
+    type Plan = { mode: Mode; rel: string; block: string; count: number }
+    const plan = async (): Promise<Plan | undefined> => {
+      const mode = modeOf(options.sentinel_mode)
+      const given = 'file_path' in e ? e.file_path : undefined
+      if (mode === 'off' || typeof given !== 'string' || given === '') return undefined
 
-    const rel = relative(path, cwd)
-    const block = describe(rel, facts)
-    if (mode === 'deny-once') return { deny: block + '\nRe-issue the edit if it respects these.' }
+      const cwd = (await $.session.cwd()).replace(/\/+$/, '')
+      const path = absolute(given, cwd)
+      const mine = `${e.agentId ?? ''}\0${path}`
+      const state = await read($, SENTINEL)
+      if (state.seen.includes(mine)) return undefined
+
+      const io = bindIo($)
+      const now = await io.now()
+      const failedAt = state.failedAt[mine]
+      if (failedAt !== undefined && now - failedAt < FAILURE_SKIP_MS) return undefined
+
+      const res = await modApi(io, 'path-facts', { path, predicate: 'invariant' }, {
+        mod: 'sentinel',
+        timeoutMs: LOOKUP_TIMEOUT_MS,
+        signal: next.signal,
+      })
+      if (!res.ok) {
+        await update($, SENTINEL, (s) => ({ ...s, failedAt: { ...s.failedAt, [mine]: now } }))
+        return undefined
+      }
+
+      // The claim is made inside the update so two concurrent edits of one file cannot both announce.
+      // ponytail: `seen` grows with the files edited in a session; cap it if that ever matters.
+      let claimed = false
+      await update($, SENTINEL, (s) => {
+        claimed = !s.seen.includes(mine)
+        return claimed ? { ...s, seen: [...s.seen, mine] } : s
+      })
+      const facts = res.value.facts
+      if (!claimed || facts.length === 0) return undefined
+      key = mine
+      const rel = relative(path, cwd)
+      return { mode, rel, block: describe(rel, facts), count: facts.length }
+    }
+
+    let planned: Plan | undefined
+    try {
+      planned = await plan()
+    } catch {
+      planned = undefined
+      if (key !== undefined) await quietly(release)
+    }
+    if (planned === undefined) return next(e)
+    if (planned.mode === 'deny-once') return { deny: planned.block + '\nRe-issue the edit if it respects these.' }
 
     // `seen` means the model received the block: a call refused from below, or one that threw,
     // delivered nothing, so the claim goes back and the next edit of the file delivers.
-    const release = () => update($, SENTINEL, (s) => ({ ...s, seen: s.seen.filter((k) => k !== key) }))
     let ran
     try {
       ran = await next(e)
     } catch (error) {
-      await release()
+      await quietly(release)
       throw error
     }
     if (ran.deny !== undefined) {
-      await release()
+      await quietly(release)
       return ran
     }
-    $.ui.toast(`${facts.length} invariant(s) recorded for ${rel}`)
-    return { ...ran, context: [...(ran.context ?? []), block] }
+    await quietly(() => $.ui.toast(`${planned.count} invariant(s) recorded for ${planned.rel}`))
+    return { ...ran, context: [...(ran.context ?? []), planned.block] }
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'invariant' }, async ($, e) => {
