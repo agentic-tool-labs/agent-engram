@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { EDIT_TOOLS, SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
-import { ANY_SESSION_START } from '../shared/events'
+import { ANY_SESSION_START, ANY_TURN_COMPLETE } from '../shared/events'
 import {
   DIGEST_INITIAL,
   DIGEST_SYSTEM,
@@ -109,14 +109,19 @@ export const register: Register = (on, options) => {
   const every = digestEvery(options)
 
   on('session.start', ANY_SESSION_START, async ($, e, next) => {
-    await $.command.register({
-      name: 'digest-review',
-      description: 'Review the memory candidates the auto-digest proposed',
-    })
-    await $.command.register({
-      name: 'remember-selection',
-      description: 'Put the selected text in the prompt as "Remember this: …" so you can edit it and submit',
-    })
+    // The event is shared with other mods; a failure here must not stop their hooks.
+    try {
+      await $.command.register({
+        name: 'digest-review',
+        description: 'Review the memory candidates the auto-digest proposed',
+      })
+      await $.command.register({
+        name: 'remember-selection',
+        description: 'Put the selected text in the prompt as "Remember this: …" so you can edit it and submit',
+      })
+    } catch {
+      // The commands are missing, nothing else is affected.
+    }
     return next(e)
   })
 
@@ -126,16 +131,21 @@ export const register: Register = (on, options) => {
     return ran
   })
 
-  on('turn.complete', async ($, e, next) => {
+  on('turn.complete', ANY_TURN_COMPLETE, async ($, e, next) => {
     if (every === 0 || e.agentId !== undefined || e.isAborted || e.reason !== 'answer') return next(e)
 
-    let isDue = false
-    await update($, DIGEST, (s) => {
-      const turns = s.turnsSinceDigest + 1
-      isDue = shouldDigest(every, turns, s.editedThisTurn)
-      return { ...s, turnsSinceDigest: isDue ? 0 : turns, editedThisTurn: false }
-    })
-    if (isDue) $.clock.after(0, () => runDigest($))
+    // The event is shared with other mods; a failure here must not stop their hooks.
+    try {
+      let isDue = false
+      await update($, DIGEST, (s) => {
+        const turns = s.turnsSinceDigest + 1
+        isDue = shouldDigest(every, turns, s.editedThisTurn)
+        return { ...s, turnsSinceDigest: isDue ? 0 : turns, editedThisTurn: false }
+      })
+      if (isDue) $.clock.after(0, () => runDigest($))
+    } catch {
+      // This turn is not counted.
+    }
     return next(e)
   })
 

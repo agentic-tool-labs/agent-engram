@@ -16,6 +16,8 @@ type Rig = {
   closed: string[]
   filled: string[]
   registered: string[]
+  isRegisterFailing: boolean
+  sessionStarts: number
   clock: ReturnType<typeof mock.clock>
   reply: { text: string; isAnswered: boolean }
   selection: { text: string } | undefined
@@ -41,6 +43,8 @@ function rigUp(on: On, ops: Record<string, FetchHandler> = {}): Rig {
     closed: [],
     filled: [],
     registered: [],
+    isRegisterFailing: false,
+    sessionStarts: 0,
     clock,
     reply: { text: '[]', isAnswered: true },
     selection: undefined,
@@ -72,10 +76,14 @@ function rigUp(on: On, ops: Record<string, FetchHandler> = {}): Rig {
     return { isFilled: true }
   })
   on('command.register', (_$, e) => {
+    if (rig.isRegisterFailing) throw new Error('registration refused')
     rig.registered.push(e.name)
     return { value: { command: e.name } }
   })
-  on('session.start', (_$, e) => ({ cwd: e.cwd }) as never)
+  on('session.start', (_$, e) => {
+    rig.sessionStarts++
+    return { cwd: e.cwd } as never
+  })
   on('turn.complete', () => ({ text: '' }))
   on('tool.call', () => ({ result: {}, text: '', ref: 0 }))
   return rig
@@ -445,4 +453,12 @@ test('session start registers both commands', async ($, on) => {
   await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true } as never)
   expect(rig.registered.includes('digest-review')).toBe(true)
   expect(rig.registered.includes('remember-selection')).toBe(true)
+})
+
+test('a failing command registration does not stop session start from continuing', async ($, on) => {
+  const rig = rigUp(on)
+  rig.isRegisterFailing = true
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true } as never)
+  expect(rig.sessionStarts).toBe(1)
+  expect(rig.registered).toEqual([])
 })
