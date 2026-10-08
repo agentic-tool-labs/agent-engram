@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Engram.EndToEnd.Tests;
 
@@ -30,9 +31,10 @@ public class ActivityFeedEventsTests
             .ToList();
     }
 
-    // A capturing prompt needs a transcript_path whose last line carries promptSource
-    // "typed" — see HookUserPromptTests.cs for the discriminator's own test coverage; this
-    // file only needs a minimal fixture to keep exercising the telemetry record it wraps.
+    // A capturing prompt needs a transcript_path holding a user record with promptSource
+    // "typed" and this prompt's text — see HookUserPromptTests.cs for the discriminator's own
+    // test coverage; this file only needs a minimal fixture to keep exercising the telemetry
+    // record it wraps.
     private static string Payload(string prompt, string? transcriptPath = null) =>
         JsonSerializer.Serialize(new Dictionary<string, string?>
         {
@@ -41,10 +43,18 @@ public class ActivityFeedEventsTests
             ["transcript_path"] = transcriptPath,
         });
 
+    private const string CapturedPrompt = "I went to see a Spiderman movie last Saturday";
+
     private static string TypedTranscript(string root)
     {
         var path = Path.Combine(root, "transcript.jsonl");
-        File.WriteAllText(path, """{"type":"user","promptSource":"typed"}""" + "\n");
+        var record = new JsonObject
+        {
+            ["type"] = "user",
+            ["promptSource"] = "typed",
+            ["message"] = new JsonObject { ["role"] = "user", ["content"] = CapturedPrompt },
+        };
+        File.WriteAllText(path, JsonSerializer.Serialize(record) + "\n");
         return path;
     }
 
@@ -57,7 +67,7 @@ public class ActivityFeedEventsTests
 
         var (exitCode, _, stderr) = EngramProcess.RunWithStdin(
             home.Root,
-            Payload("I went to see a Spiderman movie last Saturday", TypedTranscript(home.Root)),
+            Payload(CapturedPrompt, TypedTranscript(home.Root)),
             "hook", "user-prompt");
 
         Assert.Equal(0, exitCode);
@@ -104,7 +114,7 @@ public class ActivityFeedEventsTests
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
 
         using var home = new TestHome();
-        var payload = Payload("I went to see a Spiderman movie last Saturday", TypedTranscript(home.Root));
+        var payload = Payload(CapturedPrompt, TypedTranscript(home.Root));
 
         var (first, _, _) = EngramProcess.RunWithStdin(home.Root, payload, "hook", "user-prompt");
         Assert.Equal(0, first);
