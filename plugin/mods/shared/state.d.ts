@@ -111,7 +111,6 @@ export type SentinelState = {
 }
 
 export type BeliefDiffState = {
-  pending?: { toolUseId: string; handle: string }
   skipToastShown: boolean
 }
 
