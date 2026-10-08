@@ -394,6 +394,38 @@ public class ModApiRecallSeamTests
     }
 
     [Fact]
+    public void Resolver_ARootRegisteredThroughASymlink_ResolvesFromEitherSpelling()
+    {
+        using var sandbox = new SandboxHome();
+        var real = Path.Combine(sandbox.Home.Root, "real-repo");
+        var link = Path.Combine(sandbox.Home.Root, "link-repo");
+        Directory.CreateDirectory(real);
+        File.WriteAllText(Path.Combine(real, "A.md"), "# A\n\nText.\n");
+        try
+        {
+            Directory.CreateSymbolicLink(link, real);
+        }
+        catch (Exception e) when (e is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            Assert.Skip("symbolic links cannot be made here: " + e.Message);
+        }
+
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        CodeIndexer.Index(
+            connection, sandbox.Home, ConfigFile.Empty, IndexingSettings.Default,
+            new IndexOptions(link, Apply: true, Drain: false, Full: false), DateTimeOffset.UtcNow);
+
+        var viaLink = CodeEntityResolver.Resolve(connection, Path.Combine(link, "A.md"));
+        var viaReal = CodeEntityResolver.Resolve(connection, Path.Combine(real, "A.md"));
+
+        Assert.NotNull(viaLink);
+        Assert.NotNull(viaReal);
+        Assert.Equal(viaLink!.Value, viaReal!.Value);
+        Assert.EndsWith("/A.md", viaReal.Value.EntityPath, StringComparison.Ordinal);
+        Assert.Null(CodeEntityResolver.Resolve(connection, Path.Combine(sandbox.Home.Root, "link-repo-sibling", "A.md")));
+    }
+
+    [Fact]
     public void Resolver_ADetachedCheckout_ResolvesToNothing()
     {
         using var sandbox = new SandboxHome();

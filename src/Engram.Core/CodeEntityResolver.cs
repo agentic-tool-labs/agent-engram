@@ -34,7 +34,10 @@ public static class CodeEntityResolver
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
-                var root = reader.GetString(1).TrimEnd(Path.DirectorySeparatorChar);
+                // Git reports a real path, but a directory that is not a checkout is stored as the
+                // caller spelled it, and on macOS /var and /tmp are links — so the stored root is
+                // resolved the same way the path is before the two are compared.
+                var root = PathCanonicalizer.Canonical(reader.GetString(1)).TrimEnd(Path.DirectorySeparatorChar);
                 var inside = canonical.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
                 if (inside && (bestRoot is null || root.Length > bestRoot.Length))
                 {
