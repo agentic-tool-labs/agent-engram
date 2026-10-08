@@ -45,3 +45,6 @@ plugin/bin/
 
 # The .NET SDK install.sh bootstraps privately when the machine has none
 .dotnet/
+
+# Laid down by the engine when the plugin is dev-loaded
+plugin/.claude-plugin/types/

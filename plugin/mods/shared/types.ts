@@ -1,3 +1,5 @@
+import type { HistoryView } from './state'
+
 export type ApiFailure = {
   ok: false
   reason: 'server-down' | 'unsupported' | 'not-initialised' | 'bad-request' | 'not-found' | 'timeout' | 'error'
@@ -57,16 +59,8 @@ export type FactResponse = {
 
 export type HistoryRequest = { fact_id: string }
 
-export type HistoryVersion = {
-  handle: string
-  body: string
-  valid_from: number
-  valid_to: number | null
-  learned_via: string
-  closed_reason: string | null
-}
-
-export type HistoryResponse = { path: string; predicate: string; versions: HistoryVersion[] }
+export type { HistoryVersion } from './state'
+export type HistoryResponse = HistoryView
 
 export type ForgetRequest = { session_id: string; fact_id: string }
 export type ForgetResponse = { handle: string; retracted: boolean }

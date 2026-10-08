@@ -1,22 +1,26 @@
-import type { EngineInterface } from 'claude-code'
-import { atom, read, update } from 'claude-code'
+import type { SharedState } from './state'
 import type { ApiFailure, ApiResult, ModOp, ModOps } from './types'
 
-export type Env = Pick<EngineInterface, 'plugin' | 'process' | 'http' | 'clock' | 'session' | 'state'>
+/**
+ * The engine, as closures. The hooks scanner follows `$` only into a function declared in the
+ * hook's own file, so each hooks file builds one of these from its `$` and hands it to the
+ * client; the binding must be pure forwards (see binding.template.ts).
+ */
+export type ModIo = {
+  run(argv: readonly string[], opts?: { timeoutMs?: number }): Promise<{ exitCode: number; stdout: string }>
+  fetch(
+    url: string,
+    init: { method: string; headers: Record<string, string>; body: string },
+  ): Promise<{ status: number; text: string }>
+  sleep(ms: number, opts?: { signal?: AbortSignal }): Promise<void>
+  now(): Promise<number>
+  sessionId(): Promise<string>
+  pluginRoot: string
+  readShared(): Promise<SharedState>
+  updateShared(fn: (s: SharedState) => SharedState): Promise<unknown>
+}
 
-const sharedState = atom({ plugin: 'engram', key: 'shared' } as const, {
-  binary: undefined,
-  sessionId: undefined,
-  port: null,
-  statusAt: 0,
-  unsupported: false,
-})
-
-const STATUS_RETRY_MS = 60_000
-const DEFAULT_CLI_TIMEOUT_MS = 5_000
-const DEFAULT_API_TIMEOUT_MS = 1_000
-// A hook's own budget is 10 s and `$.clock.sleep` is spent from it.
-const MAX_API_TIMEOUT_MS = 2_000
+export const SHARED_INITIAL: SharedState = { binary: null, port: null, noPortAt: null, unsupported: false }
 
 export const ENGRAM_TOOLS = {
   recall: 'mcp__plugin_engram_engram__engram_recall',
@@ -28,54 +32,65 @@ export const ENGRAM_TOOLS = {
 
 export const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit'] as const
 
-export async function engramBinary($: Env): Promise<string | undefined> {
+const NO_PORT_BACKOFF_MS = 60_000
+const DEFAULT_CLI_TIMEOUT_MS = 5_000
+const DEFAULT_API_TIMEOUT_MS = 1_000
+// A hook's own budget is 10 s and the sleep is spent from it.
+const MAX_API_TIMEOUT_MS = 2_000
+
+export async function engramBinary(io: ModIo): Promise<string | undefined> {
   try {
-    const cached = (await read($, sharedState)).binary
-    if (cached !== undefined) return cached ?? undefined
-    let found: string | null = null
+    const cached = (await io.readShared()).binary
+    if (cached !== null) return cached.path ?? undefined
+    let path: string | null = null
     try {
-      const run = await $.process.run([$.plugin.root + '/hooks/resolve-engram.sh'])
-      const path = run.exitCode === 0 ? run.stdout.trim() : ''
-      found = path === '' ? null : path
+      const run = await io.run([io.pluginRoot + '/hooks/resolve-engram.sh'])
+      const printed = run.exitCode === 0 ? run.stdout.trim() : ''
+      path = printed === '' ? null : printed
     } catch {
-      found = null
+      path = null
     }
-    await update($, sharedState, (s) => ({ ...s, binary: found }))
-    return found ?? undefined
+    await io.updateShared((s) => ({ ...s, binary: { path } }))
+    return path ?? undefined
   } catch {
     return undefined
   }
 }
 
 export async function engramCli(
-  $: Env,
+  io: ModIo,
   args: readonly string[],
   opts: { timeoutMs?: number } = {},
 ): Promise<{ exitCode: number; stdout: string } | undefined> {
   try {
-    const binary = await engramBinary($)
+    const binary = await engramBinary(io)
     if (binary === undefined) return undefined
-    const run = await $.process.run([binary, ...args], { timeoutMs: opts.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS })
+    const run = await io.run([binary, ...args], { timeoutMs: opts.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS })
     return { exitCode: run.exitCode, stdout: run.stdout }
   } catch {
     return undefined
   }
 }
 
-export async function sessionId($: Env): Promise<string> {
-  const cached = (await read($, sharedState)).sessionId
-  if (cached !== undefined) return cached
-  const id = await $.session.id()
-  await update($, sharedState, (s) => ({ ...s, sessionId: id }))
-  return id
-}
-
 type Attempt = { kind: 'reply'; result: ApiResult<unknown> } | { kind: 'unreachable'; detail: string }
 
+// A promise is not state, so the in-flight map is module memory; it lives until the fetch settles.
 const inflight = new Map<string, Promise<Attempt>>()
 
 const fail = (reason: ApiFailure['reason'], detail?: string): ApiFailure =>
   detail === undefined ? { ok: false, reason } : { ok: false, reason, detail }
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']'
+  if (typeof value === 'object' && value !== null) {
+    const record = value as Record<string, unknown>
+    const keys = Object.keys(record)
+      .filter((k) => record[k] !== undefined)
+      .sort()
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonical(record[k])).join(',') + '}'
+  }
+  return JSON.stringify(value) ?? 'null'
+}
 
 function classify(status: number, text: string): ApiResult<unknown> {
   let body: unknown
@@ -95,15 +110,16 @@ function classify(status: number, text: string): ApiResult<unknown> {
   return fail('error', detail ?? `HTTP ${status}`)
 }
 
-/** Port of the running server from `engram status --json`, or why there is none. */
-async function resolveBase($: Env): Promise<{ base: string } | ApiFailure> {
-  const state = await read($, sharedState)
+/** The server's base URL from `engram status --json`, or why there is none. */
+async function resolveBase(io: ModIo): Promise<{ base: string } | ApiFailure> {
+  const state = await io.readShared()
   if (state.unsupported) return fail('unsupported')
   if (state.port !== null) return { base: `http://127.0.0.1:${state.port}` }
-  const now = await $.clock.now()
-  if (state.statusAt !== 0 && now - state.statusAt < STATUS_RETRY_MS) return fail('server-down')
+  const now = await io.now()
+  if (state.noPortAt !== null && now - state.noPortAt < NO_PORT_BACKOFF_MS) return fail('server-down')
 
-  const cli = await engramCli($, ['status', '--json'])
+  // The exit code is 1 unless the server is Running, so stdout is parsed regardless of it.
+  const cli = await engramCli(io, ['status', '--json'])
   let port: number | null = null
   if (cli !== undefined) {
     try {
@@ -115,13 +131,13 @@ async function resolveBase($: Env): Promise<{ base: string } | ApiFailure> {
       port = null
     }
   }
-  await update($, sharedState, (s) => ({ ...s, port, statusAt: now }))
+  await io.updateShared((s) => ({ ...s, port, noPortAt: port === null ? now : null }))
   return port === null ? fail('server-down') : { base: `http://127.0.0.1:${port}` }
 }
 
-async function post($: Env, url: string, mod: string, body: string): Promise<Attempt> {
+async function post(io: ModIo, url: string, mod: string, body: string): Promise<Attempt> {
   try {
-    const res = await $.http.fetch(url, {
+    const res = await io.fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Engram-Mod': mod },
       body,
@@ -132,35 +148,39 @@ async function post($: Env, url: string, mod: string, body: string): Promise<Att
   }
 }
 
-export type ModApiOptions = { mod: string; timeoutMs?: number; signal?: AbortSignal; key?: string }
+export type ModApiOptions = { mod: string; timeoutMs?: number; signal?: AbortSignal }
 
 export function modApi<O extends ModOp>(
-  $: Env,
+  io: ModIo,
   op: O,
   body: Omit<ModOps[O]['request'], 'mod'>,
   opts: ModApiOptions,
 ): Promise<ApiResult<ModOps[O]['response']>>
-export function modApi<T>($: Env, op: string, body: object, opts: ModApiOptions): Promise<ApiResult<T>>
-export async function modApi($: Env, op: string, body: object, opts: ModApiOptions): Promise<ApiResult<unknown>> {
+export function modApi<T>(io: ModIo, op: string, body: object, opts: ModApiOptions): Promise<ApiResult<T>>
+export async function modApi(io: ModIo, op: string, body: object, opts: ModApiOptions): Promise<ApiResult<unknown>> {
   try {
-    const base = await resolveBase($)
+    const base = await resolveBase(io)
     if (!('base' in base)) return base
 
     const timeoutMs = Math.min(Math.max(opts.timeoutMs ?? DEFAULT_API_TIMEOUT_MS, 1), MAX_API_TIMEOUT_MS)
-    const payload = JSON.stringify({ ...body, mod: opts.mod })
-    const key = `${op}\u0000${opts.key ?? payload}`
+    const payload = { ...body, mod: opts.mod }
+    const key = `${op}\u0000${canonical(payload)}`
 
     let request = inflight.get(key)
     if (request === undefined) {
-      request = post($, `${base.base}/mod/v1/${op}`, opts.mod, payload).finally(() => inflight.delete(key))
-      inflight.set(key, request)
+      const sent = post(io, `${base.base}/mod/v1/${op}`, opts.mod, JSON.stringify(payload)).finally(() => {
+        if (inflight.get(key) === sent) inflight.delete(key)
+      })
+      inflight.set(key, sent)
+      request = sent
     }
 
-    // $.http.fetch cannot be cancelled, so the wait is a race; the loser's answer is dropped.
+    // The fetch cannot be cancelled, so each caller races it against its own timer; a loser's
+    // answer is dropped and applied to nothing.
     const guard = new AbortController()
     const stop = () => guard.abort()
     opts.signal?.addEventListener('abort', stop)
-    const timedOut = $.clock.sleep(timeoutMs, { signal: guard.signal }).then(
+    const timedOut = io.sleep(timeoutMs, { signal: guard.signal }).then(
       () => 'timeout' as const,
       () => 'timeout' as const,
     )
@@ -171,11 +191,12 @@ export async function modApi($: Env, op: string, body: object, opts: ModApiOptio
 
     if (outcome === 'timeout') return fail('timeout')
     if (outcome.kind === 'unreachable') {
-      await update($, sharedState, (s) => ({ ...s, port: null }))
+      const now = await io.now()
+      await io.updateShared((s) => ({ ...s, port: null, noPortAt: now }))
       return fail('server-down', outcome.detail)
     }
     if (!outcome.result.ok && outcome.result.reason === 'unsupported') {
-      await update($, sharedState, (s) => ({ ...s, unsupported: true }))
+      await io.updateShared((s) => ({ ...s, unsupported: true }))
     }
     return outcome.result
   } catch (err) {
