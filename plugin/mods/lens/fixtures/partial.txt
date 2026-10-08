@@ -1,0 +1,4 @@
+RECALL "kestrel listener" · 1 facts · 16/500 tokens · coverage: partial
+[f1] Kestrel listener binds loopback only. (project · 0d)
+gaps: only partial matches for "kestrel listener" — verify before relying on this
+→ engram_remember what you discover

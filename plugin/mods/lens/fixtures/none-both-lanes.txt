@@ -1,0 +1,3 @@
+RECALL "zzznomatch" · 0 facts · 0/500 tokens · coverage: none · overlap lane did not run (token index not built yet) · vector lane did not run (sqlite-vec is not installed)
+gaps: no facts matched "zzznomatch" — discover and engram_remember what you find
+→ engram_remember what you discover

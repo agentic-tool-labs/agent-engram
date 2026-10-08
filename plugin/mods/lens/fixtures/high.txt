@@ -1,0 +1,8 @@
+RECALL "kestrel listener" · 6 facts · 219/500 tokens · coverage: high
+[f1] Kestrel listener binds loopback only, and a pinned fact says so. (project · 0d · pinned)
+[f3] Kestrel listener binds loopback only after the revision. (project · 0d · v2)
+[f6] Kestrel listener tuning notes kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener detail kestrel listener… (project · 0d · +1.6k)
+[f4] Kestrel listener port comes from the server settings. (project · 0d · judged)
+[f5] Kestrel listener port is read at startup. (project · 0d · judged)
+[f7] Bind(port) — kestrel listener binder. (code · r:src/kestrel.cs · 0d)
+→ engram_remember what you discover
