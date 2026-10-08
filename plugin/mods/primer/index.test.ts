@@ -19,6 +19,10 @@ const composer = { kind: 'composer' } as const
 const prompt = (text = PROMPT, extra: Partial<PromptSubmitInput> = {}): PromptSubmitInput =>
   ({ text, wait: false, origin: composer, ...extra }) as PromptSubmitInput
 
+// The test environment has no DOM lib, so the host timer is reached through globalThis.
+const pause = (ms: number) =>
+  new Promise<void>((resolve) => (globalThis as unknown as { setTimeout(f: () => void, ms: number): void }).setTimeout(resolve, ms))
+
 const config = (mode: JitConfig['mode'], budgetTokens = 400): JitConfig => ({ mode, budgetTokens })
 
 function rig(recall?: FetchHandler) {
@@ -49,6 +53,7 @@ test('shadow + high: recall is called as shadow and the prompt is untouched', as
   const r = rig(reply('high'))
   const e = prompt()
   await primePrompt(r.io, config('shadow'), e, r.next)
+  await r.clock.settle()
   expect(r.seen[0]).toBe(e)
   expect(r.router.fetchCalls.length).toBe(1)
   const call = r.router.fetchCalls[0]!
@@ -61,6 +66,69 @@ test('shadow + high: recall is called as shadow and the prompt is untouched', as
     mode: 'shadow',
     mod: 'primer',
   })
+})
+
+test('shadow, server answers after 5 s: the prompt is passed on at once and the answer is ignored', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => (release = resolve))
+  const r = rig(async () => {
+    await gate
+    return { status: 200, json: { coverage: 'high', text: DIGEST } }
+  })
+  const e = prompt()
+  const done = primePrompt(r.io, config('shadow'), e, r.next)
+  await r.clock.settle()
+  expect(r.seen.length).toBe(1)
+  expect(r.seen[0]).toBe(e)
+  expect(r.router.fetchCalls.length).toBe(1)
+
+  await r.clock.advance(5_000)
+  release()
+  await r.clock.settle()
+  await done
+  expect(r.seen.length).toBe(1)
+  expect(r.seen[0]!.context).toBeUndefined()
+})
+
+test('shadow, API down: the prompt is passed on at once, nothing thrown', async () => {
+  const fake = fakeModIo({ binary: BIN, cli: { 'status --json': { exitCode: 1, stdout: '{"Server":"NotRunning"}' } } })
+  const seen: PromptSubmitInput[] = []
+  const next = Object.assign(async (e: PromptSubmitInput) => (seen.push(e), { text: e.text }), {
+    signal: new AbortController().signal,
+  })
+  const e = prompt()
+  await primePrompt(fake.io, config('shadow'), e, next)
+  await fake.clock.settle()
+  expect(seen[0]).toBe(e)
+})
+
+test('shadow, the detached request failing in any way leaves no unhandled rejection', async () => {
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => unhandled.push(reason)
+  const proc = (globalThis as { process?: { on(e: string, f: (r: unknown) => void): void; off(e: string, f: (r: unknown) => void): void } }).process
+  proc?.on('unhandledRejection', onUnhandled)
+  try {
+    const r = rig(reply('high'))
+    const failing = { ...r.io, sessionId: () => Promise.reject(new Error('no session')) }
+    await primePrompt(failing, config('shadow'), prompt(), r.next)
+    await r.clock.settle()
+    await pause(5)
+    expect(r.seen.length).toBe(1)
+    expect(unhandled.length).toBe(0)
+  } finally {
+    proc?.off('unhandledRejection', onUnhandled)
+  }
+})
+
+test('shadow: the request does not depend on the dispatch signal, which may abort once the hook returns', async () => {
+  const r = rig(reply('high'))
+  const controller = new AbortController()
+  controller.abort()
+  const next = Object.assign(r.next, { signal: controller.signal })
+  await primePrompt(r.io, config('shadow'), prompt(), next)
+  await r.clock.settle()
+  expect(r.seen.length).toBe(1)
+  expect(r.router.fetchCalls.length).toBe(1)
 })
 
 test('inject + high: exactly one block follows existing context, text unchanged', async () => {
@@ -124,6 +192,7 @@ for (const [name, e] of skipped) {
 test('a prompt of exactly 12 characters is not skipped', async () => {
   const r = rig(reply('high'))
   await primePrompt(r.io, config('shadow'), prompt('twelve chars'), r.next)
+  await r.clock.settle()
   expect(r.router.fetchCalls.length).toBe(1)
 })
 
@@ -246,6 +315,7 @@ test('real binding: shadow mode calls the API and attaches nothing', { options: 
   answerClock(on)
   answerSubmit(on)
   const entered = await $.prompt.submit(prompt())
+  for (let i = 0; i < 100 && router.fetchCalls.length === 0; i++) await pause(5)
   expect(router.fetchCalls.length).toBe(1)
   expect((router.fetchCalls[0]!.body as { mode: string }).mode).toBe('shadow')
   expect(entered.context).toBeUndefined()

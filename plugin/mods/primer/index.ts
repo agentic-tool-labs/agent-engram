@@ -41,9 +41,9 @@ type SubmitNext = {
 }
 
 /**
- * Recalls on the prompt and, in `inject` mode with `high` coverage, attaches the digest as
- * model-only context for this prompt. Every other path, including every failure, passes the
- * prompt through untouched.
+ * In `inject` mode, recalls on the prompt and, with `high` coverage, attaches the digest as
+ * model-only context for this prompt. In `shadow` mode the recall is started and not awaited.
+ * Every other path, including every failure, passes the prompt through untouched.
  */
 export async function primePrompt(
   io: ModIo,
@@ -55,25 +55,38 @@ export async function primePrompt(
   if (e.origin?.kind !== 'composer') return next(e)
   if (e.text.startsWith('/') || e.text.trim().length < MIN_PROMPT_CHARS) return next(e)
 
-  let digest: string | undefined
-  try {
-    const reply = await modApi(
+  const mode = config.mode
+  const ask = async (signal?: AbortSignal) =>
+    modApi(
       io,
       'recall',
       {
         session_id: await io.sessionId(),
         query: e.text.slice(0, QUERY_CHARS),
         budget_tokens: config.budgetTokens,
-        mode: config.mode,
+        mode,
       },
-      { mod: 'primer', timeoutMs: RECALL_TIMEOUT_MS, signal: next.signal },
+      signal === undefined
+        ? { mod: 'primer', timeoutMs: RECALL_TIMEOUT_MS }
+        : { mod: 'primer', timeoutMs: RECALL_TIMEOUT_MS, signal },
     )
+
+  if (mode === 'shadow') {
+    // The server's mod-call record is the measurement, so nothing is waited for or read back.
+    // The dispatch signal is not passed: the request must outlive this hook.
+    ask().catch(() => {})
+    return next(e)
+  }
+
+  let digest: string | undefined
+  try {
+    const reply = await ask(next.signal)
     if (reply.ok && reply.value.coverage === 'high' && reply.value.text.trim() !== '') digest = reply.value.text
   } catch {
     digest = undefined
   }
 
-  if (config.mode !== 'inject' || digest === undefined) return next(e)
+  if (digest === undefined) return next(e)
   return next({ ...e, context: [...(e.context ?? []), BLOCK_HEADER + digest] })
 }
 
