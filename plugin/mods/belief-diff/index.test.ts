@@ -104,7 +104,7 @@ test('Keep old: denied with the retry-proof reason, and the revise never runs', 
 test('personal scope, a session note or code fact: no dialog, revise passes through', async ($, on) => {
   let scope = 'session'
   const r = rig(on, () => ({ status: 200, json: { ...FACT, scope } }), () => 'Keep old')
-  for (const each of ['session', 'repo', 'code']) {
+  for (const each of ['session', 'project', 'code']) {
     scope = each
     expect((await revise($ as never)).deny).toBeUndefined()
   }
