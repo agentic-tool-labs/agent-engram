@@ -178,10 +178,23 @@ internal static class HookCommand
     // parse all fall through the same catch.
     private const int TranscriptTailBytes = 262_144;
 
+    // Second and last window. A session's first prompt is followed by its instructions and
+    // listings (measured at up to ~361 KB after the typed record), which can push the record out
+    // of the first window; nothing beyond this is ever examined.
+    private const int EscalatedTranscriptTailBytes = 1_048_576;
+
     // Submissions examined before giving up. A submission's own record is among the newest
     // few; a match further back than this is a different, older message that happens to say
     // the same thing.
     private const int MaxProvenanceCandidates = 16;
+
+    private enum Provenance
+    {
+        // No candidate's text matched and the window ran out before the candidate bound.
+        Undecided,
+        Typed,
+        NotTyped,
+    }
 
     // The submission's provenance is the promptSource of the newest user record whose text
     // equals this hook's prompt. Position cannot identify it: attachment lines follow the user
@@ -190,6 +203,10 @@ internal static class HookCommand
     // typed prompt and would vouch for it. Binding to the text makes a missing record fail
     // closed. Only the submission's user record carries promptSource, so lines without that
     // key are skipped unparsed.
+    //
+    // The first window is the common case and the only read when it decides. A walk that finds
+    // nothing is read again once over a larger window, unless the first already began at the
+    // start of the file; a malformed record is a decision, not a reason to read more.
     private static bool IsGenuinelyTyped(HookStdinInput? payload)
     {
         if (payload?.TranscriptPath is not { Length: > 0 } path || payload.Prompt is null)
@@ -200,37 +217,52 @@ internal static class HookCommand
         try
         {
             var prompt = payload.Prompt.Trim();
-            var lines = ReadTranscriptTail(path);
-            var examined = 0;
-
-            for (var i = lines.Length - 1; i >= 0 && examined < MaxProvenanceCandidates; i--)
+            var first = Walk(path, prompt, TranscriptTailBytes, out var wholeFileRead);
+            if (first != Provenance.Undecided || wholeFileRead)
             {
-                if (!lines[i].Contains("\"promptSource\"", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                var record = JsonNode.Parse(lines[i]);
-                if (record?["type"]?.GetValue<string>() != "user"
-                    || record["promptSource"] is not JsonValue source
-                    || !source.TryGetValue<string>(out var promptSource))
-                {
-                    continue;
-                }
-
-                examined++;
-                if (string.Equals(RecordText(record), prompt, StringComparison.Ordinal))
-                {
-                    return promptSource == "typed";
-                }
+                return first == Provenance.Typed;
             }
 
-            return false;
+            return Walk(path, prompt, EscalatedTranscriptTailBytes, out _) == Provenance.Typed;
         }
         catch
         {
             return false;
         }
+    }
+
+    private static Provenance Walk(string path, string prompt, int windowBytes, out bool wholeFileRead)
+    {
+        var lines = ReadTranscriptTail(path, windowBytes, out wholeFileRead);
+        var examined = 0;
+
+        for (var i = lines.Length - 1; i >= 0; i--)
+        {
+            if (!lines[i].Contains("\"promptSource\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var record = JsonNode.Parse(lines[i]);
+            if (record?["type"]?.GetValue<string>() != "user"
+                || record["promptSource"] is not JsonValue source
+                || !source.TryGetValue<string>(out var promptSource))
+            {
+                continue;
+            }
+
+            if (string.Equals(RecordText(record), prompt, StringComparison.Ordinal))
+            {
+                return promptSource == "typed" ? Provenance.Typed : Provenance.NotTyped;
+            }
+
+            if (++examined >= MaxProvenanceCandidates)
+            {
+                return Provenance.NotTyped;
+            }
+        }
+
+        return Provenance.Undecided;
     }
 
     // A user record's content is a string, or an array of blocks of which only the text
@@ -263,14 +295,14 @@ internal static class HookCommand
 
     // Reading only the tail keeps this cheap on a transcript that only grows: one session's
     // reached 43 MB, and a head-first read of the whole file on every single message would be
-    // the file-size trap D53 already paid for once. A read that lands mid-record (the common
-    // case, since the seek point is arbitrary) leaves a truncated first line; it is the oldest
-    // line, so it is only reached after every newer one failed to match, and parsing it then
-    // fails closed.
-    private static string[] ReadTranscriptTail(string transcriptPath)
+    // the file-size trap D53 already paid for once. A window that does not begin at the start of
+    // the file lands mid-record (the seek point is arbitrary), so its first line is partial by
+    // construction and is dropped unparsed rather than allowed to fail the parse.
+    private static string[] ReadTranscriptTail(string transcriptPath, int windowBytes, out bool wholeFileRead)
     {
         using var stream = new FileStream(transcriptPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        var toRead = (int)Math.Min(TranscriptTailBytes, stream.Length);
+        var toRead = (int)Math.Min(windowBytes, stream.Length);
+        wholeFileRead = toRead == stream.Length;
         if (toRead == 0)
         {
             return [];
@@ -280,7 +312,8 @@ internal static class HookCommand
         var buffer = new byte[toRead];
         stream.ReadExactly(buffer);
 
-        return Encoding.UTF8.GetString(buffer).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var lines = Encoding.UTF8.GetString(buffer).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        return wholeFileRead || lines.Length == 0 ? lines : lines[1..];
     }
 
     /// <summary>

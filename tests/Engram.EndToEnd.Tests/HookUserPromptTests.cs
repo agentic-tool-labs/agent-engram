@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
@@ -411,6 +412,102 @@ public class HookUserPromptTests
         Assert.Equal(captured ? 1 : 0, ReadCapturedStatements(home.Root).Count);
     }
 
+    // A session's first prompt is followed by instructions and listings measured at up to ~361 KB,
+    // which pushes its record out of the first 262,144-byte window. The second window finds it.
+    [Fact]
+    public void CapturesWhenTheTypedRecordStartsBeyondTheFirstWindow()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        const string prompt = "I prefer tabs over spaces";
+        var transcript = WriteTranscript(
+            home.Root, [UserRecord("typed", prompt), .. PaddedAttachments(30, 10_000)]);
+        Assert.InRange(new FileInfo(transcript).Length, 300_000, 1_000_000);
+
+        var (_, stdout, _) = EngramProcess.RunWithStdin(
+            home.Root, Payload(prompt, transcript), "hook", "user-prompt");
+
+        Assert.Contains("tabs", stdout);
+        Assert.Single(ReadCapturedStatements(home.Root));
+    }
+
+    // The first window starts inside the typed record's line, so it begins with a fragment of
+    // JSON. Parsing that fragment would fail and end the walk as "not typed"; discarding it
+    // lets the walk escalate and find the whole record.
+    [Fact]
+    public void CapturesWhenTheTypedRecordStraddlesTheFirstWindow()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        const string prompt = "I prefer tabs over spaces";
+        var typed = UserRecord("typed", prompt);
+        var earlier = UserRecord("typed", "an earlier message");
+
+        // The window starts one byte into the typed line, so what it holds of that line still
+        // contains the promptSource key but is not valid JSON. The bytes after the line are
+        // "\n" + trailer + "\n".
+        var trailer = PaddedAttachment(262_143 - Encoding.UTF8.GetByteCount(typed));
+        var transcript = WriteTranscript(home.Root, earlier, typed, trailer);
+
+        var length = new FileInfo(transcript).Length;
+        var typedStart = Encoding.UTF8.GetByteCount(earlier) + 1;
+        var windowStart = length - 262_144;
+        Assert.Equal(typedStart + 1, windowStart);
+
+        var (_, stdout, _) = EngramProcess.RunWithStdin(
+            home.Root, Payload(prompt, transcript), "hook", "user-prompt");
+
+        Assert.Contains("tabs", stdout);
+        Assert.Single(ReadCapturedStatements(home.Root));
+    }
+
+    // Nothing past 1,048,576 bytes is examined, and exceeding it is a quiet miss.
+    [Fact]
+    public void DoesNotCaptureWhenTheTypedRecordStartsBeyondTheSecondWindow()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        const string prompt = "I prefer tabs over spaces";
+        var transcript = WriteTranscript(
+            home.Root, [UserRecord("typed", prompt), .. PaddedAttachments(110, 10_000)]);
+        Assert.True(new FileInfo(transcript).Length > 1_048_576 + 10_000);
+
+        var (exitCode, stdout, stderr) = EngramProcess.RunWithStdin(
+            home.Root, Payload(prompt, transcript), "hook", "user-prompt");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal(string.Empty, stderr);
+        Assert.Empty(ReadCapturedStatements(home.Root));
+    }
+
+    // A complete malformed record in the first window is a decision, not a reason to read more:
+    // the typed record behind it, reachable only by escalating, must stay uncaptured.
+    [Fact]
+    public void DoesNotEscalatePastAMalformedRecordInTheFirstWindow()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        const string prompt = "I prefer tabs over spaces";
+        var transcript = WriteTranscript(
+            home.Root,
+            [
+                UserRecord("typed", prompt),
+                .. PaddedAttachments(30, 10_000),
+                "{\"promptSource\": \"typed\", broken",
+            ]);
+
+        var (_, stdout, _) = EngramProcess.RunWithStdin(
+            home.Root, Payload(prompt, transcript), "hook", "user-prompt");
+
+        Assert.Equal(string.Empty, stdout);
+        Assert.Empty(ReadCapturedStatements(home.Root));
+    }
+
     // Nothing for the classifier to find means the transcript is never opened. A FIFO makes the
     // open observable: opening it for reading blocks until a writer appears, so a hook that
     // opened it would hang until the process helper's bound kills it and throws. A directory or
@@ -483,6 +580,20 @@ public class HookUserPromptTests
                 ["attachment"] = new JsonObject { ["type"] = AttachmentTypes[i % AttachmentTypes.Length] },
             }))
             .ToArray();
+
+    // An attachment line whose UTF-8 length is exactly totalBytes, without a promptSource key.
+    private static string PaddedAttachment(int totalBytes)
+    {
+        var bare = JsonSerializer.Serialize(new JsonObject { ["type"] = "attachment", ["padding"] = "" });
+        return JsonSerializer.Serialize(new JsonObject
+        {
+            ["type"] = "attachment",
+            ["padding"] = new string('x', totalBytes - bare.Length),
+        });
+    }
+
+    private static string[] PaddedAttachments(int count, int bytesEach) =>
+        Enumerable.Range(0, count).Select(_ => PaddedAttachment(bytesEach)).ToArray();
 
     private static string[] QueueOperations(int count) =>
         Enumerable.Range(0, count)

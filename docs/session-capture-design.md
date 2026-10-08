@@ -133,7 +133,9 @@ The hook therefore binds provenance by content, not position: it walks the 262,1
 newest → oldest, skips lines without `"promptSource"`, and takes the `promptSource` of the first
 `type:"user"` record whose text (string content, or the concatenated `text` blocks) equals the hook's
 `prompt` after trimming both. Capture needs `typed`. At most 16 such records are examined; no match,
-or any read or parse failure, means not genuine. A last-line rule captured nothing from the day the
+or any read or parse failure, means not genuine. A walk that decided nothing is repeated once over the
+last 1,048,576 bytes (a session's first prompt can be followed by ~360 KB of instructions and listings);
+a window that does not start at the beginning of the file drops its partial first line. A last-line rule captured nothing from the day the
 attachments began following the record; matching on the newest `promptSource` line alone would let a
 peer message whose record is not yet written inherit the previous typed prompt's provenance.
 
