@@ -253,6 +253,167 @@ public class PluginSourceTests
         Assert.Contains(found, f => f.Contains("mods/b/index.ts:1"));
     }
 
+    // A hook that throws before `next` stops the hooks beneath it, and one that calls `next` twice
+    // re-runs the core, so every handler of every mod wraps `next` once and catches to the fallback.
+    [Fact]
+    public void ShippedModSources_WrapEveryHandlerInTheNoThrowGuard()
+    {
+        var sources = ModSourceFiles(PluginSandbox.PluginDirectory).ToList();
+
+        Assert.NotEmpty(sources);
+        Assert.Empty(HandlersOutsideTheNoThrowGuard(PluginSandbox.PluginDirectory, sources));
+    }
+
+    private const string CompliantHandler = "on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  const go = once(next)\n  try {\n    return await go(e)\n  } catch {\n    return go.fallback(e)\n  }\n})\n";
+
+    [Fact]
+    public void AHandlerThatCallsOnceAndFallsBack_IsNotReported()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", CompliantHandler + "on('tool.call', { tool: 'Edit' }, async ($, e, next) => {\n  const go = once(next)\n  try {\n    if (next.signal.aborted) return go(e)\n    return go(e)\n  } catch { return go.fallback(e) }\n})\n");
+        tree.Write("mods/shared/guard.ts", "next(e)\n");
+        tree.Write("mods/a/a.test.ts", "on('x', (_$, e) => next(e))\n");
+
+        Assert.Empty(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+    }
+
+    [Theory]
+    [InlineData("on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  return next(e)\n})\n", "once(next)")]
+    [InlineData("on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  const go = once(next)\n  return go(e)\n})\n", "go.fallback(e)")]
+    [InlineData("on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  const go = once(next)\n  try { return next(e) } catch { return go.fallback(e) }\n})\n", "next directly")]
+    [InlineData("on('command.run', { command: 'x' }, async ($) => {\n  return { text: 'x' }\n})\n", "once(next)")]
+    public void AHandlerOutsideTheGuard_IsReportedNamingTheFileAndWhatIsMissing(string source, string expected)
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", source);
+
+        var only = Assert.Single(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+
+        Assert.Contains("mods/a/index.ts:1", only);
+        Assert.Contains(expected, only);
+    }
+
+    // The engine's budget `.catch` is the one direct `next(e)` a handler may carry; any other is not.
+    [Fact]
+    public void TheBudgetCatch_IsTheOnlyDirectNextCallAHandlerMayCarry()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", CompliantHandler.TrimEnd('\n') + ".catch(($, e, next) => next(e))\n");
+        tree.Write("mods/b/index.ts", CompliantHandler.TrimEnd('\n') + ".catch(($, e, next) => { return next(e) })\n");
+
+        var only = Assert.Single(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+
+        Assert.Contains("mods/b/index.ts:1", only);
+    }
+
+    // Where a registration is written must not take it out of the rule. Each of these is an
+    // unwrapped registration the rule has to see, however it hides.
+    [Theory]
+    [InlineData("const x = 1; on('turn.start', ANY_TURN_START, async ($, e, next) => next(e))\n")]
+    [InlineData("return on('turn.start', ANY_TURN_START, async ($, e, next) => next(e))\n")]
+    [InlineData("register(on('turn.start', ANY_TURN_START, async ($, e, next) => next(e)))\n")]
+    [InlineData("on(`turn.start`, ANY_TURN_START, async ($, e, next) => next(e))\n")]
+    [InlineData("on(\n  'turn.start',\n  ANY_TURN_START,\n  async ($, e, next) => next(e),\n)\n")]
+    [InlineData("on('turn.start', ANY_TURN_START, handler)\n")]
+    public void AnUnwrappedRegistrationWhereverItIsWritten_IsReported(string source)
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", source);
+
+        Assert.Single(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+    }
+
+    // A wrapped handler on the same line must not excuse the unwrapped one that follows it, and
+    // `next` reached through an alias or spelled with a space is still a direct use.
+    [Fact]
+    public void AnUnwrappedRegistrationAfterAWrappedOneOnTheSameLine_IsReportedAlone()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", CompliantHandler.TrimEnd('\n') + "; on('turn.complete', ANY_TURN_COMPLETE, async ($, e, next) => next(e))\n");
+
+        var only = Assert.Single(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+
+        Assert.Contains("mods/a/index.ts:8", only);
+    }
+
+    [Theory]
+    [InlineData("const n = next\n  try { return await n(e) } catch { return go.fallback(e) }", "aliasing")]
+    [InlineData("try { return await go(e) } catch { return next (e) }", "directly")]
+    [InlineData("try { return await go(e) } catch { return helper(e, next) }", "aliasing")]
+    public void NextUsedOutsideTheWrapper_EvenWithTheWrapperPresent_IsReported(string body, string expected)
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", "on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  const go = once(next)\n  " + body + "\n})\n");
+
+        var only = Assert.Single(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+
+        Assert.Contains(expected, only);
+    }
+
+    // The nearest inputs that must not be reported: a registration or a use of `next` that is only
+    // text, and the property reads and the wrapped form a handler legitimately has.
+    [Fact]
+    public void RegistrationsAndNextThatAreOnlyCommentOrStringText_AreNotReported()
+    {
+        using var tree = new TempTree();
+        tree.Write(
+            "mods/a/index.ts",
+            "// on('turn.start', ANY_TURN_START, async ($, e, next) => next(e))\n"
+            + "const s = \"on('turn.start', x)\"\n"
+            + CompliantHandler.Replace("return await go(e)", "const note = 'press next to go on'\n    const key = `next-${e.turnId}`\n    if (next.signal.aborted) return go(e)\n    return await go(e)"));
+
+        Assert.Empty(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+    }
+
+    // The rule is the only per-registration enforcement (the behaviour tests cannot see a missing
+    // wrapper on a hook that does not throw), so every registration in the plugin is checked by
+    // taking its wrapper away and expecting exactly that registration to be reported.
+    [Fact]
+    public void RemovingTheWrapperFromAnyShippedRegistration_IsReportedAtThatRegistrationAlone()
+    {
+        var dir = PluginSandbox.PluginDirectory;
+        var checkedRegistrations = 0;
+        foreach (var file in ModSourceFiles(dir))
+        {
+            var relative = Path.GetRelativePath(dir, file).Replace('\\', '/');
+            if (!IsInGuardScope(relative, file))
+            {
+                continue;
+            }
+
+            var text = File.ReadAllText(file);
+            foreach (var (index, eventName, end) in HandlerRegistrations(text, Mask(text)))
+            {
+                var segment = text.Substring(index, end - index);
+                var stripped = UnwrapHandler(segment);
+                Assert.NotEqual(segment, stripped);
+                var line = text.AsSpan(0, index).Count('\n') + 1;
+
+                using var tree = new TempTree();
+                tree.Write(relative, text[..index] + stripped + text[end..]);
+                var found = HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root));
+
+                var only = Assert.Single(found);
+                Assert.Contains($"{relative}:{line}:", only);
+                checkedRegistrations++;
+            }
+        }
+
+        Assert.True(checkedRegistrations >= 24, $"Only {checkedRegistrations} registrations were checked; the scan lost some.");
+    }
+
+    // One compliant handler must not excuse the next one in the same file.
+    [Fact]
+    public void ASecondHandlerInTheSameFileThatIsNotWrapped_IsReportedAlone()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", CompliantHandler + "on('turn.complete', ANY_TURN_COMPLETE, async ($, e, next) => next(e))\n");
+
+        var only = Assert.Single(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+
+        Assert.Contains("mods/a/index.ts:9", only);
+    }
+
     [Fact]
     public void TwoBareRegistrationsOfOneEvent_AreReportedWithBothLocations()
     {
@@ -415,6 +576,210 @@ public class PluginSourceTests
         }
 
         return found;
+    }
+
+    // A registration is found in the source text and then judged on a masked copy of it, the same
+    // length with comments and the insides of strings blanked: a registration inside a comment does
+    // not count, and the word "next" in a message is not a use of `next`. It is found wherever it
+    // stands (mid-line, in a nested call, over several lines, with a backtick event name), so a
+    // registration cannot step out of the rule by where it is written. The check is on presence: it
+    // cannot tell that the `try` covers the whole body.
+    private static readonly Regex HandlerRegistrationPattern = new(
+        @"(?<![\w.$])on\(\s*['""`]([A-Za-z][A-Za-z0-9.]*)['""`]",
+        RegexOptions.Compiled);
+
+    private static readonly Regex OnceNextPattern = new(@"\bonce\(\s*next\s*\)", RegexOptions.Compiled);
+
+    private static readonly Regex DirectNextCallPattern = new(@"(?<![\w.$])next\s*\(", RegexOptions.Compiled);
+
+    // `next` as a value (an alias, an argument) rather than a property read or the one wrapped form.
+    private static readonly Regex BareNextPattern = new(@"(?<![\w.$'""`-])next\b(?!\s*\.)", RegexOptions.Compiled);
+
+    private static readonly Regex SignatureNextPattern = new(@",\s*next\s*\)\s*=>", RegexOptions.Compiled);
+
+    // The engine's own `.catch` runs when a hook outruns its budget, which no try/catch in the hook
+    // can see; its `next(e)` replays what an earlier call settled to rather than calling again.
+    private static readonly Regex BudgetCatchPattern = new(
+        @"\.catch\(\s*\(\s*\$\s*,\s*e\s*,\s*next\s*\)\s*=>\s*next\(\s*e\s*\)\s*\)",
+        RegexOptions.Compiled);
+
+    private static string Mask(string text)
+    {
+        var chars = text.ToCharArray();
+        var depths = new Stack<int>();
+        var inTemplate = false;
+
+        void Blank(int at)
+        {
+            if (chars[at] != '\n' && chars[at] != '\r')
+            {
+                chars[at] = ' ';
+            }
+        }
+
+        for (var i = 0; i < chars.Length; i++)
+        {
+            var c = chars[i];
+            if (inTemplate)
+            {
+                if (c == '\\')
+                {
+                    Blank(i);
+                    if (i + 1 < chars.Length)
+                    {
+                        Blank(++i);
+                    }
+                }
+                else if (c == '`')
+                {
+                    inTemplate = false;
+                }
+                else if (c == '$' && i + 1 < chars.Length && chars[i + 1] == '{')
+                {
+                    i++;
+                    depths.Push(0);
+                    inTemplate = false;
+                }
+                else
+                {
+                    Blank(i);
+                }
+
+                continue;
+            }
+
+            if (c == '/' && i + 1 < chars.Length && chars[i + 1] == '/')
+            {
+                while (i < chars.Length && chars[i] != '\n')
+                {
+                    Blank(i++);
+                }
+            }
+            else if (c == '/' && i + 1 < chars.Length && chars[i + 1] == '*')
+            {
+                Blank(i++);
+                Blank(i++);
+                while (i < chars.Length && !(chars[i] == '*' && i + 1 < chars.Length && chars[i + 1] == '/'))
+                {
+                    Blank(i++);
+                }
+
+                if (i < chars.Length)
+                {
+                    Blank(i++);
+                    Blank(i);
+                }
+            }
+            else if (c == '\'' || c == '"')
+            {
+                for (i++; i < chars.Length && chars[i] != c && chars[i] != '\n'; i++)
+                {
+                    if (chars[i] == '\\' && i + 1 < chars.Length)
+                    {
+                        Blank(i++);
+                    }
+
+                    Blank(i);
+                }
+            }
+            else if (c == '`')
+            {
+                inTemplate = true;
+            }
+            else if (c == '{' && depths.Count > 0)
+            {
+                depths.Push(depths.Pop() + 1);
+            }
+            else if (c == '}' && depths.Count > 0)
+            {
+                var depth = depths.Pop();
+                if (depth == 0)
+                {
+                    inTemplate = true;
+                }
+                else
+                {
+                    depths.Push(depth - 1);
+                }
+            }
+        }
+
+        return new string(chars);
+    }
+
+    private static List<(int Index, string Event, int End)> HandlerRegistrations(string text, string masked)
+    {
+        var starts = HandlerRegistrationPattern.Matches(text)
+            .Where(m => string.CompareOrdinal(masked, m.Index, "on(", 0, 3) == 0)
+            .ToList();
+        return starts
+            .Select((m, i) => (m.Index, m.Groups[1].Value, i + 1 < starts.Count ? starts[i + 1].Index : text.Length))
+            .ToList();
+    }
+
+    private static bool IsInGuardScope(string relative, string file) =>
+        !relative.StartsWith("mods/shared/", StringComparison.Ordinal)
+        && !Path.GetFileName(file).Contains(".test.", StringComparison.Ordinal);
+
+    // A handler's text runs from its `on(` to the next registration or the end of the file, so a
+    // handler sharing a file with another cannot be excused by it; a helper after the last handler
+    // is the one thing that could confuse the check, and none of the mods has one.
+    private static List<string> HandlersOutsideTheNoThrowGuard(string pluginDirectory, IEnumerable<string> files)
+    {
+        var found = new List<string>();
+        foreach (var file in files)
+        {
+            var relative = Path.GetRelativePath(pluginDirectory, file).Replace('\\', '/');
+            if (!IsInGuardScope(relative, file))
+            {
+                continue;
+            }
+
+            var text = File.ReadAllText(file);
+            var masked = Mask(text);
+            foreach (var (index, _, end) in HandlerRegistrations(text, masked))
+            {
+                var handler = masked.Substring(index, end - index);
+                var rest = BudgetCatchPattern.Replace(handler, string.Empty);
+                rest = OnceNextPattern.Replace(rest, string.Empty);
+                rest = SignatureNextPattern.Replace(rest, " =>");
+                var missing = new List<string>();
+                if (!OnceNextPattern.IsMatch(handler))
+                {
+                    missing.Add("wrap next with once(next)");
+                }
+
+                if (!handler.Contains(".fallback(", StringComparison.Ordinal))
+                {
+                    missing.Add("catch to go.fallback(e)");
+                }
+
+                if (DirectNextCallPattern.IsMatch(rest))
+                {
+                    missing.Add("stop calling next directly (call the once wrapper)");
+                }
+                else if (BareNextPattern.IsMatch(rest))
+                {
+                    missing.Add("stop passing or aliasing next (use the once wrapper)");
+                }
+
+                if (missing.Count > 0)
+                {
+                    var line = text.AsSpan(0, index).Count('\n') + 1;
+                    found.Add($"{relative}:{line}: handler must {string.Join(" and ", missing)} (see mods/shared/guard.ts)");
+                }
+            }
+        }
+
+        return found;
+    }
+
+    // What a developer removing the wrapper leaves behind: no once(next), calls straight to next.
+    private static string UnwrapHandler(string handler)
+    {
+        var text = Regex.Replace(handler, @"^[ \t]*const go = once\(next\)\r?\n", string.Empty, RegexOptions.Multiline);
+        text = text.Replace("go.fallback(", "next(", StringComparison.Ordinal);
+        return Regex.Replace(text, @"(?<![\w.$])go\(", "next(");
     }
 
     private static readonly Regex BareRegistrationPattern = new(

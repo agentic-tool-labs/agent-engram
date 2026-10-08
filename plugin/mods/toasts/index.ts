@@ -3,6 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import { SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
 import { ANY_SESSION_START } from '../shared/events'
+import { once } from '../shared/guard'
 
 // The scanner reads an atom's reference only from a const of the file that uses it.
 const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, SHARED_INITIAL)
@@ -41,76 +42,96 @@ export const register: Register = (on, options) => {
 
   if (toastsEnabled) {
     on('session.start', ANY_SESSION_START, async ($, e, next) => {
+      const go = once(next)
       try {
-        await $.command.register({ name: UNDO_COMMAND, description: 'Forget the memory Engram captured most recently' })
+        try {
+          await $.command.register({ name: UNDO_COMMAND, description: 'Forget the memory Engram captured most recently' })
+        } catch {
+          // A command that cannot register costs the undo and nothing else.
+        }
+        return go(e)
       } catch {
-        // A command that cannot register costs the undo and nothing else.
+        return go.fallback(e)
       }
-      return next(e)
     })
 
     on('classic.UserPromptSubmit', async ($, e, next) => {
-      let io: ModIo
-      let since: number
+      const go = once(next)
       try {
-        if (e.prompt.startsWith('/')) return next(e)
-        io = bindIo($)
-        since = Math.floor((await io.now()) / 1000) - 1
+        let io: ModIo
+        let since: number
+        try {
+          if (e.prompt.startsWith('/')) return go(e)
+          io = bindIo($)
+          since = Math.floor((await io.now()) / 1000) - 1
+        } catch {
+          return go(e)
+        }
+        const ran = await go(e)
+        try {
+          const found = await modApi(
+            io,
+            'captures',
+            { session_id: await io.sessionId(), since },
+            { mod: 'toasts', signal: next.signal },
+          )
+          if (!found.ok) return ran
+          let fresh: { handle: string; body: string }[] = []
+          let isFirst = false
+          await update($, TOASTS, (s) => {
+            fresh = found.value.captures.filter((c) => !s.shown.includes(c.handle))
+            isFirst = s.shown.length === 0 && fresh.length > 0
+            return { shown: [...s.shown, ...fresh.map((c) => c.handle)] }
+          })
+          fresh.forEach((c, i) => $.ui.toast(`Remembered [${c.handle}]: ${c.body}${isFirst && i === 0 ? UNDO_HINT : ''}`))
+          if (chimeOnCaptures && fresh.length > 0) $.audio.play(CHIME).catch(() => {})
+        } catch {
+          // A failed lookup costs the toast and nothing else.
+        }
+        return ran
       } catch {
-        return next(e)
+        return go.fallback(e)
       }
-      const ran = await next(e)
-      try {
-        const found = await modApi(
-          io,
-          'captures',
-          { session_id: await io.sessionId(), since },
-          { mod: 'toasts', signal: next.signal },
-        )
-        if (!found.ok) return ran
-        let fresh: { handle: string; body: string }[] = []
-        let isFirst = false
-        await update($, TOASTS, (s) => {
-          fresh = found.value.captures.filter((c) => !s.shown.includes(c.handle))
-          isFirst = s.shown.length === 0 && fresh.length > 0
-          return { shown: [...s.shown, ...fresh.map((c) => c.handle)] }
-        })
-        fresh.forEach((c, i) => $.ui.toast(`Remembered [${c.handle}]: ${c.body}${isFirst && i === 0 ? UNDO_HINT : ''}`))
-        if (chimeOnCaptures && fresh.length > 0) $.audio.play(CHIME).catch(() => {})
-      } catch {
-        // A failed lookup costs the toast and nothing else.
-      }
-      return ran
     })
 
     on('command.run', { command: UNDO_COMMAND }, async ($, e, next) => {
+      const go = once(next)
       try {
-        const io = bindIo($)
-        const { shown } = await read($, TOASTS)
-        const handle = shown[shown.length - 1]
-        if (handle === undefined) {
-          $.ui.toast('No captured memory to forget')
-          return {}
+        try {
+          const io = bindIo($)
+          const { shown } = await read($, TOASTS)
+          const handle = shown[shown.length - 1]
+          if (handle === undefined) {
+            $.ui.toast('No captured memory to forget')
+            return {}
+          }
+          const done = await modApi(io, 'forget', { session_id: await io.sessionId(), fact_id: handle }, { mod: 'toasts' })
+          if (!done.ok) $.ui.toast(`Could not forget [${handle}]: ${done.detail ?? done.reason}`)
+          else if (done.value.retracted) $.ui.toast(`Forgot [${handle}]`)
+          else $.ui.toast(`[${handle}] is already forgotten`)
+        } catch {
+          // The command answers nothing rather than failing the chain.
         }
-        const done = await modApi(io, 'forget', { session_id: await io.sessionId(), fact_id: handle }, { mod: 'toasts' })
-        if (!done.ok) $.ui.toast(`Could not forget [${handle}]: ${done.detail ?? done.reason}`)
-        else if (done.value.retracted) $.ui.toast(`Forgot [${handle}]`)
-        else $.ui.toast(`[${handle}] is already forgotten`)
+        return {}
       } catch {
-        // The command answers nothing rather than failing the chain.
+        return go.fallback(e)
       }
-      return {}
     })
   }
 
   if (chimeOnRecalls) {
     on('state.set', { plugin: 'engram', key: 'lens' }, ($, e, next) => {
+      const go = once(next)
       try {
-        if (isNewHighRecall(e.value, e.previous)) $.audio.play(CHIME).catch(() => {})
+        try {
+          if (isNewHighRecall(e.value, e.previous)) $.audio.play(CHIME).catch(() => {})
+        } catch {
+          // A chime that cannot start costs the chime.
+        }
+        return go(e)
       } catch {
-        // A chime that cannot start costs the chime.
+        return go.fallback(e)
       }
-      return next(e)
     })
   }
 }
