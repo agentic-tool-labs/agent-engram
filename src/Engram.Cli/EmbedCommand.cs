@@ -26,9 +26,24 @@ public static class EmbedCommand
     /// <c>--watch</c>, because a loop nobody can interrupt writing frames into a file is a way to
     /// fill a disk, not a feature.</para>
     /// </remarks>
-    private static int Status(string? homePath, string[] args, TextWriter stdout)
+    private static int Status(string? homePath, string[] args, TextWriter stdout, TextWriter stderr)
     {
+        var json = args.Contains("--json");
+        if (json && args.Contains("--watch"))
+        {
+            stderr.WriteLine("error: --json prints one object and cannot be combined with --watch.");
+            return 2;
+        }
+
         var home = EngramHome.ResolveFromProcess(homePath);
+
+        if (json)
+        {
+            var at = DateTimeOffset.UtcNow;
+            stdout.WriteLine(EmbedStatus.ToJson(EmbedStatus.Read(home, at), at));
+            return 0;
+        }
+
         var tui = Tui.Detect();
 
         if (!args.Contains("--watch") || !tui.Interactive)
@@ -88,7 +103,7 @@ public static class EmbedCommand
 
         if (args.Contains("--status"))
         {
-            return Status(homePath, args, stdout);
+            return Status(homePath, args, stdout, stderr);
         }
 
         if (args.Contains("--rebuild"))
