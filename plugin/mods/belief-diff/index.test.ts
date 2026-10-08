@@ -56,6 +56,8 @@ function rig(on: On, fact: (id: string) => { status: number; json?: unknown }, s
     asked.push(question)
     const answer = await script(asked.length - 1, question)
     if (answer === 'reject') return { deny: 'PreToolUse:AskUserQuestion hook error: not available' }
+    if (answer === 'dismiss') return { deny: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_strin" }
+    if (answer === 'dismiss-by-hook') return { deny: "PreToolUse:AskUserQuestion hook error: The user doesn't want to proceed with this tool use" }
     return { result: { questions: e.questions, answers: answer === undefined ? {} : { [question]: answer } } } as never
   })
   on('tool.call', { tool: ENGRAM_TOOLS.revise }, (_$, e) => {
@@ -179,20 +181,54 @@ test('API unsupported (older server): passes through without a dialog', async ($
   expect(r.revised.length).toBe(1)
 })
 
-test('two revises at once: the second dialog opens only after the first is decided', async ($, on) => {
+test('two revises at once: both reach the engine\'s own dialog queue and are decided separately, none denied for being busy', async ($, on) => {
   const gate = deferred<string>()
   const r = rig(on, live(), (n) => (n === 0 ? gate.promise : 'Keep old'))
   const first = revise($ as never)
   const second = revise($ as never, { ...ARGS, statement: 'A second proposal.' })
   await settle()
-  expect(r.asked.length).toBe(1)
+  expect(r.asked.length).toBe(2)
   expect(r.revised.length).toBe(0)
   gate.resolve('Approve')
   const [a, b] = await Promise.all([first, second])
-  expect(r.asked.length).toBe(2)
   expect(r.asked[1]).toContain('A second proposal.')
   expect(a.deny).toBeUndefined()
-  expect(b.deny).toContain('kept the existing belief')
+  expect(b.deny).toBe('The user kept the existing belief [f12]; do not retry this revision.')
+  expect(r.revised.length).toBe(1)
+  expect(r.toasts).toEqual([])
+})
+
+test('a revise after the first was answered gets its own dialog', async ($, on) => {
+  const r = rig(on, live(), (n) => (n === 0 ? 'Approve' : 'Keep old'))
+  expect((await revise($ as never)).deny).toBeUndefined()
+  expect((await revise($ as never)).deny).toContain('kept the existing belief')
+  expect(r.asked.length).toBe(2)
+})
+
+test('Esc (the engine\'s dismissal rejection) keeps the old belief: denied, nothing written, no toast', async ($, on) => {
+  const r = rig(on, live(), () => 'dismiss')
+  const result = await revise($ as never)
+  expect(result.deny).toBe(
+    'The user dismissed the review of [f12]; the existing belief was kept. Do not retry unless the user asks.',
+  )
+  expect(r.revised.length).toBe(0)
+  expect(r.toasts).toEqual([])
+})
+
+test('a hook\'s denial of the dialog is not a dismissal, even if its text quotes one: the revise proceeds', async ($, on) => {
+  const r = rig(on, live(), () => 'dismiss-by-hook')
+  expect((await revise($ as never)).deny).toBeUndefined()
+  expect(r.revised.length).toBe(1)
+  expect(r.toasts).toEqual(['Belief diff skipped for [f12]: could not ask — revision applied unreviewed'])
+})
+
+test('personal scope: an invariant (project scope) is reviewed, any other project fact is not', async ($, on) => {
+  let predicate = 'invariant'
+  const r = rig(on, () => ({ status: 200, json: { ...FACT, scope: 'project', predicate } }), () => 'Keep old')
+  expect((await revise($ as never)).deny).toContain('kept the existing belief')
+  predicate = 'preference'
+  expect((await revise($ as never)).deny).toBeUndefined()
+  expect(r.asked.length).toBe(1)
   expect(r.revised.length).toBe(1)
 })
 
@@ -207,7 +243,7 @@ for (const [label, answer] of [
     const result = await revise($ as never)
     expect(result.deny).toBeUndefined()
     expect(r.revised.length).toBe(1)
-    expect(r.toasts).toEqual(['Belief diff skipped for [f12]: could not ask'])
+    expect(r.toasts).toEqual(['Belief diff skipped for [f12]: could not ask — revision applied unreviewed'])
   })
 }
 
