@@ -452,6 +452,7 @@ downloaded is reported there rather than only in the log.
 ```
 engram embed --status                  # how far, how fast, and what is being embedded
 engram embed --status --watch          # the same, redrawn until it finishes
+engram embed --status --json           # the same as one JSON object, for scripts and status lines
 ```
 
 `engram explain <query>` shows why recall ranks what it ranks — every lane's contribution,
