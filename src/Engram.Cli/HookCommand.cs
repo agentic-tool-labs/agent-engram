@@ -95,10 +95,10 @@ internal static class HookCommand
         // classifier above cannot tell them apart, and neither can this hook's stdin
         // payload, which carries no provenance field at all (session_id, cwd,
         // transcript_path, permission_mode are the documented common fields; nothing marks
-        // who or what submitted it). The transcript record Claude Code just wrote for this
-        // exact submission does: confirmed against every real capture and every real
-        // mis-capture in this session's own history, 2026-08-09/10 — 2 of 2 genuine prompts
-        // carried promptSource "typed", 16 of 16 false positives carried "system". See
+        // who or what submitted it). The transcript record Claude Code wrote for this
+        // exact submission does: 2 of 2 genuine prompts carried promptSource "typed", 16 of
+        // 16 false positives carried "system". That record is found by its text, not by its
+        // position — Claude Code writes attachment lines after it before this hook runs. See
         // docs/session-capture-design.md, "The transcript". Checked after classification,
         // not before: the common case is an ordinary prompt with nothing to capture, and
         // that path should not pay for a file read it will not use.
@@ -174,21 +174,56 @@ internal static class HookCommand
     // Bounded, tail-only, and any failure says "not typed" rather than guessing — the
     // transcript format is private and undocumented (docs/session-capture-design.md, "The
     // transcript"), so the failure mode here has to be "capture nothing", never "capture
-    // garbage". A missing path, an unreadable file, a record larger than the tail window, or
-    // a shape this cannot parse all fall through the same catch.
+    // garbage". A missing path, an unreadable file, a malformed record, or a shape this cannot
+    // parse all fall through the same catch.
     private const int TranscriptTailBytes = 262_144;
 
+    // Second and last window. A session's first prompt is followed by its instructions and
+    // listings (measured at up to ~361 KB after the typed record), which can push the record out
+    // of the first window; nothing beyond this is ever examined.
+    private const int EscalatedTranscriptTailBytes = 1_048_576;
+
+    // Submissions examined before giving up. A submission's own record is among the newest
+    // few; a match further back than this is a different, older message that happens to say
+    // the same thing.
+    private const int MaxProvenanceCandidates = 16;
+
+    private enum Provenance
+    {
+        // No candidate's text matched and the window ran out before the candidate bound.
+        Undecided,
+        Typed,
+        NotTyped,
+    }
+
+    // The submission's provenance is the promptSource of the newest user record whose text
+    // equals this hook's prompt. Position cannot identify it: attachment lines follow the user
+    // record at the same timestamp before the hook runs, and a peer message's own record may
+    // not be written yet, in which case the newest promptSource line belongs to an earlier
+    // typed prompt and would vouch for it. Binding to the text makes a missing record fail
+    // closed. Only the submission's user record carries promptSource, so lines without that
+    // key are skipped unparsed.
+    //
+    // The first window is the common case and the only read when it decides. A walk that finds
+    // nothing is read again once over a larger window, unless the first already began at the
+    // start of the file; a malformed record is a decision, not a reason to read more.
     private static bool IsGenuinelyTyped(HookStdinInput? payload)
     {
-        if (payload?.TranscriptPath is not { Length: > 0 } path)
+        if (payload?.TranscriptPath is not { Length: > 0 } path || payload.Prompt is null)
         {
             return false;
         }
 
         try
         {
-            var line = ReadLastTranscriptLine(path);
-            return line is not null && JsonNode.Parse(line)?["promptSource"]?.GetValue<string>() == "typed";
+            var prompt = payload.Prompt.Trim();
+            var first = Walk(path, prompt, TranscriptTailBytes, out var wholeFileRead);
+            if (first != Provenance.Undecided || wholeFileRead)
+            {
+                return first == Provenance.Typed;
+            }
+
+            return Walk(path, prompt, EscalatedTranscriptTailBytes, out _) == Provenance.Typed;
         }
         catch
         {
@@ -196,22 +231,81 @@ internal static class HookCommand
         }
     }
 
-    // UserPromptSubmit fires before Claude processes the prompt, so the record for this exact
-    // submission is already the last line — unlike PostCompact's isCompactSummary, there is no
-    // separate write path racing this read. Reading only the tail keeps this cheap on a
-    // transcript that only grows: this session's own reached 43 MB tonight, and a head-first
-    // read of the whole file on every single message would be the file-size trap D53 already
-    // paid for once. A read that lands mid-record (the common case, since the seek point is
-    // arbitrary) discards everything before the last newline; JsonNode.Parse rejecting a
-    // truncated line is what "harvest nothing" looks like when a record is larger than the tail
-    // window, not a bug to work around.
-    private static string? ReadLastTranscriptLine(string transcriptPath)
+    private static Provenance Walk(string path, string prompt, int windowBytes, out bool wholeFileRead)
     {
-        using var stream = new FileStream(transcriptPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        var toRead = (int)Math.Min(TranscriptTailBytes, stream.Length);
-        if (toRead == 0)
+        var lines = ReadTranscriptTail(path, windowBytes, out wholeFileRead);
+        var examined = 0;
+
+        for (var i = lines.Length - 1; i >= 0; i--)
+        {
+            if (!lines[i].Contains("\"promptSource\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var record = JsonNode.Parse(lines[i]);
+            if (record?["type"]?.GetValue<string>() != "user"
+                || record["promptSource"] is not JsonValue source
+                || !source.TryGetValue<string>(out var promptSource))
+            {
+                continue;
+            }
+
+            if (string.Equals(RecordText(record), prompt, StringComparison.Ordinal))
+            {
+                return promptSource == "typed" ? Provenance.Typed : Provenance.NotTyped;
+            }
+
+            if (++examined >= MaxProvenanceCandidates)
+            {
+                return Provenance.NotTyped;
+            }
+        }
+
+        return Provenance.Undecided;
+    }
+
+    // A user record's content is a string, or an array of blocks of which only the text
+    // blocks are what was typed.
+    private static string? RecordText(JsonNode record)
+    {
+        var content = record["message"]?["content"];
+        if (content is JsonValue value)
+        {
+            return value.TryGetValue<string>(out var text) ? text.Trim() : null;
+        }
+
+        if (content is not JsonArray blocks)
         {
             return null;
+        }
+
+        var joined = new StringBuilder();
+        foreach (var block in blocks)
+        {
+            if (block?["type"]?.GetValue<string>() == "text" && block["text"] is JsonValue text
+                && text.TryGetValue<string>(out var part))
+            {
+                joined.Append(part);
+            }
+        }
+
+        return joined.ToString().Trim();
+    }
+
+    // Reading only the tail keeps this cheap on a transcript that only grows: one session's
+    // reached 43 MB, and a head-first read of the whole file on every single message would be
+    // the file-size trap D53 already paid for once. A window that does not begin at the start of
+    // the file lands mid-record (the seek point is arbitrary), so its first line is partial by
+    // construction and is dropped unparsed rather than allowed to fail the parse.
+    private static string[] ReadTranscriptTail(string transcriptPath, int windowBytes, out bool wholeFileRead)
+    {
+        using var stream = new FileStream(transcriptPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var toRead = (int)Math.Min(windowBytes, stream.Length);
+        wholeFileRead = toRead == stream.Length;
+        if (toRead == 0)
+        {
+            return [];
         }
 
         stream.Seek(-toRead, SeekOrigin.End);
@@ -219,7 +313,7 @@ internal static class HookCommand
         stream.ReadExactly(buffer);
 
         var lines = Encoding.UTF8.GetString(buffer).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        return lines.Length > 0 ? lines[^1] : null;
+        return wholeFileRead || lines.Length == 0 ? lines : lines[1..];
     }
 
     /// <summary>
