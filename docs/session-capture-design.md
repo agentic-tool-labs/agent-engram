@@ -121,6 +121,22 @@ heuristically**:
 - every record carries `cwd`, `gitBranch`, `slug`, `sessionId` — project scoping is already in
   the data, per record
 
+**Order within a submission (measured on Claude Code 2.1.294, interactive).** The submission's user
+record is *not* the last line when `UserPromptSubmit` runs. Attachment lines follow it at the same
+timestamp (`environment`, `model`, `output_style_instructions`, `deferred_tools_delta`,
+`mcp_instructions_delta`, `skill_listing`, `auto_mode`, `hook_additional_context`, …), and
+`queue-operation` lines can precede it. Only the user record carries `promptSource` (`typed`
+interactive, `sdk` under `claude -p`, `system` for peer messages and task notifications); its text is
+`message.content`, a string or an array of blocks.
+
+The hook therefore binds provenance by content, not position: it walks the 262,144-byte tail
+newest → oldest, skips lines without `"promptSource"`, and takes the `promptSource` of the first
+`type:"user"` record whose text (string content, or the concatenated `text` blocks) equals the hook's
+`prompt` after trimming both. Capture needs `typed`. At most 16 such records are examined; no match,
+or any read or parse failure, means not genuine. A last-line rule captured nothing from the day the
+attachments began following the record; matching on the newest `promptSource` line alone would let a
+peer message whose record is not yet written inherit the previous typed prompt's provenance.
+
 Standing risk: this format is private and undocumented (`attachment`, `file-history-delta`,
 `classifierMetaLines`, `toolDenialKind` appear in no reference). A parser over it breaks
 silently on upgrade. **Keep only shapes you recognise, so the failure mode is *harvest
