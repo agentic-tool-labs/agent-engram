@@ -192,7 +192,9 @@ public class ModApiRecallSeamTests
         var api = Recall(sandbox, "kestrel loopback binding");
 
         Assert.Equal("partial", (string)api["coverage"]!);
-        Assert.Contains($"gaps: {(string)api["gaps"]!}", (string)api["text"]!, StringComparison.Ordinal);
+        var gaps = (string?)api["gaps"];
+        Assert.False(string.IsNullOrEmpty(gaps));
+        Assert.Contains($"\ngaps: {gaps}\n", (string)api["text"]! + "\n", StringComparison.Ordinal);
     }
 
     [Fact]
