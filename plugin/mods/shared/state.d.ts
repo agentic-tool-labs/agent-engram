@@ -102,6 +102,13 @@ export type SentinelState = {
   seen: string[]
   /** Last API failure time per path (`io.now()`), for the 60 s skip. */
   failedAt: Record<string, number>
+  /** What the `engram-why` pane shows; absent until `/why` ran. */
+  why?: {
+    path: string
+    state: 'loading' | 'ready' | 'unsupported' | 'unavailable'
+    entityPath: string | null
+    facts: { handle: string; predicate: string; subject_path: string; body: string; regenerable: boolean }[]
+  }
 }
 
 export type BeliefDiffState = {
