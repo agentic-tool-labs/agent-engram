@@ -16,14 +16,15 @@ const forgot =
   (retracted: boolean): FetchHandler =>
   () => ({ status: 200, json: { handle: 'f2', retracted } })
 
-type Rig = { toasts: string[]; clips: unknown[]; order: string[]; router: ReturnType<typeof installFakeEngine> }
+type Rig = { toasts: string[]; clips: unknown[]; commands: string[]; deny: { audio: boolean; register: boolean }; order: string[]; router: ReturnType<typeof installFakeEngine> }
 
 function rig(on: On, ops: RoutingTable['ops'] = {}, table: RoutingTable = {}): Rig {
   mock.clock(on, { now: NOW_MS })
-  const r: Rig = { toasts: [], clips: [], order: [], router: undefined as never }
+  const r: Rig = { toasts: [], clips: [], commands: [], deny: { audio: false, register: false }, order: [], router: undefined as never }
   r.router = installFakeEngine(on, { binary: BIN, cli: RUNNING, ...table, ops })
   on('ui.toast', (_$, e) => (r.toasts.push(e.text), { value: undefined }))
-  on('audio.play', (_$, e) => (r.clips.push(e.clip), { value: undefined }))
+  on('audio.play', (_$, e) => (r.deny.audio ? { deny: 'refused' } : (r.clips.push(e.clip), { value: undefined })))
+  on('command.register', (_$, e) => (r.deny.register ? { deny: 'taken' } : (r.commands.push(e.name), { value: undefined })) as never)
   on('classic.UserPromptSubmit', () => (r.order.push('next'), {}))
   return r
 }
@@ -37,7 +38,8 @@ const undo = ($: Engine) =>
     presentation: { isFullscreen: false, columns: 80 },
   } as never)
 const calls = (r: Rig, op: string) => r.router.fetchCalls.filter((c) => c.op === op)
-const TINK = { url: 'file:///System/Library/Sounds/Tink.aiff' }
+const CHIME = { asset: 'mods/toasts/chime.wav' }
+const HINT = ' · /undo-capture to forget'
 
 test('a prompt with no capture: no toast, one captures call', async ($, on) => {
   const r = rig(on, { captures: reply() })
@@ -63,7 +65,7 @@ test('since is the second before now, and the session id rides the body', async 
 test('two captures: two toasts with handle and statement only, both handles remembered', async ($, on) => {
   const r = rig(on, { captures: reply(capture('f1', 'Jim likes tea'), capture('f2', 'Jim lives in Lyon')) })
   await submit($, 'I like tea and I live in Lyon')
-  expect(r.toasts).toEqual(['Remembered [f1]: Jim likes tea', 'Remembered [f2]: Jim lives in Lyon'])
+  expect(r.toasts).toEqual(['Remembered [f1]: Jim likes tea' + HINT, 'Remembered [f2]: Jim lives in Lyon'])
   r.toasts.length = 0
   await submit($, 'again')
   expect(r.toasts).toEqual([])
@@ -73,7 +75,7 @@ test('a capture returned again by an overlapping window is not toasted again', a
   const r = rig(on, { captures: reply(capture('f1', 'Jim likes tea')) })
   await submit($, 'I like tea')
   await submit($, 'what time is it')
-  expect(r.toasts).toEqual(['Remembered [f1]: Jim likes tea'])
+  expect(r.toasts).toEqual(['Remembered [f1]: Jim likes tea' + HINT])
 })
 
 test('a new handle beside an already shown one is toasted alone', async ($, on) => {
@@ -86,7 +88,7 @@ test('a new handle beside an already shown one is toasted alone', async ($, on) 
   })
   await submit($, 'one')
   await submit($, 'two')
-  expect(r.toasts).toEqual(['Remembered [f1]: a', 'Remembered [f3]: b'])
+  expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT, 'Remembered [f3]: b'])
 })
 
 test('the hook returns the next result unchanged', async ($, on) => {
@@ -174,9 +176,9 @@ test('chime off (default): audio.play is never called', async ($, on) => {
 test('chime captures: one clip per toast batch, none for an empty or repeated batch', { options: { chime: 'captures' } }, async ($, on) => {
   const r = rig(on, { captures: reply(capture('f1', 'a'), capture('f2', 'b')) })
   await submit($, 'one and two')
-  expect(r.clips).toEqual([TINK])
+  expect(r.clips).toEqual([CHIME])
   await submit($, 'again')
-  expect(r.clips).toEqual([TINK])
+  expect(r.clips).toEqual([CHIME])
 })
 
 test('chime recalls: a capture does not chime', { options: { chime: 'recalls' } }, async ($, on) => {
@@ -188,13 +190,56 @@ test('chime recalls: a capture does not chime', { options: { chime: 'recalls' } 
 test('chime both: a capture chimes', { options: { chime: 'both' } }, async ($, on) => {
   const r = rig(on, { captures: reply(capture('f1', 'a')) })
   await submit($, 'I like tea')
-  expect(r.clips).toEqual([TINK])
+  expect(r.clips).toEqual([CHIME])
 })
 
-test('chime_sound names the clip', { options: { chime: 'captures', chime_sound: '/tmp/ding.wav' } }, async ($, on) => {
+test('a play that is refused is silent and the toasts still show', { options: { chime: 'captures' } }, async ($, on) => {
   const r = rig(on, { captures: reply(capture('f1', 'a')) })
+  r.deny.audio = true
   await submit($, 'I like tea')
-  expect(r.clips).toEqual([{ url: 'file:///tmp/ding.wav' }])
+  expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT])
+})
+
+test('the first capture toast of a session carries the undo hint; the second does not', async ($, on) => {
+  let n = 0
+  const r = rig(on, { captures: () => ({ status: 200, json: { captures: [capture(`f${++n}`, `s${n}`)] } }) })
+  await submit($, 'one')
+  await submit($, 'two')
+  expect(r.toasts).toEqual(['Remembered [f1]: s1' + HINT, 'Remembered [f2]: s2'])
+})
+
+test('only the first toast of the first batch carries the hint', async ($, on) => {
+  const r = rig(on, { captures: reply(capture('f1', 'a'), capture('f2', 'b')) })
+  await submit($, 'one and two')
+  expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT, 'Remembered [f2]: b'])
+})
+
+test('/undo-capture is not registered while nothing was captured', async ($, on) => {
+  const r = rig(on, { captures: reply() })
+  await submit($, 'no capture here')
+  expect(r.commands).toEqual([])
+})
+
+test('/undo-capture is registered once, when the first capture is toasted', async ($, on) => {
+  let n = 0
+  const r = rig(on, { captures: () => ({ status: 200, json: { captures: [capture(`f${++n}`, 'x')] } }) })
+  await submit($, 'one')
+  await submit($, 'two')
+  expect(r.commands).toEqual(['undo-capture'])
+})
+
+test('a failing command registration costs nothing: the toast already showed', async ($, on) => {
+  const r = rig(on, { captures: reply(capture('f1', 'a')) })
+  r.deny.register = true
+  await submit($, 'I like tea')
+  expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT])
+})
+
+test('a system-sourced prompt with no new capture: one captures call, no toast', async ($, on) => {
+  const r = rig(on, { captures: reply() })
+  await $.classic.UserPromptSubmit({ prompt: 'task finished', source: 'system' })
+  expect(calls(r, 'captures').length).toBe(1)
+  expect(r.toasts).toEqual([])
 })
 
 const lens = (toolUseId: string, coverage: string) => ({ recalls: [{ toolUseId, coverage }], history: {} })

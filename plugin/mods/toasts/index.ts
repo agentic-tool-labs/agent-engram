@@ -20,9 +20,8 @@ const bindIo = ($: EngineInterface): ModIo => ({
 })
 
 const UNDO_COMMAND = 'undo-capture'
-// TODO: $.audio.play refuses a file: URL and an absolute asset path, so the chime is a silent no-op
-// until the clip form for chime_sound is decided.
-const DEFAULT_CHIME = '/System/Library/Sounds/Tink.aiff'
+const UNDO_HINT = ' · /undo-capture to forget'
+const CHIME = { asset: 'mods/toasts/chime.wav' }
 
 type RecallsValue = { recalls?: { toolUseId: string; coverage?: string }[] } | undefined
 
@@ -36,16 +35,10 @@ export function isNewHighRecall(value: unknown, previous: unknown): boolean {
 export const register: Register = (on, options) => {
   const toastsEnabled = options.toasts_enabled !== false
   const chime = typeof options.chime === 'string' ? options.chime : 'off'
-  const chimeSound = typeof options.chime_sound === 'string' && options.chime_sound !== '' ? options.chime_sound : DEFAULT_CHIME
   const chimeOnCaptures = chime === 'captures' || chime === 'both'
   const chimeOnRecalls = chime === 'recalls' || chime === 'both'
 
   if (toastsEnabled) {
-    on('session.start', async ($, e, next) => {
-      await $.command.register({ name: UNDO_COMMAND, description: 'Forget the memory Engram captured most recently' })
-      return next(e)
-    })
-
     on('classic.UserPromptSubmit', async ($, e, next) => {
       if (e.prompt.startsWith('/')) return next(e)
       const io = bindIo($)
@@ -65,12 +58,19 @@ export const register: Register = (on, options) => {
         )
         if (!found.ok) return ran
         let fresh: { handle: string; body: string }[] = []
+        let isFirst = false
         await update($, TOASTS, (s) => {
           fresh = found.value.captures.filter((c) => !s.shown.includes(c.handle))
+          isFirst = s.shown.length === 0 && fresh.length > 0
           return { shown: [...s.shown, ...fresh.map((c) => c.handle)] }
         })
-        for (const c of fresh) $.ui.toast(`Remembered [${c.handle}]: ${c.body}`)
-        if (chimeOnCaptures && fresh.length > 0) $.audio.play({ url: 'file://' + chimeSound }).catch(() => {})
+        fresh.forEach((c, i) => $.ui.toast(`Remembered [${c.handle}]: ${c.body}${isFirst && i === 0 ? UNDO_HINT : ''}`))
+        if (chimeOnCaptures && fresh.length > 0) $.audio.play(CHIME).catch(() => {})
+        if (isFirst) {
+          await $.command
+            .register({ name: UNDO_COMMAND, description: 'Forget the memory Engram captured most recently' })
+            .catch(() => {})
+        }
       } catch {
         // A failed lookup costs the toast and nothing else.
       }
@@ -95,7 +95,7 @@ export const register: Register = (on, options) => {
 
   if (chimeOnRecalls) {
     on('state.set', { plugin: 'engram', key: 'lens' }, ($, e, next) => {
-      if (isNewHighRecall(e.value, e.previous)) $.audio.play({ url: 'file://' + chimeSound }).catch(() => {})
+      if (isNewHighRecall(e.value, e.previous)) $.audio.play(CHIME).catch(() => {})
       return next(e)
     })
   }
