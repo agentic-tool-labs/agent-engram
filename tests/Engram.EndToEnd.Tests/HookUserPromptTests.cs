@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
@@ -244,10 +245,12 @@ public class HookUserPromptTests
         Assert.Single(ReadCapturedStatements(home.Root));
     }
 
-    // The guard against matching on promptSource alone: the peer message's own record is the
+    // The guard against taking the newest typed record: the peer message's own record is the
     // newest promptSource line and says "system", while an earlier typed record says something
-    // else. Taking the newest typed record, or the newest record of any kind without checking its
-    // text, would vouch for the peer message.
+    // else. A rule that looked for the newest typed record would vouch for the peer message
+    // with it. It does not guard the text binding itself — the peer record is the newest
+    // promptSource line, so an unbound newest-line rule rejects it too; that is held by
+    // DoesNotCaptureWhenNoRecordMatchesThePromptText.
     [Fact]
     public void DoesNotCaptureAPeerMessageAfterAnEarlierTypedPrompt()
     {
@@ -408,19 +411,26 @@ public class HookUserPromptTests
         Assert.Equal(captured ? 1 : 0, ReadCapturedStatements(home.Root).Count);
     }
 
-    // Nothing for the classifier to find means the transcript is never opened, so a path that
-    // would fail the read cannot matter: no output, no error.
+    // Nothing for the classifier to find means the transcript is never opened. A FIFO makes the
+    // open observable: opening it for reading blocks until a writer appears, so a hook that
+    // opened it would hang until the process helper's bound kills it and throws. A directory or
+    // a missing file would fail the open quietly and look identical to not opening at all.
     [Fact]
     public void DoesNotOpenTheTranscriptWhenTheClassifierFindsNothing()
     {
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+        Assert.SkipUnless(!OperatingSystem.IsWindows(), "mkfifo is not available on Windows.");
 
         using var home = new TestHome();
-        var directoryAsTranscript = Path.Combine(home.Root, "transcript-is-a-directory");
-        Directory.CreateDirectory(directoryAsTranscript);
+        var fifo = Path.Combine(home.Root, "transcript.fifo");
+        using (var mkfifo = Process.Start(new ProcessStartInfo("mkfifo") { ArgumentList = { fifo } })!)
+        {
+            mkfifo.WaitForExit();
+            Assert.Equal(0, mkfifo.ExitCode);
+        }
 
         var (exitCode, stdout, stderr) = EngramProcess.RunWithStdin(
-            home.Root, Payload("run the tests", directoryAsTranscript), "hook", "user-prompt");
+            home.Root, Payload("run the tests", fifo), "hook", "user-prompt");
 
         Assert.Equal(0, exitCode);
         Assert.Equal(string.Empty, stdout);
