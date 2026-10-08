@@ -148,6 +148,34 @@ public class EmbedStatusJsonTests
         Assert.Equal("embeddings are off — engram init --with-embeddings", json.GetProperty("note").GetString());
     }
 
+    /// <summary>
+    /// A note left behind by an earlier configuration describes a loop that is no longer in force, so
+    /// with the provider off its rate, eta and last error are not copied beside <c>provider: null</c>.
+    /// Controlled pair: the same live note under a configured provider keeps all three.
+    /// </summary>
+    [Fact]
+    public void EmbeddingsOff_DoesNotCopyALeftoverNotesRateEtaOrLastError()
+    {
+        using var sandbox = new SandboxHome();
+        var now = DateTimeOffset.UtcNow;
+        EmbeddingProgress.Write(sandbox.Home, Note(now.AddSeconds(-3), error: "old failure from an earlier provider"));
+
+        var off = EmbedStatus.Read(sandbox.Home, now) with { Embedded = 10, Pending = 90 };
+        Assert.Equal("none", off.Provider);
+        var offJson = Json(off, now);
+
+        Assert.Equal(JsonValueKind.Null, offJson.GetProperty("provider").ValueKind);
+        Assert.Equal(JsonValueKind.Null, offJson.GetProperty("rate").ValueKind);
+        Assert.Equal(JsonValueKind.Null, offJson.GetProperty("eta").ValueKind);
+        Assert.Equal(JsonValueKind.Null, offJson.GetProperty("last_error").ValueKind);
+
+        var on = Json(Configured(sandbox, now, 10, 90), now);
+
+        Assert.StartsWith("5.0/s mean since", on.GetProperty("rate").GetString(), StringComparison.Ordinal);
+        Assert.StartsWith("~", on.GetProperty("eta").GetString(), StringComparison.Ordinal);
+        Assert.Equal("old failure from an earlier provider", on.GetProperty("last_error").GetString());
+    }
+
     /// <summary>Nearest non-matching input to the off rule: a configured provider keeps its name.</summary>
     [Fact]
     public void ProviderConfigured_KeepsItsNameAndCounts()

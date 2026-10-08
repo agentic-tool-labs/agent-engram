@@ -227,7 +227,9 @@ public static class EmbedStatus
         ArgumentNullException.ThrowIfNull(view);
 
         // Embeddings off: nothing is embedded or embeddable by this configuration, whatever the
-        // store holds, and the reason is the note the text report gives for it.
+        // store holds, and the reason is the note the text report gives for it. The rate, eta and
+        // last error describe a loop under some provider, so a note left behind by an earlier
+        // configuration is not copied beside a provider that is null.
         var off = view.Provider == "none";
         var info = Backlog(view, now);
         var backlog = off
@@ -240,11 +242,11 @@ public static class EmbedStatus
             off ? 0 : view.Embedded,
             off ? 0 : view.Total,
             off ? 0 : view.Pending,
-            RateText(view),
-            EtaText(view),
+            off ? null : RateText(view),
+            off ? null : EtaText(view),
             backlog,
             view.Note,
-            view.Progress?.LastError is { Length: > 0 } error ? error : null);
+            !off && view.Progress?.LastError is { Length: > 0 } error ? error : null);
 
         return JsonSerializer.Serialize(json, EmbedStatusJsonContext.Default.EmbedStatusJson);
     }
