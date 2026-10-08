@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { EDIT_TOOLS, SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
-import { ANY_SESSION_START } from '../shared/events'
+import { ANY_SESSION_START, ANY_TURN_COMPLETE } from '../shared/events'
 import {
   DIGEST_INITIAL,
   DIGEST_SYSTEM,
@@ -11,13 +11,12 @@ import {
   PANE,
   buildTranscript,
   digestEvery,
+  fingerprint,
   parseCandidates,
   shouldDigest,
 } from './digest'
 
 const MOD = 'digest'
-// The engine's tool union has no MultiEdit on every build, so the shared list is matched as a pattern.
-const EDIT_TOOL = new RegExp(`^(${EDIT_TOOLS.join('|')})$`)
 
 // The scanner reads an atom's reference only from a const of the file that uses it.
 const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, SHARED_INITIAL)
@@ -39,10 +38,13 @@ const bindIo = ($: EngineInterface): ModIo => ({
 async function runDigest($: EngineInterface): Promise<void> {
   try {
     const messages = await $.session.messages()
-    const { seenMessages } = await read($, DIGEST)
-    // A compaction can shorten the conversation below the mark; then everything is new.
-    const fresh = seenMessages <= messages.length ? messages.slice(seenMessages) : messages
-    await update($, DIGEST, (s) => ({ ...s, seenMessages: messages.length }))
+    const { seenMessages, lastSeen } = await read($, DIGEST)
+    // The mark counts only while the row before it is still the one last read; a compaction
+    // that rewrote the conversation moves rows under the count, and then everything is new.
+    const isMarkValid = seenMessages > 0 && seenMessages <= messages.length && fingerprint(messages[seenMessages - 1]!) === lastSeen
+    const fresh = isMarkValid ? messages.slice(seenMessages) : messages
+    const last = messages.at(-1)
+    await update($, DIGEST, (s) => ({ ...s, seenMessages: messages.length, lastSeen: last === undefined ? '' : fingerprint(last) }))
 
     const transcript = buildTranscript(fresh)
     if (transcript === '') return
@@ -81,13 +83,19 @@ async function saveTicked($: EngineInterface): Promise<void> {
   const sessionId = await io.sessionId()
   const saved: string[] = []
   const failed: string[] = []
+  const failedTexts = new Set<string>()
   for (const { text } of ticked) {
     const res = await modApi(io, 'remember', { session_id: sessionId, statement: text, evidence: EVIDENCE }, { mod: MOD })
     if (res.ok) saved.push(`[${res.value.handle}]`)
-    else failed.push(`Not saved: "${text}" (${res.reason})`)
+    else {
+      failed.push(`Not saved: "${text}" (${res.reason})`)
+      failedTexts.add(text)
+    }
   }
-  await update($, DIGEST, (s) => ({ ...s, candidates: [] }))
-  await $.ui.close({ id: PANE })
+  // Rows that did not save stay, unticked, so the user can press Save again; nothing retries on its own.
+  const kept = candidates.filter((c) => failedTexts.has(c.text)).map((c) => ({ ...c, ticked: false }))
+  await update($, DIGEST, (s) => ({ ...s, candidates: kept }))
+  if (kept.length === 0) await $.ui.close({ id: PANE })
   const lines = saved.length > 0 ? [`Saved ${saved.join(', ')}`, ...failed] : failed
   $.ui.toast(lines.join('\n'))
 }
@@ -101,33 +109,43 @@ export const register: Register = (on, options) => {
   const every = digestEvery(options)
 
   on('session.start', ANY_SESSION_START, async ($, e, next) => {
-    await $.command.register({
-      name: 'digest-review',
-      description: 'Review the memory candidates the auto-digest proposed',
-    })
-    await $.command.register({
-      name: 'remember-selection',
-      description: 'Put the selected text in the prompt as "Remember this: …" so you can edit it and submit',
-    })
+    // The event is shared with other mods; a failure here must not stop their hooks.
+    try {
+      await $.command.register({
+        name: 'digest-review',
+        description: 'Review the memory candidates the auto-digest proposed',
+      })
+      await $.command.register({
+        name: 'remember-selection',
+        description: 'Put the selected text in the prompt as "Remember this: …" so you can edit it and submit',
+      })
+    } catch {
+      // The commands are missing, nothing else is affected.
+    }
     return next(e)
   })
 
-  on('tool.call', { tool: EDIT_TOOL }, async ($, e, next) => {
+  on('tool.call', { tool: EDIT_TOOLS }, async ($, e, next) => {
     const ran = await next(e)
     await update($, DIGEST, (s) => ({ ...s, editedThisTurn: true }))
     return ran
   })
 
-  on('turn.complete', async ($, e, next) => {
+  on('turn.complete', ANY_TURN_COMPLETE, async ($, e, next) => {
     if (every === 0 || e.agentId !== undefined || e.isAborted || e.reason !== 'answer') return next(e)
 
-    let isDue = false
-    await update($, DIGEST, (s) => {
-      const turns = s.turnsSinceDigest + 1
-      isDue = shouldDigest(every, turns, s.editedThisTurn)
-      return { ...s, turnsSinceDigest: isDue ? 0 : turns, editedThisTurn: false }
-    })
-    if (isDue) $.clock.after(0, () => runDigest($))
+    // The event is shared with other mods; a failure here must not stop their hooks.
+    try {
+      let isDue = false
+      await update($, DIGEST, (s) => {
+        const turns = s.turnsSinceDigest + 1
+        isDue = shouldDigest(every, turns, s.editedThisTurn)
+        return { ...s, turnsSinceDigest: isDue ? 0 : turns, editedThisTurn: false }
+      })
+      if (isDue) $.clock.after(0, () => runDigest($))
+    } catch {
+      // This turn is not counted.
+    }
     return next(e)
   })
 
