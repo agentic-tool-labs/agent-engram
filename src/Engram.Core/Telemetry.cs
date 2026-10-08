@@ -327,7 +327,15 @@ public sealed record TelemetryRecord(
 
     /// <summary>The caller's stated recall mode (<c>shadow</c> or <c>inject</c>), recorded and never acted
     /// on. Only <see cref="TelemetryEventKind.ModCall"/> sets this.</summary>
-    [property: JsonPropertyName("mode")] string? Mode = null);
+    [property: JsonPropertyName("mode")] string? Mode = null,
+
+    /// <summary>
+    /// How long the server spent on a mod's recall, in milliseconds, from before the search to after
+    /// the digest was built — it excludes reading the request and writing the response, so it is the
+    /// server's share of the latency and not the caller's. Only a <see cref="TelemetryEventKind.ModCall"/>
+    /// recall sets this; the other operations are not on a latency budget anyone reads.
+    /// </summary>
+    [property: JsonPropertyName("duration_ms")] double? DurationMs = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

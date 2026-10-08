@@ -81,6 +81,24 @@ public class ModApiTests
     }
 
     [Fact]
+    public void ModCall_CarriesTheServersRecallDuration_OnRecallOnly()
+    {
+        using var sandbox = new SandboxHome();
+        var handle = Remember(sandbox, "A note to retract and recall.");
+        Call(sandbox, "recall", new JsonObject { ["session_id"] = Session, ["query"] = "retract recall" });
+        Call(sandbox, "forget", new JsonObject { ["session_id"] = Session, ["fact_id"] = handle });
+
+        var calls = Telemetry(sandbox, TelemetryEventKind.ModCall);
+        var recall = Assert.Single(calls, c => c.Tool == "recall");
+
+        Assert.NotNull(recall.DurationMs);
+        Assert.True(recall.DurationMs >= 0 && recall.DurationMs < 60_000, recall.DurationMs.ToString());
+        Assert.Null(recall.FactCount);
+        Assert.All(calls.Where(c => c.Tool != "recall"), c => Assert.Null(c.DurationMs));
+        Assert.Equal(2, calls.Count(c => c.Tool != "recall"));
+    }
+
+    [Fact]
     public void Recall_TextIsByteIdenticalToTheMcpToolForTheSameQuery()
     {
         using var sandbox = new SandboxHome();

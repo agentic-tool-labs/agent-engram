@@ -118,11 +118,13 @@ public static class ModApi
             throw Bad("mode must be 'shadow' or 'inject'");
         }
 
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var detail = RecallSearch.Run(home, local, query, request.BudgetTokens, sessionId, pinnedFactIds: null);
         var result = detail.Result;
+        var durationMs = Math.Round(System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds, 2);
 
         var coverage = RecallEngine.ToText(result.Coverage);
-        RecordCall(home, request, sessionId, "recall", query, coverage);
+        RecordCall(home, request, sessionId, "recall", query, coverage, durationMs);
 
         var response = new ModRecallResponse(
             coverage, result.FactCount, [.. detail.Notes], detail.Gaps, result.Text,
@@ -319,7 +321,8 @@ public static class ModApi
     }
 
     private static void RecordCall(
-        EngramHome home, ModRequest request, string sessionId, string tool, string? query = null, string? coverage = null) =>
+        EngramHome home, ModRequest request, string sessionId, string tool, string? query = null, string? coverage = null,
+        double? durationMs = null) =>
         Telemetry.Append(home, new TelemetryRecord(
             Timestamp: DateTime.UtcNow.ToString("o"),
             SessionId: sessionId,
@@ -328,7 +331,8 @@ public static class ModApi
             Coverage: coverage,
             Tool: tool,
             Mod: request.Mod,
-            Mode: request.Mode));
+            Mode: request.Mode,
+            DurationMs: durationMs));
 
     private static string RequireSession(ModRequest request)
     {
