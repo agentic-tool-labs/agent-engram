@@ -521,4 +521,5 @@ test('a failing release after a refusal from below: the refusal still comes back
   expect(r.injected).toContain('set:sentinel')
   expect(denyOf(out)).toBe('no')
   expect(r.toasts.length).toBe(0)
+  expect(digestSawEdit(r)).toBe(true)
 })
