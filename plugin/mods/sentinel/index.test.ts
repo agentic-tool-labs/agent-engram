@@ -70,8 +70,12 @@ function rig(
     panes.push(e)
     return { value: { isPlaced: true as const } }
   })
-  on('command.register', (_$, e) => ({ value: { command: e.name } }))
-  return { router, clock, ran, toasts, toastedAfterRuns, control, panes }
+  const registered: string[] = []
+  on('command.register', (_$, e) => {
+    registered.push(e.name)
+    return { value: { command: e.name } }
+  })
+  return { router, clock, ran, toasts, toastedAfterRuns, control, panes, registered }
 }
 
 const edit = (file_path: string, extra: object = {}) =>
@@ -181,6 +185,14 @@ test('an engine failure inside the hook fails open: the edit still runs, nothing
   expect(denyOf(out)).toBeUndefined()
   expect(contextOf(out)).toBeUndefined()
   expect(r.ran.length).toBe(1)
+})
+
+test('session start registers /invariant and /why', async ($, on) => {
+  const r = rig(on)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+  expect(r.registered).toContain('invariant')
+  expect(r.registered).toContain('why')
 })
 
 test('Write is matched too', async ($, on) => {
