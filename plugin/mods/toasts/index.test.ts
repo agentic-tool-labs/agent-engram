@@ -16,12 +16,23 @@ const forgot =
   (retracted: boolean): FetchHandler =>
   () => ({ status: 200, json: { handle: 'f2', retracted } })
 
-type Rig = { toasts: string[]; clips: unknown[]; commands: string[]; deny: { audio: boolean; register: boolean }; order: string[]; router: ReturnType<typeof installFakeEngine> }
+type Rig = { toasts: string[]; clips: unknown[]; commands: string[]; deny: { audio: boolean; register: boolean }; boom: boolean; order: string[]; router: ReturnType<typeof installFakeEngine> }
 
 function rig(on: On, ops: RoutingTable['ops'] = {}, table: RoutingTable = {}): Rig {
   mock.clock(on, { now: NOW_MS })
-  const r: Rig = { toasts: [], clips: [], commands: [], deny: { audio: false, register: false }, order: [], router: undefined as never }
-  r.router = installFakeEngine(on, { binary: BIN, cli: RUNNING, ...table, ops })
+  const r: Rig = { toasts: [], clips: [], commands: [], deny: { audio: false, register: false }, boom: false, order: [], router: undefined as never }
+  const routing: RoutingTable = {
+    binary: BIN,
+    cli: RUNNING,
+    ...table,
+    ops,
+    get sessionId() {
+      if (r.boom) throw new Error('session id unavailable')
+      return table.sessionId
+    },
+  }
+  r.router = installFakeEngine(on, routing)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }) as never)
   on('ui.toast', (_$, e) => (r.toasts.push(e.text), { value: undefined }))
   on('audio.play', (_$, e) => (r.deny.audio ? { deny: 'refused' } : (r.clips.push(e.clip), { value: undefined })))
   on('command.register', (_$, e) => (r.deny.register ? { deny: 'taken' } : (r.commands.push(e.name), { value: undefined })) as never)
@@ -198,7 +209,6 @@ test('a play that is refused is silent and the toasts still show', { options: { 
   r.deny.audio = true
   await submit($, 'I like tea')
   expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT])
-  expect(r.commands).toEqual(['undo-capture'])
 })
 
 test('the first capture toast of a session carries the undo hint; the second does not', async ($, on) => {
@@ -215,25 +225,59 @@ test('only the first toast of the first batch carries the hint', async ($, on) =
   expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT, 'Remembered [f2]: b'])
 })
 
-test('/undo-capture is not registered while nothing was captured', async ($, on) => {
-  const r = rig(on, { captures: reply() })
-  await submit($, 'no capture here')
-  expect(r.commands).toEqual([])
+const undoRegs = (r: Rig) => r.commands.filter((n) => n === 'undo-capture')
+const start = ($: Engine) => $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true } as never)
+
+test('session start registers /undo-capture before any capture, and a capture does not register it again', async ($, on) => {
+  const r = rig(on, { captures: reply(capture('f1', 'a')) })
+  await start($)
+  expect(undoRegs(r)).toEqual(['undo-capture'])
+  await submit($, 'I like tea')
+  expect(undoRegs(r)).toEqual(['undo-capture'])
 })
 
-test('/undo-capture is registered once, when the first capture is toasted', async ($, on) => {
-  let n = 0
-  const r = rig(on, { captures: () => ({ status: 200, json: { captures: [capture(`f${++n}`, 'x')] } }) })
-  await submit($, 'one')
-  await submit($, 'two')
-  expect(r.commands).toEqual(['undo-capture'])
+test('no registration happens without a session start', async ($, on) => {
+  const r = rig(on, { captures: reply(capture('f1', 'a')) })
+  await submit($, 'I like tea')
+  expect(undoRegs(r)).toEqual([])
 })
 
-test('a failing command registration costs nothing: the toast already showed', async ($, on) => {
+test('a command that cannot register does not stop session start or the toasts', async ($, on) => {
   const r = rig(on, { captures: reply(capture('f1', 'a')) })
   r.deny.register = true
+  await start($)
   await submit($, 'I like tea')
   expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT])
+})
+
+test('toasts_enabled false registers no command', { options: { toasts_enabled: false } }, async ($, on) => {
+  const r = rig(on, {})
+  await start($)
+  expect(undoRegs(r)).toEqual([])
+})
+
+test('a prompt event with no text still reaches next and throws nothing', async ($, on) => {
+  const r = rig(on, { captures: reply(capture('f1', 'a')) })
+  await $.classic.UserPromptSubmit({ prompt: undefined } as never)
+  expect(r.order).toEqual(['next'])
+  expect(r.router.fetchCalls.length).toBe(0)
+})
+
+test('an unavailable session id costs the toast, never the chain', async ($, on) => {
+  const r = rig(on, { captures: reply(capture('f1', 'a')) })
+  r.boom = true
+  expect(await submit($, 'I like tea')).toEqual({})
+  expect(r.toasts).toEqual([])
+})
+
+test('undo with an unavailable session id answers nothing and throws nothing', async ($, on) => {
+  const r = rig(on, { captures: reply(capture('f1', 'a')), forget: forgot(true) })
+  await submit($, 'I like tea')
+  r.toasts.length = 0
+  r.boom = true
+  expect(await undo($)).toEqual({})
+  expect(r.toasts).toEqual([])
+  expect(calls(r, 'forget').length).toBe(0)
 })
 
 test('a system-sourced prompt with no new capture: one captures call, no toast', async ($, on) => {

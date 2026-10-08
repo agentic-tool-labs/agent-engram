@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
+import { ANY_SESSION_START } from '../shared/events'
 
 // The scanner reads an atom's reference only from a const of the file that uses it.
 const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, SHARED_INITIAL)
@@ -39,11 +40,21 @@ export const register: Register = (on, options) => {
   const chimeOnRecalls = chime === 'recalls' || chime === 'both'
 
   if (toastsEnabled) {
-    on('classic.UserPromptSubmit', async ($, e, next) => {
-      if (e.prompt.startsWith('/')) return next(e)
-      const io = bindIo($)
-      let since = 0
+    on('session.start', ANY_SESSION_START, async ($, e, next) => {
       try {
+        await $.command.register({ name: UNDO_COMMAND, description: 'Forget the memory Engram captured most recently' })
+      } catch {
+        // A command that cannot register costs the undo and nothing else.
+      }
+      return next(e)
+    })
+
+    on('classic.UserPromptSubmit', async ($, e, next) => {
+      let io: ModIo
+      let since: number
+      try {
+        if (e.prompt.startsWith('/')) return next(e)
+        io = bindIo($)
         since = Math.floor((await io.now()) / 1000) - 1
       } catch {
         return next(e)
@@ -66,9 +77,6 @@ export const register: Register = (on, options) => {
         })
         fresh.forEach((c, i) => $.ui.toast(`Remembered [${c.handle}]: ${c.body}${isFirst && i === 0 ? UNDO_HINT : ''}`))
         if (chimeOnCaptures && fresh.length > 0) $.audio.play(CHIME).catch(() => {})
-        if (isFirst) {
-          await $.command.register({ name: UNDO_COMMAND, description: 'Forget the memory Engram captured most recently' })
-        }
       } catch {
         // A failed lookup costs the toast and nothing else.
       }
@@ -76,24 +84,32 @@ export const register: Register = (on, options) => {
     })
 
     on('command.run', { command: UNDO_COMMAND }, async ($, e, next) => {
-      const io = bindIo($)
-      const { shown } = await read($, TOASTS)
-      const handle = shown[shown.length - 1]
-      if (handle === undefined) {
-        $.ui.toast('No captured memory to forget')
-        return {}
+      try {
+        const io = bindIo($)
+        const { shown } = await read($, TOASTS)
+        const handle = shown[shown.length - 1]
+        if (handle === undefined) {
+          $.ui.toast('No captured memory to forget')
+          return {}
+        }
+        const done = await modApi(io, 'forget', { session_id: await io.sessionId(), fact_id: handle }, { mod: 'toasts' })
+        if (!done.ok) $.ui.toast(`Could not forget [${handle}]: ${done.detail ?? done.reason}`)
+        else if (done.value.retracted) $.ui.toast(`Forgot [${handle}]`)
+        else $.ui.toast(`[${handle}] is already forgotten`)
+      } catch {
+        // The command answers nothing rather than failing the chain.
       }
-      const done = await modApi(io, 'forget', { session_id: await io.sessionId(), fact_id: handle }, { mod: 'toasts' })
-      if (!done.ok) $.ui.toast(`Could not forget [${handle}]: ${done.detail ?? done.reason}`)
-      else if (done.value.retracted) $.ui.toast(`Forgot [${handle}]`)
-      else $.ui.toast(`[${handle}] is already forgotten`)
       return {}
     })
   }
 
   if (chimeOnRecalls) {
     on('state.set', { plugin: 'engram', key: 'lens' }, ($, e, next) => {
-      if (isNewHighRecall(e.value, e.previous)) $.audio.play(CHIME).catch(() => {})
+      try {
+        if (isNewHighRecall(e.value, e.previous)) $.audio.play(CHIME).catch(() => {})
+      } catch {
+        // A chime that cannot start costs the chime.
+      }
       return next(e)
     })
   }
