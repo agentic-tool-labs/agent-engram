@@ -40,6 +40,7 @@ function rig(
     binary?: string
     toolContext?: readonly string[]
     toolDeny?: string
+    noCwd?: boolean
   } = {},
 ) {
   const router = installFakeEngine(on, {
@@ -50,15 +51,19 @@ function rig(
   const clock = mock.clock(on)
   const ran: Record<string, unknown>[] = []
   const toasts: string[] = []
+  const toastedAfterRuns: number[] = []
+  const control: { deny?: string; fail?: boolean } = { deny: opts.toolDeny }
   const panes: { id: string; title?: string }[] = []
-  on('session.cwd', () => ({ value: '/repo' }))
+  if (opts.noCwd !== true) on('session.cwd', () => ({ value: '/repo' }))
   on('tool.call', (_$, e) => {
+    if (control.fail === true) throw new Error('tool failed')
     ran.push({ ...e })
-    if (opts.toolDeny !== undefined) return { deny: opts.toolDeny }
+    if (control.deny !== undefined) return { deny: control.deny }
     return { ref: 1, result: {}, text: 'ok', ...(opts.toolContext === undefined ? {} : { context: opts.toolContext }) }
   })
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
+    toastedAfterRuns.push(ran.length)
     return { value: undefined }
   })
   on('ui.open', (_$, e) => {
@@ -66,7 +71,7 @@ function rig(
     return { value: { isPlaced: true as const } }
   })
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
-  return { router, clock, ran, toasts, panes }
+  return { router, clock, ran, toasts, toastedAfterRuns, control, panes }
 }
 
 const edit = (file_path: string, extra: object = {}) =>
@@ -121,11 +126,61 @@ test('existing context from the tool is kept, the block follows it', async ($, o
   expect(contextOf(await $.tool.call(edit(FILE)))).toEqual(['earlier', BLOCK])
 })
 
-test('a call the tool side denied gets nothing added', async ($, on) => {
-  rig(on, { path: answer(TWO), toolDeny: 'no' })
+test('a call refused from below gets nothing added and no toast', async ($, on) => {
+  const r = rig(on, { path: answer(TWO), toolDeny: 'no' })
   const out = await $.tool.call(edit(FILE))
   expect(denyOf(out)).toBe('no')
   expect(contextOf(out)).toBeUndefined()
+  expect(r.toasts.length).toBe(0)
+})
+
+test('a refusal from below releases the claim: the retry gets the block and the toast', async ($, on) => {
+  const r = rig(on, { path: answer(TWO), toolDeny: 'no' })
+  await $.tool.call(edit(FILE))
+  r.control.deny = undefined
+  const retry = await $.tool.call(edit(FILE))
+  expect(contextOf(retry)).toEqual([BLOCK])
+  expect(r.toasts).toEqual(['2 invariant(s) recorded for src/a.ts'])
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+  expect(r.toasts.length).toBe(1)
+})
+
+test('a throw from below releases the claim and propagates; the retry gets the block', async ($, on) => {
+  const r = rig(on, { path: answer(TWO) })
+  r.control.fail = true
+  let threw = false
+  try {
+    await $.tool.call(edit(FILE))
+  } catch {
+    threw = true
+  }
+  expect(threw).toBe(true)
+  expect(r.toasts.length).toBe(0)
+  r.control.fail = false
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([BLOCK])
+  expect(r.toasts.length).toBe(1)
+})
+
+test('the toast comes after the edit ran', async ($, on) => {
+  const r = rig(on, { path: answer(TWO) })
+  await $.tool.call(edit(FILE))
+  expect(r.toastedAfterRuns).toEqual([1])
+})
+
+test('deny-once: a refusal from below after the sentinel let the retry through does not reopen the file', { options: { sentinel_mode: 'deny-once' } }, async ($, on) => {
+  const r = rig(on, { path: answer(TWO), toolDeny: 'no' })
+  expect(denyOf(await $.tool.call(edit(FILE)))).toContain('Invariants recorded for src/a.ts')
+  expect(denyOf(await $.tool.call(edit(FILE)))).toBe('no')
+  expect(denyOf(await $.tool.call(edit(FILE)))).toBe('no')
+  expect(pathFactsCalls(r).length).toBe(1)
+})
+
+test('an engine failure inside the hook fails open: the edit still runs, nothing is added', async ($, on) => {
+  const r = rig(on, { path: answer(TWO), noCwd: true })
+  const out = await $.tool.call(edit(FILE))
+  expect(denyOf(out)).toBeUndefined()
+  expect(contextOf(out)).toBeUndefined()
+  expect(r.ran.length).toBe(1)
 })
 
 test('Write is matched too', async ($, on) => {

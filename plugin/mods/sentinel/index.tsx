@@ -1,6 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { EDIT_TOOLS, engramCli, modApi } from '../shared/client'
+import { ANY_SESSION_START } from '../shared/events'
 import type { ModIo } from '../shared/client'
 import type { SentinelState } from '../shared/state'
 import type { PathFact } from '../shared/types'
@@ -83,7 +84,7 @@ function whyRows(why: Why | undefined): Row[] {
 }
 
 export const register: Register = (on, options) => {
-  on('session.start', async ($, e, next) => {
+  on('session.start', ANY_SESSION_START, async ($, e, next) => {
     await $.command.register({
       name: 'invariant',
       description: 'Record an invariant for a file: /invariant <file> <statement>',
@@ -132,9 +133,21 @@ export const register: Register = (on, options) => {
     const block = describe(rel, facts)
     if (mode === 'deny-once') return { deny: block + '\nRe-issue the edit if it respects these.' }
 
+    // `seen` means the model received the block: a call refused from below, or one that threw,
+    // delivered nothing, so the claim goes back and the next edit of the file delivers.
+    const release = () => update($, SENTINEL, (s) => ({ ...s, seen: s.seen.filter((k) => k !== key) }))
+    let ran
+    try {
+      ran = await next(e)
+    } catch (error) {
+      await release()
+      throw error
+    }
+    if (ran.deny !== undefined) {
+      await release()
+      return ran
+    }
     $.ui.toast(`${facts.length} invariant(s) recorded for ${rel}`)
-    const ran = await next(e)
-    if (ran.deny !== undefined) return ran
     return { ...ran, context: [...(ran.context ?? []), block] }
   }).catch(($, e, next) => next(e))
 
