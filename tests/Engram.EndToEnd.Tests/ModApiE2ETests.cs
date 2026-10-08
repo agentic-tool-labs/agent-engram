@@ -80,7 +80,7 @@ public class ModApiE2ETests
         Assert.True(recallCall.GetProperty("duration_ms").GetDouble() >= 0);
         Assert.All(
             modCalls.Where(r => r.GetProperty("tool").GetString() != "recall"),
-            r => Assert.False(r.TryGetProperty("duration_ms", out _)));
+            r => Assert.Equal(JsonValueKind.Null, r.GetProperty("duration_ms").ValueKind));
 
         Assert.Equal(3, KindCount(home, "mod-call"));
         Assert.Equal(0, KindCount(home, "recall"));
