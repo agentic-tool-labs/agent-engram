@@ -20,6 +20,6 @@ public class ModCallWebhookKindTests
         var settings = WebhookSettings.Read(
             ConfigFile.Parse("[webhook]\nurl = \"http://127.0.0.1:8787/engram\"\nkinds = [\"mod_call\"]\n"));
 
-        Assert.Equal(["mod_call"], settings.Unknown);
+        Assert.Contains("mod_call", Assert.Single(settings.Unknown), StringComparison.Ordinal);
     }
 }

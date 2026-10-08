@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Serialization.Metadata;
 using Microsoft.Data.Sqlite;
 
 namespace Engram.Core;
@@ -133,7 +132,7 @@ public static class ModApi
         var coverage = RecallEngine.ToText(result.Coverage);
         RecordCall(home, request, sessionId, "recall", query, coverage);
 
-        return Ok(new ModRecallResponse(coverage, result.FactCount, result.Text), ModApiJsonContext.Default.ModRecallResponse);
+        return Ok(JsonSerializer.Serialize(new ModRecallResponse(coverage, result.FactCount, result.Text), ModApiJsonContext.Default.ModRecallResponse));
     }
 
     private static ModApiResult Fact(EngramHome home, ModRequest request)
@@ -143,11 +142,10 @@ public static class ModApi
         var fact = FactStore.ReadById(connection, factId) ?? throw NotFound(request.FactId!);
         var versions = FactStore.History(connection, fact.SubjectPath, fact.Predicate).Count;
 
-        return Ok(
-            new ModFactResponse(
-                FactCatalog.HandleFor(fact.Id), fact.Id, fact.SubjectPath, fact.Predicate, fact.Body, fact.Details,
-                fact.Scope, fact.LearnedVia, fact.Evidence, fact.ValidFrom, fact.ValidTo, fact.ValidTo is null, versions),
-            ModApiJsonContext.Default.ModFactResponse);
+        var response = new ModFactResponse(
+            FactCatalog.HandleFor(fact.Id), fact.Id, fact.SubjectPath, fact.Predicate, fact.Body, fact.Details,
+            fact.Scope, fact.LearnedVia, fact.Evidence, fact.ValidFrom, fact.ValidTo, fact.ValidTo is null, versions);
+        return Ok(JsonSerializer.Serialize(response, ModApiJsonContext.Default.ModFactResponse));
     }
 
     private static ModApiResult History(EngramHome home, ModRequest request)
@@ -161,7 +159,7 @@ public static class ModApi
                 FactCatalog.HandleFor(v.Id), v.Body, v.ValidFrom, v.ValidTo, v.LearnedVia, ClosedReason(connection, v)))
             .ToArray();
 
-        return Ok(new ModHistoryResponse(fact.SubjectPath, fact.Predicate, versions), ModApiJsonContext.Default.ModHistoryResponse);
+        return Ok(JsonSerializer.Serialize(new ModHistoryResponse(fact.SubjectPath, fact.Predicate, versions), ModApiJsonContext.Default.ModHistoryResponse));
     }
 
     private static string? ClosedReason(SqliteConnection connection, StoredFact version)
@@ -194,7 +192,7 @@ public static class ModApi
             RecordCall(home, request, sessionId, "forget");
         }
 
-        return Ok(new ModForgetResponse(FactCatalog.HandleFor(factId), closed), ModApiJsonContext.Default.ModForgetResponse);
+        return Ok(JsonSerializer.Serialize(new ModForgetResponse(FactCatalog.HandleFor(factId), closed), ModApiJsonContext.Default.ModForgetResponse));
     }
 
     private static ModApiResult Remember(EngramHome home, ModRequest request)
@@ -234,9 +232,7 @@ public static class ModApi
         }
 
         RecordCall(home, request, sessionId, "remember");
-        return Ok(
-            new ModRememberResponse(FactCatalog.HandleFor(factId), factId, !isRepeat),
-            ModApiJsonContext.Default.ModRememberResponse);
+        return Ok(JsonSerializer.Serialize(new ModRememberResponse(FactCatalog.HandleFor(factId), factId, !isRepeat), ModApiJsonContext.Default.ModRememberResponse));
     }
 
     private static ModApiResult Captures(EngramHome home, ModRequest request)
@@ -278,7 +274,7 @@ public static class ModApi
             captures.Add(new ModCapture(FactCatalog.HandleFor(id), id, reader.GetString(1), reader.GetInt64(2)));
         }
 
-        return Ok(new ModCapturesResponse([.. captures]), ModApiJsonContext.Default.ModCapturesResponse);
+        return Ok(JsonSerializer.Serialize(new ModCapturesResponse([.. captures]), ModApiJsonContext.Default.ModCapturesResponse));
     }
 
     private static ModApiResult PathFacts(EngramHome home, ModRequest request)
@@ -293,7 +289,7 @@ public static class ModApi
         using var connection = EngramDatabase.OpenInitialized(home);
         if (CodeEntityResolver.Resolve(connection, path) is not var (entityPath, repoPath))
         {
-            return Ok(new ModPathFactsResponse(null, null, []), ModApiJsonContext.Default.ModPathFactsResponse);
+            return Ok(JsonSerializer.Serialize(new ModPathFactsResponse(null, null, []), ModApiJsonContext.Default.ModPathFactsResponse));
         }
 
         using var command = connection.CreateCommand();
@@ -321,7 +317,7 @@ public static class ModApi
                 reader.GetString(4), reader.GetInt64(5) != 0, reader.GetInt64(6)));
         }
 
-        return Ok(new ModPathFactsResponse(entityPath, repoPath, [.. facts]), ModApiJsonContext.Default.ModPathFactsResponse);
+        return Ok(JsonSerializer.Serialize(new ModPathFactsResponse(entityPath, repoPath, [.. facts]), ModApiJsonContext.Default.ModPathFactsResponse));
     }
 
     private static void RecordCall(
@@ -353,8 +349,7 @@ public static class ModApi
             ? id
             : throw Bad("fact_id is required and looks like 'f42'");
 
-    private static ModApiResult Ok<T>(T value, JsonTypeInfo<T> info) =>
-        new(200, JsonSerializer.Serialize(value, info));
+    private static ModApiResult Ok(string json) => new(200, json);
 
     private static ModApiException Bad(string detail) => new(400, "bad_request", detail);
 
