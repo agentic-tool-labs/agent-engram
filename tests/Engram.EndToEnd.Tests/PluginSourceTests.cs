@@ -165,6 +165,29 @@ public class PluginSourceTests
         Assert.Empty(EventsRegisteredBareMoreThanOnce(ModSourceFiles(tree.Root)));
     }
 
+    // A handler passed by name is as bare as an inline one; a name followed by a comma is a matcher.
+    [Fact]
+    public void BareRegistrationsOfAHandlerPassedByName_AreReported()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", "on('turn.complete', onTurn)\n");
+        tree.Write("mods/b/index.ts", "on('turn.complete', turns.handler).catch(fallback)\non('prompt.submit', function (_$, e, next) { return next(e) })\n");
+
+        var only = Assert.Single(EventsRegisteredBareMoreThanOnce(ModSourceFiles(tree.Root)));
+
+        Assert.StartsWith("turn.complete:", only);
+    }
+
+    [Fact]
+    public void ANamedMatcherBeforeAHandler_IsNotABareRegistration()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", "on('turn.complete', onTurn)\n");
+        tree.Write("mods/b/index.ts", "on('turn.complete', ANY_TURN_COMPLETE, onTurn)\non('turn.complete', ANY_TURN_COMPLETE, async ($, e, next) => next(e))\n");
+
+        Assert.Empty(EventsRegisteredBareMoreThanOnce(ModSourceFiles(tree.Root)));
+    }
+
     [Fact]
     public void TheSameEventRegisteredBareTwiceInOneFile_IsReported()
     {
@@ -205,7 +228,7 @@ public class PluginSourceTests
     }
 
     private static readonly Regex BareRegistrationPattern = new(
-        @"\bon\(\s*['""]([a-z][a-z0-9.]*)['""]\s*,\s*(?:async\s*)?(?:\(|[A-Za-z_$][\w$]*\s*=>)",
+        @"\bon\(\s*['""]([a-z][a-z0-9.]*)['""]\s*,\s*(?:(?:async\s+)?function\b|(?:async\s*)?(?:\(|[A-Za-z_$][\w$]*\s*=>)|[A-Za-z_$][\w$.]*\s*\))",
         RegexOptions.Compiled);
 
     private static List<string> EventsRegisteredBareMoreThanOnce(IEnumerable<string> files)
