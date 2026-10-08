@@ -1,0 +1,6 @@
+// Gate: run scripts/plugin-typecheck.sh from the repo root (the recipe lives there). noEmit stays here so tsc never writes .js beside the sources when the engine types are missing.
+{
+  "extends": "./.claude-plugin/types/tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["hooks", "mods"]
+}

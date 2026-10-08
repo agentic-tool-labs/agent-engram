@@ -159,7 +159,9 @@ internal static class ServeCommand
 
         app.Use(async (context, next) =>
         {
-            if (context.Request.Headers.ContainsKey("Origin"))
+            // Presence, never an allow-list: a browser page on any local dev server sends an Origin
+            // that spells as loopback, and admitting those admits every one of them.
+            if (context.Request.Headers.ContainsKey("Origin") || !IsLoopbackHost(context.Request.Host.Host))
             {
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                 return;
@@ -170,6 +172,9 @@ internal static class ServeCommand
 
         app.MapGet("/health", () =>
             Results.Json(identity.ToHealthPayload(), HealthResponseJsonContext.Default.HealthResponsePayload));
+
+        var localRuntime = app.Services.GetRequiredService<LocalRuntime>();
+        app.Map("/mod/v1/{op}", (HttpContext context, string op) => HandleModCall(context, op, home, localRuntime));
 
         // On ApplicationStarted rather than beside app.Run(), so the event means the server is
         // accepting requests rather than about to try and possibly fail on a bound port.
@@ -222,6 +227,78 @@ internal static class ServeCommand
 
         app.Run();
         return 0;
+    }
+
+    /// <summary>
+    /// A request whose Host is anything but this machine's loopback is a DNS-rebinding attempt: the
+    /// browser still believes it is talking to the attacker's name, so it sends no Origin on a GET
+    /// and the Origin gate alone would pass it.
+    /// </summary>
+    internal static bool IsLoopbackHost(string host) =>
+        host.Equals("127.0.0.1", StringComparison.Ordinal)
+        || host.Equals("[::1]", StringComparison.Ordinal)
+        || host.Equals("localhost", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The HTTP envelope of the mod API; everything past it is <see cref="ModApi.Execute"/>. Each
+    /// check runs before the body is read, so a rejected request costs no parse and no write.
+    /// </summary>
+    private static async Task HandleModCall(HttpContext context, string op, EngramHome home, LocalRuntime local)
+    {
+        var request = context.Request;
+        if (!HttpMethods.IsPost(request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return;
+        }
+
+        if (!ModApi.IsKnownOp(op))
+        {
+            await WriteModResult(context, ModApi.Error(404, "not_found", $"unknown operation '{op}'"));
+            return;
+        }
+
+        var mediaType = (request.ContentType ?? string.Empty).Split(';')[0].Trim();
+        if (!mediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase))
+        {
+            await WriteModResult(context, ModApi.Error(415, "unsupported_media_type", "Content-Type must be application/json"));
+            return;
+        }
+
+        var headerMod = request.Headers["X-Engram-Mod"].ToString();
+        if (!ModApi.IsModName(headerMod))
+        {
+            await WriteModResult(context, ModApi.Error(400, "bad_request", "X-Engram-Mod header is required: 1 to 32 of a-z, 0-9, '-'"));
+            return;
+        }
+
+        if (request.ContentLength > ModApi.MaxBodyBytes)
+        {
+            await WriteModResult(context, ModApi.Error(413, "too_large", "body exceeds 64 KiB"));
+            return;
+        }
+
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        int read;
+        while ((read = await request.Body.ReadAsync(chunk)) > 0)
+        {
+            buffer.Write(chunk, 0, read);
+            if (buffer.Length > ModApi.MaxBodyBytes)
+            {
+                await WriteModResult(context, ModApi.Error(413, "too_large", "body exceeds 64 KiB"));
+                return;
+            }
+        }
+
+        await WriteModResult(context, ModApi.Execute(home, local, op, headerMod, buffer.GetBuffer().AsSpan(0, (int)buffer.Length)));
+    }
+
+    private static Task WriteModResult(HttpContext context, ModApiResult result)
+    {
+        context.Response.StatusCode = result.Status;
+        context.Response.ContentType = "application/json; charset=utf-8";
+        return context.Response.WriteAsync(result.Json);
     }
 
     private static McpSessionId ResolveSessionId(

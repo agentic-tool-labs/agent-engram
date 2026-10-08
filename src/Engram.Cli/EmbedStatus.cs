@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Engram.Core;
 
 namespace Engram.Cli;
@@ -129,13 +131,9 @@ public static class EmbedStatus
 
         // Stated as a mean, and only while something is running. A rate left over from a server
         // that has stopped describes nothing that is happening now.
-        lines.Add(view.Live && view.Progress?.RatePerSecond is { } rate
-            ? $"  rate       {rate.ToString("0.0", CultureInfo.InvariantCulture)}/s mean since "
-                + view.Progress.StartedAt.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture)
-            : "  rate       —");
-
-        lines.Add($"  eta        {(view.Eta is { } eta ? "~" + Duration(eta) : "—")}");
-        lines.Add($"  backlog    {Backlog(view, now)}");
+        lines.Add($"  rate       {RateText(view) ?? "—"}");
+        lines.Add($"  eta        {EtaText(view) ?? "—"}");
+        lines.Add($"  backlog    {Backlog(view, now).Text}");
 
         if (view.Note is { } note)
         {
@@ -165,14 +163,43 @@ public static class EmbedStatus
         return lines;
     }
 
-    private static string Backlog(EmbedStatusView view, DateTimeOffset now)
+    private static string? RateText(EmbedStatusView view) =>
+        view.Live && view.Progress?.RatePerSecond is { } rate
+            ? $"{rate.ToString("0.0", CultureInfo.InvariantCulture)}/s mean since "
+                + view.Progress.StartedAt.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture)
+            : null;
+
+    private static string? EtaText(EmbedStatusView view) =>
+        view.Eta is { } eta ? "~" + Duration(eta) : null;
+
+    /// <summary>One computation of the backlog's state; the text and JSON renderings both read it.</summary>
+    private readonly record struct BacklogInfo(string State, int? Pid, int? LastUpdateSeconds, string? Reason)
+    {
+        /// <summary>The line <c>embed --status</c> prints after <c>backlog</c>.</summary>
+        public string Text => State switch
+        {
+            "running" => $"running, pid {Pid}, last update {Age}",
+            "stalled" => "stalled or stopped — " + Reason,
+            "unavailable" => "not running — " + Reason,
+            _ => Reason is null ? "not running" : "not running — " + Reason,
+        };
+
+        private string Age => Duration(TimeSpan.FromSeconds(LastUpdateSeconds ?? 0)) + " ago";
+    }
+
+    private static BacklogInfo Backlog(EmbedStatusView view, DateTimeOffset now)
     {
         if (view.Progress is not { } progress)
         {
-            return view.Pending > 0
-                ? "not running — start the server with `engram start`"
-                : "not running";
+            return new BacklogInfo(
+                "not-running",
+                null,
+                null,
+                view.Pending > 0 ? "start the server with `engram start`" : null);
         }
+
+        var span = now - progress.UpdatedAt;
+        var seconds = (int)Math.Max(0, span.TotalSeconds);
 
         // The server declined to start the loop and said why. Reported ahead of the staleness
         // branch and without regard to age: this was the case that sent a person to start a server
@@ -180,16 +207,48 @@ public static class EmbedStatus
         // nobody asking this question has cause to open.
         if (progress.Outcome == EmbeddingProgress.Unavailable)
         {
-            return $"not running — {progress.LastError}";
+            return new BacklogInfo("unavailable", progress.Pid, seconds, progress.LastError);
         }
-
-        var age = Duration(now - progress.UpdatedAt);
 
         // A note whose timestamp has gone stale is the signal this file exists for: a loop that is
         // merely slow still stamps it every pass, so one that has stopped stamping is stuck or gone.
         return view.Live
-            ? $"running, pid {progress.Pid}, last update {age} ago"
-            : $"stalled or stopped — pid {progress.Pid} last reported {age} ago";
+            ? new BacklogInfo("running", progress.Pid, seconds, null)
+            : new BacklogInfo(
+                "stalled",
+                progress.Pid,
+                seconds,
+                $"pid {progress.Pid} last reported {Duration(span)} ago");
+    }
+
+    /// <summary>The report as one JSON object, built from the same view the text is rendered from.</summary>
+    public static string ToJson(EmbedStatusView view, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(view);
+
+        // Embeddings off: nothing is embedded or embeddable by this configuration, whatever the
+        // store holds, and the reason is the note the text report gives for it. The rate, eta and
+        // last error describe a loop under some provider, so a note left behind by an earlier
+        // configuration is not copied beside a provider that is null.
+        var off = view.Provider == "none";
+        var info = Backlog(view, now);
+        var backlog = off
+            ? new EmbedBacklogJson("not-running", null, null, view.Note)
+            : new EmbedBacklogJson(info.State, info.Pid, info.LastUpdateSeconds, info.Reason);
+
+        var json = new EmbedStatusJson(
+            off ? null : view.Space,
+            off ? null : view.Provider,
+            off ? 0 : view.Embedded,
+            off ? 0 : view.Total,
+            off ? 0 : view.Pending,
+            off ? null : RateText(view),
+            off ? null : EtaText(view),
+            backlog,
+            view.Note,
+            !off && view.Progress?.LastError is { Length: > 0 } error ? error : null);
+
+        return JsonSerializer.Serialize(json, EmbedStatusJsonContext.Default.EmbedStatusJson);
     }
 
     private static string Duration(TimeSpan span)
@@ -204,3 +263,25 @@ public static class EmbedStatus
             : $"{(int)span.TotalSeconds}s";
     }
 }
+
+internal sealed record EmbedStatusJson(
+    [property: JsonPropertyName("space")] string? Space,
+    [property: JsonPropertyName("provider")] string? Provider,
+    [property: JsonPropertyName("embedded")] int Embedded,
+    [property: JsonPropertyName("total")] int Total,
+    [property: JsonPropertyName("remaining")] int Remaining,
+    [property: JsonPropertyName("rate")] string? Rate,
+    [property: JsonPropertyName("eta")] string? Eta,
+    [property: JsonPropertyName("backlog")] EmbedBacklogJson Backlog,
+    [property: JsonPropertyName("note")] string? Note,
+    [property: JsonPropertyName("last_error")] string? LastError);
+
+internal sealed record EmbedBacklogJson(
+    [property: JsonPropertyName("state")] string State,
+    [property: JsonPropertyName("pid")] int? Pid,
+    [property: JsonPropertyName("last_update_seconds")] int? LastUpdateSeconds,
+    [property: JsonPropertyName("reason")] string? Reason);
+
+[JsonSourceGenerationOptions(WriteIndented = true)]
+[JsonSerializable(typeof(EmbedStatusJson))]
+internal sealed partial class EmbedStatusJsonContext : JsonSerializerContext;

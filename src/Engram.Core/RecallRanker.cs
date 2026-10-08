@@ -203,12 +203,32 @@ public static class RecallRanker
         long? currentSessionId,
         DateTimeOffset now,
         VectorLaneQuery vectorQuery,
+        IReadOnlySet<long>? pinnedFactIds = null) =>
+        PackWithOutcome(connection, query, budgetTokens, seedK, currentSessionId, now, vectorQuery, pinnedFactIds).Result;
+
+    /// <summary>
+    /// <see cref="Pack"/> plus the structured values the digest was written from, from the same run.
+    /// </summary>
+    /// <remarks>
+    /// Exists so a caller that wants the facts, notes and gaps behind the text does not rank again
+    /// or re-derive them: the packed candidates are the ones whose lines are in the text, in the
+    /// same order, and the notes and gaps are the strings the header renders.
+    /// </remarks>
+    public static RecallPackDetail PackWithOutcome(
+        SqliteConnection connection,
+        string query,
+        int budgetTokens,
+        int seedK,
+        long? currentSessionId,
+        DateTimeOffset now,
+        VectorLaneQuery vectorQuery,
         IReadOnlySet<long>? pinnedFactIds = null)
     {
         var outcome = Rank(
             connection, query, budgetTokens, seedK, currentSessionId, now, vectorQuery, pinnedFactIds: pinnedFactIds);
 
         var includedLines = new List<string>();
+        var packed = new List<RecallCandidate>();
         var sessionFactCount = 0;
         var longTermFactCount = 0;
         var priorSessionFactCount = 0;
@@ -220,6 +240,7 @@ public static class RecallRanker
             }
 
             includedLines.Add(candidate.Line);
+            packed.Add(candidate);
             switch (candidate.Origin)
             {
                 case FactOrigin.CurrentSession:
@@ -235,28 +256,36 @@ public static class RecallRanker
         }
 
         var factCount = sessionFactCount + longTermFactCount + priorSessionFactCount;
+        var notes = AvailabilityNotes(outcome);
+        var noteSuffix = notes.Count == 0 ? string.Empty : " · " + string.Join(" · ", notes);
         var lines = new List<string>
         {
             $"RECALL \"{query}\" · {factCount} facts · {outcome.TokensUsed}/{budgetTokens} tokens · "
-                + $"coverage: {RecallEngine.ToText(outcome.Coverage)}{AvailabilityNote(outcome)}",
+                + $"coverage: {RecallEngine.ToText(outcome.Coverage)}{noteSuffix}",
         };
         lines.AddRange(includedLines);
 
+        string? gaps = null;
         if (outcome.Coverage != RecallCoverage.High)
         {
-            lines.Add($"gaps: {RecallEngine.GapsMessage(query, outcome.Coverage)}");
+            gaps = RecallEngine.GapsMessage(query, outcome.Coverage);
+            lines.Add($"gaps: {gaps}");
         }
 
         lines.Add("→ engram_remember what you discover");
 
-        return new RecallPackResult(
-            string.Join('\n', lines),
-            factCount,
-            outcome.TokensUsed,
-            outcome.Coverage,
-            sessionFactCount,
-            longTermFactCount,
-            priorSessionFactCount);
+        return new RecallPackDetail(
+            new RecallPackResult(
+                string.Join('\n', lines),
+                factCount,
+                outcome.TokensUsed,
+                outcome.Coverage,
+                sessionFactCount,
+                longTermFactCount,
+                priorSessionFactCount),
+            notes,
+            gaps,
+            packed);
     }
 
     /// <summary>
@@ -265,7 +294,7 @@ public static class RecallRanker
     /// <c>high</c> and <c>none</c> — <c>none</c> is exactly where an unavailable overlap lane can
     /// misdescribe an overlap-only fact as "the store said nothing".
     /// </summary>
-    private static string AvailabilityNote(RankOutcome outcome)
+    private static IReadOnlyList<string> AvailabilityNotes(RankOutcome outcome)
     {
         var notes = new List<string>(2);
         if (OverlapUnavailableDetail(outcome.OverlapState) is { } overlapDetail)
@@ -281,12 +310,12 @@ public static class RecallRanker
             notes.Add($"vector lane did not run ({outcome.VectorReason})");
         }
 
-        return notes.Count == 0 ? string.Empty : " · " + string.Join(" · ", notes);
+        return notes;
     }
 
     /// <summary>
     /// The overlap lane's unavailability reason, or null when it is ready. Shared by
-    /// <see cref="AvailabilityNote"/> and <see cref="RetrievalExplainer"/>'s "term overlap" lane row,
+    /// <see cref="AvailabilityNotes"/> and <see cref="RetrievalExplainer"/>'s "term overlap" lane row,
     /// so the two surfaces describe the same state with the same words rather than two independent
     /// ones that can drift.
     /// </summary>
@@ -319,13 +348,13 @@ public static class RecallRanker
 
         var ageDays = AgeDaysOf(createdAt, now);
 
-        var line = origin switch
+        var measured = origin switch
         {
-            FactOrigin.LongTerm => RecallEngine.FormatFactLine(
+            FactOrigin.LongTerm => RecallEngine.MeasureFactLine(
                 new CannedFact(handle, subjectName, string.Empty, body, scope, string.Empty, ageDays, null, versions, detailsChars, judged, path)),
-            FactOrigin.CurrentSession => RecallEngine.FormatSessionFactLine(
+            FactOrigin.CurrentSession => RecallEngine.MeasureSessionFactLine(
                 ToSessionFact(factId, body, path, subjectName, ageDays, detailsChars, agentNames)),
-            FactOrigin.PriorSession => RecallEngine.FormatPriorSessionFactLine(
+            FactOrigin.PriorSession => RecallEngine.MeasurePriorSessionFactLine(
                 ToSessionFact(factId, body, path, subjectName, ageDays, detailsChars, agentNames),
                 "p" + (labelIndex ?? throw new InvalidOperationException(
                     $"fact {handle} ranked as a prior-session candidate with no prior_sessions label — "
@@ -335,8 +364,10 @@ public static class RecallRanker
         };
 
         return new RecallCandidate(
-            factId, handle, line, fused, overlapRank, lexicalRank, vectorRank, origin,
-            TokenEstimator.Estimate(line), Packed: false);
+            factId, handle, measured.Line, fused, overlapRank, lexicalRank, vectorRank, origin,
+            TokenEstimator.Estimate(measured.Line), Packed: false,
+            Source: new RecallCandidateSource(
+                body, origin == FactOrigin.LongTerm ? scope : "session", versions, measured.WithheldChars, measured.Location));
     }
 
     // Mirrors SessionFacts.ToSessionFact exactly: the agent segment resolves through the agent

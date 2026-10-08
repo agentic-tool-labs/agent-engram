@@ -91,6 +91,93 @@ public class EmbedStatusCommandTests
     }
 
     /// <summary>
+    /// The AOT proof for the source-generated context: the published binary must print an object a
+    /// parser accepts, and the text form must not have changed shape.
+    /// </summary>
+    [Fact]
+    public void StatusJson_PublishedBinary_PrintsOneParseableObject()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+
+        var (exit, output, _) = EngramProcess.Run(home.Root, "embed", "--status", "--json");
+
+        Assert.Equal(0, exit);
+        using var doc = System.Text.Json.JsonDocument.Parse(output);
+        var json = doc.RootElement;
+        Assert.Equal("not-running", json.GetProperty("backlog").GetProperty("state").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, json.GetProperty("provider").ValueKind);
+        Assert.Equal(0, json.GetProperty("total").GetInt32());
+
+        var (_, text, _) = EngramProcess.Run(home.Root, "embed", "--status");
+        Assert.False(text.TrimStart().StartsWith('{'), "the text form must stay text");
+    }
+
+    [Fact]
+    public void StatusJson_ServerDeclinedToStart_ReportsUnavailableWithTheReason()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        UseUndownloadedLocalModel(home.Root);
+
+        var port = FreeTcpPort.Next();
+        var (startExit, _, startErr) = EngramProcess.Run(home.Root, "start", "--port", port.ToString());
+        Assert.True(startExit == 0, $"start failed: {startErr}");
+
+        try
+        {
+            var note = Path.Combine(home.Root, "embedding.json");
+            for (var attempt = 0; attempt < 50 && !File.Exists(note); attempt++)
+            {
+                Thread.Sleep(100);
+            }
+
+            var (exit, output, _) = EngramProcess.Run(home.Root, "embed", "--status", "--json");
+
+            Assert.Equal(0, exit);
+            using var doc = System.Text.Json.JsonDocument.Parse(output);
+            var backlog = doc.RootElement.GetProperty("backlog");
+            Assert.Equal("unavailable", backlog.GetProperty("state").GetString());
+            Assert.Contains("not downloaded", backlog.GetProperty("reason").GetString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            EngramProcess.Run(home.Root, "stop");
+        }
+    }
+
+    [Fact]
+    public void StatusJson_WithWatch_IsAUsageError()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+
+        var (exit, output, error) = EngramProcess.Run(home.Root, "embed", "--status", "--json", "--watch");
+
+        Assert.Equal(2, exit);
+        Assert.Equal(string.Empty, output.Trim());
+        Assert.Contains("--watch", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Json_WithoutAMode_IsTheSameUsageErrorAsNoFlags()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+
+        var (exit, _, error) = EngramProcess.Run(home.Root, "embed", "--json");
+        var (bareExit, _, bareError) = EngramProcess.Run(home.Root, "embed");
+
+        Assert.Equal(2, exit);
+        Assert.Equal(bareExit, exit);
+        Assert.Equal(bareError, error);
+    }
+
+    /// <summary>
     /// Points the home at a real model that is definitely not on disk in a fresh test home, so the
     /// backlog declines for a stated reason rather than loading several hundred megabytes.
     /// </summary>
