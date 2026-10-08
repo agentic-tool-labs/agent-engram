@@ -8,7 +8,10 @@
 // `claude plugin validate` nor `claude plugin test` does, and neither type-checks. The sandboxed
 // ENGRAM_HOME and the inert ENGRAM_BIN keep the plugin's own session hooks off a real Engram.
 // No package.json or node_modules belong in plugin/: it ships to users.
+// noEmit is repeated here because with the types not yet laid down the base config cannot be read,
+// and tsc then falls back to emitting .js beside every source.
 {
   "extends": "./.claude-plugin/types/tsconfig.json",
+  "compilerOptions": { "noEmit": true },
   "include": ["hooks", "mods"]
 }
