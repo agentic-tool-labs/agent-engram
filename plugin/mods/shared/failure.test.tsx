@@ -8,8 +8,14 @@ import { ENGRAM_TOOLS } from './client'
 // mod registers is driven through it. A mod's hook must never throw or call `next` twice, so each
 // event still completes with exactly what the core answered, the core runs once, and the mods
 // beneath a failing one still run. The last point is what an unguarded hook would break: a throw
-// before `next` stops the hooks beneath it. (A lone hook's missing guard is invisible here, the
-// engine falling back to the core either way; PluginSourceTests holds that.)
+// before `next` stops the hooks beneath it.
+//
+// What this does and does not prove: it shows the guard mechanism keeps the composed chain and the
+// core intact under failure. It does not detect a missing wrapper on a registration whose body does
+// not throw under injection, or that has no other mod beneath it (measured: removing the wrapper
+// from band's start, the sentinel's, digest's and lens's edit/recall hooks and belief diff's revise
+// hook left every row green). The per-registration enforcement is PluginSourceTests, which takes
+// the wrapper off each registration in turn and expects it to be reported.
 
 const MODES = ['throws', 'rejects'] as const
 type Mode = (typeof MODES)[number]
