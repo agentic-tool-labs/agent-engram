@@ -1,3 +1,83 @@
-import type { Register } from 'claude-code'
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, PluginOptions, PromptSubmitInput, PromptSubmitResult, Register } from 'claude-code'
+import { SHARED_INITIAL, modApi } from '../shared/client'
+import type { ModIo } from '../shared/client'
 
-export const register: Register = () => {}
+// The scanner reads an atom's reference only from a const of the file that uses it.
+const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, SHARED_INITIAL)
+
+// Pure forwards: the scanner needs each engine call spelled here, and all behaviour is the client's.
+const bindIo = ($: EngineInterface): ModIo => ({
+  run: (argv, opts) => $.process.run(argv, opts),
+  fetch: (url, init) => $.http.fetch(url, init),
+  sleep: (ms, opts) => $.clock.sleep(ms, opts),
+  now: () => $.clock.now(),
+  sessionId: () => $.session.id(),
+  pluginRoot: $.plugin.root,
+  readShared: () => read($, SHARED),
+  updateShared: (fn) => update($, SHARED, fn),
+})
+
+export type JitMode = 'off' | 'shadow' | 'inject'
+export type JitConfig = { mode: JitMode; budgetTokens: number }
+
+const QUERY_CHARS = 2_000
+const MIN_PROMPT_CHARS = 12
+const RECALL_TIMEOUT_MS = 800
+const BLOCK_HEADER = 'Memory relevant to this message (recalled automatically):\n'
+
+export function jitConfig(options: PluginOptions): JitConfig {
+  const mode = options.jit_mode
+  const budget = options.jit_budget_tokens
+  return {
+    mode: mode === 'shadow' || mode === 'inject' ? mode : 'off',
+    budgetTokens: typeof budget === 'number' && budget > 0 ? budget : 400,
+  }
+}
+
+type SubmitNext = {
+  (e: PromptSubmitInput): Promise<PromptSubmitResult>
+  readonly signal: AbortSignal
+}
+
+/**
+ * Recalls on the prompt and, in `inject` mode with `high` coverage, attaches the digest as
+ * model-only context for this prompt. Every other path, including every failure, passes the
+ * prompt through untouched.
+ */
+export async function primePrompt(
+  io: ModIo,
+  config: JitConfig,
+  e: PromptSubmitInput,
+  next: SubmitNext,
+): Promise<PromptSubmitResult> {
+  if (config.mode === 'off') return next(e)
+  if (e.origin?.kind !== 'composer') return next(e)
+  if (e.text.startsWith('/') || e.text.trim().length < MIN_PROMPT_CHARS) return next(e)
+
+  let digest: string | undefined
+  try {
+    const reply = await modApi(
+      io,
+      'recall',
+      {
+        session_id: await io.sessionId(),
+        query: e.text.slice(0, QUERY_CHARS),
+        budget_tokens: config.budgetTokens,
+        mode: config.mode,
+      },
+      { mod: 'primer', timeoutMs: RECALL_TIMEOUT_MS, signal: next.signal },
+    )
+    if (reply.ok && reply.value.coverage === 'high' && reply.value.text.trim() !== '') digest = reply.value.text
+  } catch {
+    digest = undefined
+  }
+
+  if (config.mode !== 'inject' || digest === undefined) return next(e)
+  return next({ ...e, context: [...(e.context ?? []), BLOCK_HEADER + digest] })
+}
+
+export const register: Register = (on, options) => {
+  const config = jitConfig(options)
+  on('prompt.submit', ($, e, next) => primePrompt(bindIo($), config, e, next))
+}
