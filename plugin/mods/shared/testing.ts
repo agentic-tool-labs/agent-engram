@@ -17,6 +17,8 @@ export type RoutingTable = {
   /** Keyed by op; an op with no handler answers 404, i.e. "unsupported". */
   ops?: Readonly<Record<string, FetchHandler>>
   sessionId?: string
+  /** What `clock.now` answers in `installFakeEngine`, epoch ms; default 1,000,000. */
+  now?: number
 }
 
 export type Router = {
@@ -74,6 +76,9 @@ export function installFakeEngine(on: On, table: RoutingTable = {}): Router {
     return { value: { ...r, headers: {} } }
   })
   on('session.id', () => ({ value: router.sessionId() }))
+  on('clock.now', () => ({ value: table.now ?? 1_000_000 }))
+  // Time does not pass here: a test that needs it uses mock.clock, or fakeModIo's clock.
+  on('clock.sleep', () => new Promise<never>(() => {}))
   return router
 }
 
@@ -123,7 +128,7 @@ export function fakeModIo(table: RoutingTable, options: { pluginRoot?: string; s
   const io: ModIo = {
     run: async (argv, opts) => {
       const r = router.process(argv, opts?.timeoutMs)
-      return { exitCode: r.exitCode, stdout: r.stdout }
+      return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }
     },
     fetch: (url, init) => router.fetch(url, init),
     sleep: (ms, opts) =>

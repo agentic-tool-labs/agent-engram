@@ -286,11 +286,16 @@ test('a connection failure backs off 60 s, then the port is looked up again', as
 
 test('engramCli runs the binary with the args, a 5 s default timeout, and never adds --home', async () => {
   const rig = fakeModIo({ binary: BIN, cli: { 'embed --status --json': { exitCode: 0, stdout: '{}' } } })
-  expect(await engramCli(rig.io, ['embed', '--status', '--json'])).toEqual({ exitCode: 0, stdout: '{}' })
+  expect(await engramCli(rig.io, ['embed', '--status', '--json'])).toEqual({ exitCode: 0, stdout: '{}', stderr: '' })
   const run = rig.router.processCalls[1]!
   expect(run.argv).toEqual([BIN, 'embed', '--status', '--json'])
   expect(run.timeoutMs).toBe(5_000)
   expect(run.argv.some((a) => a.startsWith('--home'))).toBe(false)
+})
+
+test('engramCli passes a failing run through with its stderr text untouched', async () => {
+  const rig = fakeModIo({ binary: BIN, cli: { 'directive show f9': { exitCode: 2, stdout: '', stderr: 'no such fact: f9\n' } } })
+  expect(await engramCli(rig.io, ['directive', 'show', 'f9'])).toEqual({ exitCode: 2, stdout: '', stderr: 'no such fact: f9\n' })
 })
 
 test('engramCli honours an explicit timeout', async () => {

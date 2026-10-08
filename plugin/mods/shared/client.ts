@@ -7,7 +7,7 @@ import type { ApiFailure, ApiResult, ModOp, ModOps } from './types'
  * client; the binding must be pure forwards (see binding.template.ts).
  */
 export type ModIo = {
-  run(argv: readonly string[], opts?: { timeoutMs?: number }): Promise<{ exitCode: number; stdout: string }>
+  run(argv: readonly string[], opts?: { timeoutMs?: number }): Promise<{ exitCode: number; stdout: string; stderr: string }>
   fetch(
     url: string,
     init: { method: string; headers: Record<string, string>; body: string },
@@ -61,12 +61,12 @@ export async function engramCli(
   io: ModIo,
   args: readonly string[],
   opts: { timeoutMs?: number } = {},
-): Promise<{ exitCode: number; stdout: string } | undefined> {
+): Promise<{ exitCode: number; stdout: string; stderr: string } | undefined> {
   try {
     const binary = await engramBinary(io)
     if (binary === undefined) return undefined
     const run = await io.run([binary, ...args], { timeoutMs: opts.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS })
-    return { exitCode: run.exitCode, stdout: run.stdout }
+    return { exitCode: run.exitCode, stdout: run.stdout, stderr: run.stderr }
   } catch {
     return undefined
   }
