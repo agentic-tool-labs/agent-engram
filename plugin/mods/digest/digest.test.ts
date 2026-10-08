@@ -3,6 +3,7 @@ import {
   MAX_TRANSCRIPT_CHARS,
   buildTranscript,
   digestEvery,
+  fingerprint,
   parseCandidates,
   shouldDigest,
 } from './digest'
@@ -71,4 +72,12 @@ test('buildTranscript: one row over the cap is cut from its head, not dropped', 
   const text = buildTranscript([{ role: 'user', text: 'a'.repeat(MAX_TRANSCRIPT_CHARS) + 'TAIL' }])
   expect(text.length).toBe(MAX_TRANSCRIPT_CHARS)
   expect(text.endsWith('TAIL')).toBe(true)
+})
+
+test('fingerprint: same row same print; role, length or head differ', () => {
+  const a = { role: 'user', text: 'hello world' }
+  expect(fingerprint(a)).toBe(fingerprint({ ...a }))
+  expect(fingerprint(a)).not.toBe(fingerprint({ ...a, role: 'assistant' }))
+  expect(fingerprint(a)).not.toBe(fingerprint({ ...a, text: 'hello worle' }))
+  expect(fingerprint(a)).not.toBe(fingerprint({ ...a, text: 'hello world!' }))
 })

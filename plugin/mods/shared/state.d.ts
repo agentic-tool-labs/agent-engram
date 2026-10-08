@@ -118,6 +118,8 @@ export type DigestState = {
   editedThisTurn: boolean
   /** Length of the main conversation when the last digest read it. */
   seenMessages: number
+  /** Fingerprint of the last row that digest read; the count is trusted only while it still matches. */
+  lastSeen: string
   /** The latest batch awaiting Save or Skip, in display order. */
   candidates: DigestCandidate[]
 }
