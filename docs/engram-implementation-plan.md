@@ -5513,3 +5513,38 @@ file or a `#` descendant", which the indexer's reconciliation and `path-facts` b
 decision, with no subprocess and no file read, and is the entry point D77 consumes. Handlers log
 nothing from the request: the file logger writes formatted messages raw, so a logged `query` would be
 a log-injection path, whereas telemetry escapes control characters.
+
+## D77 — An invariant is a non-regenerable fact on a fingerprinted sub-entity of its file
+
+A person can mark a rule as load-bearing for one file with `engram invariant add <file> "<statement>"`.
+It is an ordinary fact: subject `<file entity path>#invariant-<8-char fingerprint of the statement>`,
+entity kind `convention`, predicate `invariant`, scope `project`, learned_via `stated`, regenerable 0,
+evidence `stated by the user via engram invariant`. No schema change, no migration, no new query.
+
+**Why a fingerprinted `#` sub-entity.** `ux_fact_live` allows one live fact per subject and predicate,
+so a file with two rules needs two subjects. The `#` descendant means the existing live-under-file read
+(`path = file OR path LIKE file#…`) already returns invariants beside the file's code facts.
+
+**Why not regenerable.** The indexer closes only regenerable facts, on file deletion and on a full
+reindex, so an invariant outlives its file and simply never matches a path again. Nothing authored is
+destroyed. Tagging was preferred to treating any authored fact at the path as an invariant, because a
+revised code fact becomes non-regenerable and still addresses its file (D2, D74), and would then surface
+as a rule. Path-scoped directives were rejected: directives are user-scope standing instructions
+delivered in every primer (D-6 to D-10), and invariants are delivered per edit.
+
+**CLI.** `add` resolves the file through `CodeEntityResolver` (the one disk-path-to-entity resolution
+shared with the mod API's `path-facts`), refuses a directory, a missing file, a path outside every
+indexed repository, and a statement over 250 tokens (the directive bound). Adding a statement already
+live on the file is a no-op that says so, tested before `FactStore.Remember`, which would otherwise
+close the incumbent and write a duplicate. `list [<file>]` shows live invariants; `remove <id>` follows
+`directive remove` exactly: a dry run unless `--apply`, and it refuses any fact that is not a live
+invariant. Revising goes through the existing revise paths.
+
+**Measured limits worth knowing.** `CodeEntityResolver` compares the canonicalised argument with the
+registry's `disk_path`. For a git checkout the registry holds git's canonical root, so they agree; for a
+plain directory it holds the path as given, which on macOS differs from the resolved one under `/var`,
+and `add` then answers "not inside an indexed repository" for a file that is indexed. Tier 3 therefore
+uses a git checkout. The resolver belongs to the mod API stream.
+
+**Not changed.** Schema, `AnalyzerVersion`, the indexer's deletion rule, directive behaviour, the primer
+(invariants are not delivered in it), and the MCP tool surface.
