@@ -126,7 +126,7 @@ const EVENTS: { name: string; drive: ($: Engine) => Promise<unknown>; expected: 
 
 // A command a mod answers itself may answer from its own state without touching a failing noun, or
 // answer nothing when it cannot; what must hold is that the run completes.
-const COMMANDS = ['lens', 'digest-review', 'remember-selection', 'undo-capture']
+const COMMANDS = ['lens', 'digest-review', 'remember-selection', 'undo-capture', 'invariant', 'why']
 
 for (const mode of MODES) {
   for (const event of EVENTS) {
@@ -145,12 +145,22 @@ for (const mode of MODES) {
     })
   }
 
+  test(`${mode}: an edit reaches both mods that take it, whichever one fails first`, async (eng, on) => {
+    const rig = inject(on, mode)
+    await eng.tool.call({ tool: 'Edit', tool_use_id: 'u1', file_path: '/w/a.ts', old_string: 'a', new_string: 'b' } as never)
+    // The sentinel starts by asking for the working directory; the digest, after `next`, reads its state.
+    expect(rig.attempts['session.cwd']).toBeGreaterThan(0)
+    expect(rig.attempts['state.get']).toBeGreaterThan(0)
+  })
+
   test(`${mode}: every mod that registers a command at session start is still reached`, async (eng, on) => {
     const rig = inject(on, mode)
     await eng.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
     expect(rig.registered).toContain('undo-capture')
     expect(rig.registered).toContain('digest-review')
     expect(rig.registered).toContain('lens')
+    // The sentinel registers `invariant` then `why` in one step, so a failure of the first ends its hook.
+    expect(rig.registered).toContain('invariant')
   })
 
   for (const [name, props] of [
@@ -164,7 +174,7 @@ for (const mode of MODES) {
     })
   }
 
-  for (const id of ['engram-lens', DIGEST_PANE]) {
+  for (const id of ['engram-lens', DIGEST_PANE, 'engram-why']) {
     test(`${mode}: the ${id} pane still draws and the core draws at most once`, async (eng, on) => {
       const rig = inject(on, mode)
       const ui = await eng.ui.mount({

@@ -293,6 +293,19 @@ public class PluginSourceTests
         Assert.Contains(expected, only);
     }
 
+    // The engine's budget `.catch` is the one direct `next(e)` a handler may carry; any other is not.
+    [Fact]
+    public void TheBudgetCatch_IsTheOnlyDirectNextCallAHandlerMayCarry()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", CompliantHandler.TrimEnd('\n') + ".catch(($, e, next) => next(e))\n");
+        tree.Write("mods/b/index.ts", CompliantHandler.TrimEnd('\n') + ".catch(($, e, next) => { return next(e) })\n");
+
+        var only = Assert.Single(HandlersOutsideTheNoThrowGuard(tree.Root, ModSourceFiles(tree.Root)));
+
+        Assert.Contains("mods/b/index.ts:1", only);
+    }
+
     // One compliant handler must not excuse the next one in the same file.
     [Fact]
     public void ASecondHandlerInTheSameFileThatIsNotWrapped_IsReportedAlone()
@@ -475,6 +488,10 @@ public class PluginSourceTests
 
     private static readonly Regex DirectNextCallPattern = new(@"(?<![\w.$])next\(", RegexOptions.Compiled);
 
+    // The engine's own `.catch` runs when a hook outruns its budget, which no try/catch in the hook
+    // can see; its `next(e)` replays what an earlier call settled to rather than calling again.
+    private static readonly Regex BudgetCatchPattern = new(@"\.catch\(\(\$, e, next\) => next\(e\)\)", RegexOptions.Compiled);
+
     // A handler's text runs from its `on(` to the next `on(` or the end of the file. Sharing a file
     // with another handler therefore cannot excuse it, and a helper after the last one is the only
     // way to confuse the check; none of the mods has one.
@@ -508,7 +525,7 @@ public class PluginSourceTests
                     missing.Add("catch to go.fallback(e)");
                 }
 
-                if (DirectNextCallPattern.IsMatch(handler))
+                if (DirectNextCallPattern.IsMatch(BudgetCatchPattern.Replace(handler, string.Empty)))
                 {
                     missing.Add("stop calling next directly (call the once wrapper)");
                 }
