@@ -48,3 +48,6 @@ plugin/bin/
 
 # Laid down by the engine when the plugin is dev-loaded
 plugin/.claude-plugin/types/
+
+# Stray output of a tsc run made before the engine types were laid down
+plugin/**/*.js

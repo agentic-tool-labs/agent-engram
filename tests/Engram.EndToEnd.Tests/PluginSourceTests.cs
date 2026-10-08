@@ -137,6 +137,78 @@ public class PluginSourceTests
         Assert.Empty(EventsRegisteredBareMoreThanOnce(sources));
     }
 
+    // Two mods that each take a shared event bare make the engine refuse the plugin, and one mod
+    // taking it bare is invisible to every gate until a second arrives. So any mod registering one
+    // of these events passes its shared constant, whether or not another mod does yet.
+    [Fact]
+    public void ShippedModSources_PassTheSharedConstantForEverySharedEvent()
+    {
+        var sources = ModSourceFiles(PluginSandbox.PluginDirectory).ToList();
+
+        Assert.NotEmpty(sources);
+        Assert.Empty(RegistrationsWithoutTheSharedConstant(PluginSandbox.PluginDirectory, sources, SharedConstantAllowList));
+    }
+
+    [Theory]
+    [InlineData("session.start", "ANY_SESSION_START")]
+    [InlineData("turn.start", "ANY_TURN_START")]
+    [InlineData("turn.complete", "ANY_TURN_COMPLETE")]
+    [InlineData("prompt.submit", "ANY_PROMPT_SUBMIT")]
+    public void ALoneBareRegistrationOfASharedEvent_IsReportedNamingTheFileAndTheConstant(string eventName, string constant)
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/lens/index.ts", $"on('{eventName}', async ($, e, next) => next(e))\n");
+
+        var only = Assert.Single(RegistrationsWithoutTheSharedConstant(tree.Root, ModSourceFiles(tree.Root), []));
+
+        Assert.Contains("mods/lens/index.ts:1", only);
+        Assert.Contains(constant, only);
+        Assert.Contains($"'{eventName}'", only);
+    }
+
+    // The nearest inputs that must not be reported: each event with its own constant, an event
+    // that is not shared, shared/ itself, and test files.
+    [Fact]
+    public void RegistrationsThatPassTheirConstant_OrAreOutOfScope_AreNotReported()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", "on('session.start', ANY_SESSION_START, async ($, e, next) => next(e))\non('turn.complete', ANY_TURN_COMPLETE, handler)\non('ui.render', { component: 'Pane' }, ($, e) => e)\non('tool.call', ($, e, next) => next(e))\n");
+        tree.Write("mods/shared/events.ts", "on('session.start', ($, e, next) => next(e))\n");
+        tree.Write("mods/a/a.test.ts", "on('prompt.submit', (_$, e) => ({ text: e.text }))\n");
+
+        Assert.Empty(RegistrationsWithoutTheSharedConstant(tree.Root, ModSourceFiles(tree.Root), []));
+    }
+
+    // Another event's constant, a hand-written matcher, a handler where the matcher goes, and a
+    // longer name that merely starts with the right one are each not the shared constant.
+    [Theory]
+    [InlineData("on('session.start', ANY_TURN_START, async ($, e, next) => next(e))")]
+    [InlineData("on('turn.start', { turnId: /.*/ }, async ($, e, next) => next(e))")]
+    [InlineData("on('prompt.submit', handler)")]
+    [InlineData("on('turn.complete', ANY_TURN_COMPLETE_EXTRA, handler)")]
+    [InlineData("on('turn.complete', ANY_TURN_COMPLETE)")]
+    public void ARegistrationWithoutExactlyItsOwnConstant_IsReported(string line)
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", line + "\n");
+
+        Assert.Single(RegistrationsWithoutTheSharedConstant(tree.Root, ModSourceFiles(tree.Root), []));
+    }
+
+    [Fact]
+    public void AnAllowListEntry_ExcusesThatFileAndEventOnly()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/a/index.ts", "on('turn.complete', ($, e, next) => next(e))\non('prompt.submit', ($, e, next) => next(e))\n");
+        tree.Write("mods/b/index.ts", "on('turn.complete', ($, e, next) => next(e))\n");
+
+        var found = RegistrationsWithoutTheSharedConstant(tree.Root, ModSourceFiles(tree.Root), [("mods/a/index.ts", "turn.complete")]);
+
+        Assert.Equal(2, found.Count);
+        Assert.Contains(found, f => f.Contains("mods/a/index.ts:2"));
+        Assert.Contains(found, f => f.Contains("mods/b/index.ts:1"));
+    }
+
     [Fact]
     public void TwoBareRegistrationsOfOneEvent_AreReportedWithBothLocations()
     {
@@ -221,6 +293,62 @@ public class PluginSourceTests
             {
                 var line = text.AsSpan(0, match.Index).Count('\n') + 1;
                 found.Add($"{file}:{line}");
+            }
+        }
+
+        return found;
+    }
+
+    private static readonly Dictionary<string, string> SharedEventConstants = new()
+    {
+        ["session.start"] = "ANY_SESSION_START",
+        ["turn.start"] = "ANY_TURN_START",
+        ["turn.complete"] = "ANY_TURN_COMPLETE",
+        ["prompt.submit"] = "ANY_PROMPT_SUBMIT",
+    };
+
+    // Mods that still register a shared event bare, each fixed in its own integration round.
+    // TODO: remove an entry once that mod's round merges; remove the whole list once the digest
+    // and primer integration rounds have merged.
+    private static readonly (string File, string Event)[] SharedConstantAllowList =
+    [
+        ("mods/digest/index.tsx", "turn.complete"),
+        ("mods/primer/index.ts", "prompt.submit"),
+    ];
+
+    private static readonly Regex SharedEventRegistrationPattern = new(
+        @"\bon\(\s*['""](session\.start|turn\.start|turn\.complete|prompt\.submit)['""]\s*,\s*([A-Za-z_$][\w$]*)?",
+        RegexOptions.Compiled);
+
+    private static List<string> RegistrationsWithoutTheSharedConstant(
+        string pluginDirectory,
+        IEnumerable<string> files,
+        (string File, string Event)[] allowList)
+    {
+        var found = new List<string>();
+        foreach (var file in files)
+        {
+            var relative = Path.GetRelativePath(pluginDirectory, file).Replace('\\', '/');
+            if (relative.StartsWith("mods/shared/", StringComparison.Ordinal)
+                || Path.GetFileName(file).Contains(".test.", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var text = File.ReadAllText(file);
+            foreach (Match match in SharedEventRegistrationPattern.Matches(text))
+            {
+                var eventName = match.Groups[1].Value;
+                var constant = SharedEventConstants[eventName];
+                var passed = match.Groups[2].Success ? match.Groups[2].Value : string.Empty;
+                var isMatcherPosition = text.AsSpan(match.Index + match.Length).TrimStart().StartsWith(",");
+                if ((passed == constant && isMatcherPosition) || allowList.Contains((relative, eventName)))
+                {
+                    continue;
+                }
+
+                var line = text.AsSpan(0, match.Index).Count('\n') + 1;
+                found.Add($"{relative}:{line}: on('{eventName}') must pass {constant} as its second argument (import it from ../shared/events)");
             }
         }
 
