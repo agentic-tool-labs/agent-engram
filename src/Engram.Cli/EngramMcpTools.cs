@@ -28,28 +28,7 @@ public sealed class EngramMcpTools
         [Description("What you want to know, as a few keywords or a short question.")] string query,
         [Description("Maximum tokens to spend on the response. Defaults to 500.")] int? budget_tokens = null)
     {
-        var config = ConfigFile.Load(home.ConfigPath);
-        var settings = RetrievalSettings.Read(config);
-        var budget = budget_tokens is > 0 ? budget_tokens.Value : settings.BudgetTokens;
-
-        // One connection, one temporal model, one statement: SQLite ranks and bounds every tier —
-        // long-term, current session, prior session — from a single atomic read (D59). Nothing
-        // O(corpus) crosses into C# in either direction.
-        var now = DateTimeOffset.UtcNow;
-        using var connection = EngramDatabase.OpenInitialized(home);
-
-        var currentSessionId = SessionStore.FindSession(connection, session.Value);
-
-        // The same lane `explain` reports, so what it describes is what ran here. It costs nothing
-        // when embeddings are off — the factory refuses before any request — and it can never fail
-        // this call: every way it can stop comes back as a reason and no embedding, leaving recall
-        // exactly as lexical as it was before. The search itself now happens inside the ranking
-        // statement (RecallRanker), so only the embedding — not a result set — crosses back into C#.
-        var vectorQuery = VectorLane.PrepareQuery(
-            connection, home, EmbeddingSettings.Read(config), query, Environment.GetEnvironmentVariable, local);
-
-        var result = RecallRanker.Pack(
-            connection, query, budget, settings.SeedK, currentSessionId, now, vectorQuery, pins.PinnedFor(session));
+        var result = RecallSearch.Run(home, local, query, budget_tokens, session.Value, pins.PinnedFor(session)).Result;
 
         if (homeState.Initialized)
         {
@@ -110,7 +89,7 @@ public sealed class EngramMcpTools
             return "Engram home is not initialised (run 'engram init'); this statement was not saved.";
         }
 
-        if (DetailsCeilingError(details) is { } ceilingError)
+        if (DetailsCeiling.Error(details) is { } ceilingError)
         {
             return ceilingError;
         }
@@ -432,7 +411,7 @@ public sealed class EngramMcpTools
             return "Revision needs both a corrected statement and a reason. Nothing was revised.";
         }
 
-        if (DetailsCeilingError(details) is { } ceilingError)
+        if (DetailsCeiling.Error(details) is { } ceilingError)
         {
             return ceilingError;
         }
@@ -1699,24 +1678,7 @@ public sealed class EngramMcpTools
         return IndexedCodeNote.Build(connection, fact) is { } note ? text + "\n" + note : text;
     }
 
-    // Shared by engram_remember and engram_revise so the ceiling and its wording cannot
-    // drift into checking two different limits.
-    private static string? DetailsCeilingError(string? details)
-    {
-        if (details is null)
-        {
-            return null;
-        }
-
-        var tokens = TokenEstimator.Estimate(details);
-        return tokens > 2000
-            ? $"details is ~{tokens} tokens against the 2,000-token ceiling — a memory that large is a "
-                + "document; store where to find it (evidence, a path) rather than its contents. Nothing "
-                + "was stored."
-            : null;
-    }
-
-    // Shared by engram_remember and engram_revise, mirroring DetailsCeilingError's shape: validated
+    // Shared by engram_remember and engram_revise, mirroring DetailsCeiling.Error's shape: validated
     // before any write so a bad review_after never leaves a partial save behind.
     private static string? ReviewAfterError(string? reviewAfter, out long? reviewAfterUnix)
     {

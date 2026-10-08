@@ -7,7 +7,7 @@ import type { ApiFailure, ApiResult, ModOp, ModOps } from './types'
  * client; the binding must be pure forwards (see binding.template.ts).
  */
 export type ModIo = {
-  run(argv: readonly string[], opts?: { timeoutMs?: number }): Promise<{ exitCode: number; stdout: string }>
+  run(argv: readonly string[], opts?: { timeoutMs?: number }): Promise<{ exitCode: number; stdout: string; stderr: string }>
   fetch(
     url: string,
     init: { method: string; headers: Record<string, string>; body: string },
@@ -30,7 +30,7 @@ export const ENGRAM_TOOLS = {
   expand: 'mcp__plugin_engram_engram__engram_expand',
 } as const
 
-export const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit'] as const
+export const EDIT_TOOLS = ['Edit', 'Write'] as const
 
 const NO_PORT_BACKOFF_MS = 60_000
 const DEFAULT_CLI_TIMEOUT_MS = 5_000
@@ -61,12 +61,12 @@ export async function engramCli(
   io: ModIo,
   args: readonly string[],
   opts: { timeoutMs?: number } = {},
-): Promise<{ exitCode: number; stdout: string } | undefined> {
+): Promise<{ exitCode: number; stdout: string; stderr: string } | undefined> {
   try {
     const binary = await engramBinary(io)
     if (binary === undefined) return undefined
     const run = await io.run([binary, ...args], { timeoutMs: opts.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS })
-    return { exitCode: run.exitCode, stdout: run.stdout }
+    return { exitCode: run.exitCode, stdout: run.stdout, stderr: run.stderr }
   } catch {
     return undefined
   }
