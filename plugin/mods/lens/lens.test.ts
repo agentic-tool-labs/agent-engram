@@ -123,6 +123,17 @@ test('the pane keeps the newest twenty of twenty-five recalls', async ($, on) =>
   expect(headers[19]!.startsWith('"q5" · ')).toBe(true)
 })
 
+test('session.start registers /lens and still reaches the engine', async ($, on) => {
+  const registered: string[] = []
+  on('command.register', (_$, e) => (registered.push((e as { name: string }).name), { value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/anywhere', surface: 'terminal', isInteractive: true } as never)
+
+  // Other mods register their own commands on the same event; the lens registers exactly one.
+  expect(registered.filter((name) => name === 'lens')).toEqual(['lens'])
+})
+
 test('turn.start passes through', async ($, on) => {
   on('turn.start', (_$, e) => ({ turnId: (e as { turnId: string }).turnId }))
   const result = await $.turn.start({ text: 'hi', turnId: 'turn-9' } as never)

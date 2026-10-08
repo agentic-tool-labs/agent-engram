@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import { ENGRAM_TOOLS, SHARED_INITIAL, modApi } from '../shared/client'
+import { ANY_SESSION_START, ANY_TURN_START } from '../shared/events'
 import type { ModIo } from '../shared/client'
 import type { LensRecall } from '../shared/state'
 import { LENS_INITIAL, addRecall, headerLine, selectedIndex, versionLine } from './model'
@@ -26,14 +27,22 @@ const bindIo = ($: EngineInterface): ModIo => ({
 })
 
 export const register: Register = (on, options) => {
-  on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'lens', description: 'Show or hide the Memory Lens pane' })
+  on('session.start', ANY_SESSION_START, async ($, e, next) => {
+    try {
+      await $.command.register({ name: 'lens', description: 'Show or hide the Memory Lens pane' })
+    } catch {
+      // another mod's session.start must still run
+    }
 
     return next(e)
   })
 
-  on('turn.start', async ($, e, next) => {
-    await update($, LENS, (s) => ({ ...s, currentTurnId: e.turnId }))
+  on('turn.start', ANY_TURN_START, async ($, e, next) => {
+    try {
+      await update($, LENS, (s) => ({ ...s, currentTurnId: e.turnId }))
+    } catch {
+      // another mod's turn.start must still run
+    }
 
     return next(e)
   })
