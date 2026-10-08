@@ -15,6 +15,7 @@ type Rig = {
   opened: { id: string; focus?: true }[]
   closed: string[]
   filled: string[]
+  registered: string[]
   clock: ReturnType<typeof mock.clock>
   reply: { text: string; isAnswered: boolean }
   selection: { text: string } | undefined
@@ -39,6 +40,7 @@ function rigUp(on: On, ops: Record<string, FetchHandler> = {}): Rig {
     opened: [],
     closed: [],
     filled: [],
+    registered: [],
     clock,
     reply: { text: '[]', isAnswered: true },
     selection: undefined,
@@ -69,7 +71,11 @@ function rigUp(on: On, ops: Record<string, FetchHandler> = {}): Rig {
     rig.filled.push(e.text)
     return { isFilled: true }
   })
-  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('command.register', (_$, e) => {
+    rig.registered.push(e.name)
+    return { value: { command: e.name } }
+  })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }) as never)
   on('turn.complete', () => ({ text: '' }))
   on('tool.call', () => ({ result: {}, text: '', ref: 0 }))
   return rig
@@ -178,6 +184,17 @@ test('the turn completes before any digest work starts', ON(1), async ($, on) =>
   expect(rig.completions.length).toBe(1)
 })
 
+test('the deferred work still reaches the engine after the hook returned: messages, model, API, pane, toast', ON(1), async ($, on) => {
+  const rig = proposing(on)
+  await turn($)
+  expect(rig.opened).toEqual([])
+  await rig.clock.advance(0)
+  expect(rig.completions.length).toBe(1)
+  expect(rig.fetches.some((f) => f.op === 'recall')).toBe(true)
+  expect(rig.opened.length).toBe(1)
+  expect(rig.toasts.length).toBe(1)
+})
+
 test('the model sees the conversation text, not tool output, and the system prompt asks for JSON', ON(1), async ($, on) => {
   const rig = proposing(on)
   rig.rows.push(row('user', ''))
@@ -269,6 +286,21 @@ test('the next digest reads only what was said since the last one', ON(1), async
   expect(rig.completions[1]!.prompt).toBe('User: second topic')
 })
 
+test('after a compaction the count cannot skip rows written since', ON(1), async ($, on) => {
+  const rig = proposing(on)
+  rig.rows.length = 0
+  for (let i = 0; i < 100; i++) rig.rows.push(row('user', `before ${i}`))
+  await turn($)
+  await rig.clock.advance(0)
+  rig.rows.length = 0
+  rig.rows.push(row('assistant', 'summary of earlier work'))
+  for (let i = 0; i < 109; i++) rig.rows.push(row('user', `after ${i}`))
+  await turn($)
+  await rig.clock.advance(0)
+  expect(rig.completions[1]!.prompt.includes('after 0')).toBe(true)
+  expect(rig.completions[1]!.prompt.includes('Assistant: summary of earlier work')).toBe(true)
+})
+
 test('a digest with nothing new says nothing and calls no model', ON(1), async ($, on) => {
   const rig = proposing(on)
   await turn($)
@@ -345,6 +377,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await rig.clock.advance(10_000)
     expect(rig.fetches.filter((f) => f.op === 'remember').length).toBe(2)
     expect(rig.toasts.at(-1)).toBe('Not saved: "Jim prefers tabs in Go files" (not-initialised)\nNot saved: "The build uses Native AOT" (not-initialised)')
+    expect(rig.closed).toEqual([])
+    expect((await ui.find({ key: 'tick0' }))?.text).toContain('[ ]')
+    expect((await ui.find({ key: 'tick1' }))?.text).toContain('[ ]')
   })
 
   test(`[${surface}] a partial failure reports the saved handle and the failed statement together`, ON(1), async ($, on) => {
@@ -359,6 +394,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.press({ key: 'tick1' })
     await ui.press({ key: 'save' })
     expect(rig.toasts.at(-1)).toBe('Saved [f7]\nNot saved: "The build uses Native AOT" (bad-request)')
+    expect(rig.closed).toEqual([])
+    expect(await ui.find({ key: 'tick1' })).toBeUndefined()
+    expect((await ui.find({ key: 'tick0' }))?.text).toContain('[ ]')
   })
 }
 
@@ -400,4 +438,11 @@ test('/remember-selection with a whitespace-only selection is no selection', asy
   await $.command.run({ command: 'remember-selection', args: '' } as never)
   expect(rig.filled).toEqual([])
   expect(rig.toasts).toEqual(['Select text in fullscreen mode first.'])
+})
+
+test('session start registers both commands', async ($, on) => {
+  const rig = rigUp(on)
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true } as never)
+  expect(rig.registered.includes('digest-review')).toBe(true)
+  expect(rig.registered.includes('remember-selection')).toBe(true)
 })
