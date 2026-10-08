@@ -62,6 +62,9 @@ export function createRouter(table: RoutingTable): Router {
  * Bottom hooks on the test `on` (beneath every plugin) answering `process.run`, `http.fetch` and
  * `session.id` from the table, for mod tests that drive their real hooks through engine events.
  * An op hook answers `{ value }`, not the bare result.
+ *
+ * It does not answer `clock.*`: the engine allows one bottom hook per event, so a test whose hooks
+ * read the clock calls `mock.clock(on)` itself, and a second answer here would fail the load.
  */
 export function installFakeEngine(on: On, table: RoutingTable = {}): Router {
   const router = createRouter(table)
@@ -123,7 +126,7 @@ export function fakeModIo(table: RoutingTable, options: { pluginRoot?: string; s
   const io: ModIo = {
     run: async (argv, opts) => {
       const r = router.process(argv, opts?.timeoutMs)
-      return { exitCode: r.exitCode, stdout: r.stdout }
+      return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }
     },
     fetch: (url, init) => router.fetch(url, init),
     sleep: (ms, opts) =>
