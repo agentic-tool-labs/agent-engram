@@ -6,7 +6,9 @@ const ASK_CLOCK = {
   register: ((on: never) => {
     ;(on as import('claude-code').On)('command.run', { command: 'tick' }, async ($) => {
       const now = await $.clock.now()
-      const slept = await Promise.race([$.clock.sleep(1000).then(() => 'slept'), Promise.resolve('pending')])
+      const asleep = $.clock.sleep(1000).then(() => 'slept', () => 'threw')
+      await $.clock.now()
+      const slept = await Promise.race([asleep, Promise.resolve('pending')])
       return { text: `${now} ${slept}` }
     })
   }) as never,
