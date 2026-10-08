@@ -1,15 +1,4 @@
-// Type-check gate for the mods. From the repo root:
-//
-//   ENGRAM_HOME="$(mktemp -d)" ENGRAM_BIN=/usr/bin/true claude -p /help --plugin-dir plugin </dev/null
-//   claude plugin validate plugin          # grep its output for "Validation failed": it exits 0 on failure
-//   npx --yes -p typescript@5.6.3 tsc -p plugin
-//
-// The first command makes the engine lay down plugin/.claude-plugin/types/ (git-ignored): neither
-// `claude plugin validate` nor `claude plugin test` does, and neither type-checks. The sandboxed
-// ENGRAM_HOME and the inert ENGRAM_BIN keep the plugin's own session hooks off a real Engram.
-// No package.json or node_modules belong in plugin/: it ships to users.
-// noEmit is repeated here because with the types not yet laid down the base config cannot be read,
-// and tsc then falls back to emitting .js beside every source.
+// Gate: run scripts/plugin-typecheck.sh from the repo root (the recipe lives there). noEmit stays here so tsc never writes .js beside the sources when the engine types are missing.
 {
   "extends": "./.claude-plugin/types/tsconfig.json",
   "compilerOptions": { "noEmit": true },
