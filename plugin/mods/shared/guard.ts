@@ -8,6 +8,9 @@
 //     try { ...body, calling go(e) instead of next(e)... } catch { return go.fallback(e) }
 //   }
 //
+// Read `budget` (an engine getter) from the raw `next`, not from `once(next)`: the copy is a snapshot.
+// What the engine hangs on `next` besides `signal` is not otherwise relied on.
+//
 // The scanner refuses a hook that is not a function literal and a `$` passed across an import, so
 // this helper takes only `next`; the try/catch stays in the handler, where `$` is.
 
