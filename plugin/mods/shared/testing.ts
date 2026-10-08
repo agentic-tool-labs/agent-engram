@@ -17,8 +17,6 @@ export type RoutingTable = {
   /** Keyed by op; an op with no handler answers 404, i.e. "unsupported". */
   ops?: Readonly<Record<string, FetchHandler>>
   sessionId?: string
-  /** What `clock.now` answers in `installFakeEngine`, epoch ms; default 1,000,000. */
-  now?: number
 }
 
 export type Router = {
@@ -64,6 +62,9 @@ export function createRouter(table: RoutingTable): Router {
  * Bottom hooks on the test `on` (beneath every plugin) answering `process.run`, `http.fetch` and
  * `session.id` from the table, for mod tests that drive their real hooks through engine events.
  * An op hook answers `{ value }`, not the bare result.
+ *
+ * It does not answer `clock.*`: the engine allows one bottom hook per event, so a test whose hooks
+ * read the clock calls `mock.clock(on)` itself, and a second answer here would fail the load.
  */
 export function installFakeEngine(on: On, table: RoutingTable = {}): Router {
   const router = createRouter(table)
@@ -76,9 +77,6 @@ export function installFakeEngine(on: On, table: RoutingTable = {}): Router {
     return { value: { ...r, headers: {} } }
   })
   on('session.id', () => ({ value: router.sessionId() }))
-  on('clock.now', () => ({ value: table.now ?? 1_000_000 }))
-  // Time does not pass here: a test that needs it uses mock.clock, or fakeModIo's clock.
-  on('clock.sleep', () => new Promise<never>(() => {}))
   return router
 }
 
