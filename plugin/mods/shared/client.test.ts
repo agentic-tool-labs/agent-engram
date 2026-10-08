@@ -318,3 +318,39 @@ test('modApi never throws: an io that rejects yields an error value', async () =
   const r = await modApi(io, 'recall', BODY, { mod: 'lens' })
   expect(r).toEqual({ ok: false, reason: 'error', detail: 'Error: state gone' })
 })
+
+test('a hook signal that is already aborted is a timeout at once, with no request and no wait', async () => {
+  const rig = fakeModIo({ ...RUNNING, ops: { recall: OK } })
+  const hook = new AbortController()
+  hook.abort()
+  expect(await recall(rig, { signal: hook.signal })).toEqual({ ok: false, reason: 'timeout' })
+  expect(rig.router.fetchCalls.length).toBe(0)
+  expect(rig.router.processCalls.length).toBe(0)
+})
+
+test('concurrent first calls share one status lookup', async () => {
+  const rig = fakeModIo({ ...RUNNING, ops: { recall: OK } })
+  await Promise.all([
+    recall(rig, {}, { session_id: 's1', query: 'a' }),
+    recall(rig, {}, { session_id: 's1', query: 'b' }),
+    recall(rig, {}, { session_id: 's1', query: 'c' }),
+  ])
+  expect(rig.router.processCalls.filter((c) => c.argv.includes('status')).length).toBe(1)
+  expect(rig.router.fetchCalls.length).toBe(3)
+})
+
+test('a connection error (fetch rejects, as the engine does for a refused port) clears the port and backs off', async () => {
+  const rig = fakeModIo({
+    ...RUNNING,
+    ops: {
+      recall: () => {
+        throw new Error('HooksError: $.http.fetch(http://127.0.0.1:7433/mod/v1/recall) failed: ECONNREFUSED')
+      },
+    },
+  })
+  const r = (await recall(rig)) as { ok: false; reason: string; detail?: string }
+  expect(r.reason).toBe('server-down')
+  expect(r.detail).toContain('ECONNREFUSED')
+  expect(rig.shared().port).toBeNull()
+  expect(rig.shared().noPortAt).not.toBeNull()
+})

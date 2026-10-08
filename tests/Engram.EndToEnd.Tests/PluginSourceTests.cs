@@ -64,6 +64,7 @@ public class PluginSourceTests
     [InlineData("const r = await $.mcp.call('s', 't', {})")]
     [InlineData("const r = await io.mcp.call('s', 't', {})")]
     [InlineData("return engine.mcp.connect('s')")]
+    [InlineData("const r = await $?.mcp?.call('s', 't')")]
     public void McpCall_OnAnyReceiver_IsReportedWithFileAndLine(string line)
     {
         using var tree = new TempTree();
@@ -88,6 +89,27 @@ public class PluginSourceTests
         Assert.Empty(McpCalls(ModSourceFiles(tree.Root)));
     }
 
+    // A receiver split across lines is still a call; the reported line is where ".mcp" begins.
+    [Fact]
+    public void McpCall_SplitAcrossLines_IsReportedAtTheLineOfMcp()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/lens/index.ts", "const r = await $\n  .mcp\n  .call('s', 't')\n");
+
+        var only = Assert.Single(McpCalls(ModSourceFiles(tree.Root)));
+
+        Assert.Equal(Path.Combine(tree.Root, "mods", "lens", "index.ts") + ":2", only);
+    }
+
+    [Fact]
+    public void McpCall_InAJavaScriptModule_IsReported()
+    {
+        using var tree = new TempTree();
+        tree.Write("mods/lens/index.mjs", "x.mcp.call()\n");
+
+        Assert.Single(McpCalls(ModSourceFiles(tree.Root)));
+    }
+
     [Fact]
     public void McpCall_InAHooksFileOrATestFile_IsReported_ButNotOutsideHooksAndMods()
     {
@@ -107,21 +129,25 @@ public class PluginSourceTests
             .Select(d => Path.Combine(pluginDirectory, d))
             .Where(Directory.Exists)
             .SelectMany(d => Directory.EnumerateFiles(d, "*.*", SearchOption.AllDirectories))
-            .Where(f => f.EndsWith(".ts", StringComparison.Ordinal) || f.EndsWith(".tsx", StringComparison.Ordinal))
+            .Where(f => SourceExtensions.Contains(Path.GetExtension(f)))
             .Order(StringComparer.Ordinal);
+
+    // The engine loads every one of these suffixes as a hooks module. The pattern tolerates
+    // optional chaining and a receiver split across lines, which a per-line match would miss.
+    private static readonly string[] SourceExtensions = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"];
+
+    private static readonly Regex McpCallPattern = new(@"\??\.\s*mcp\s*\??\.", RegexOptions.Compiled);
 
     private static List<string> McpCalls(IEnumerable<string> files)
     {
         var found = new List<string>();
         foreach (var file in files)
         {
-            var lines = File.ReadAllLines(file);
-            for (var i = 0; i < lines.Length; i++)
+            var text = File.ReadAllText(file);
+            foreach (Match match in McpCallPattern.Matches(text))
             {
-                if (Regex.IsMatch(lines[i], @"\.mcp\."))
-                {
-                    found.Add($"{file}:{i + 1}");
-                }
+                var line = text.AsSpan(0, match.Index).Count('\n') + 1;
+                found.Add($"{file}:{line}");
             }
         }
 

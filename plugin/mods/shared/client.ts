@@ -110,8 +110,17 @@ function classify(status: number, text: string): ApiResult<unknown> {
   return fail('error', detail ?? `HTTP ${status}`)
 }
 
-/** The server's base URL from `engram status --json`, or why there is none. */
-async function resolveBase(io: ModIo): Promise<{ base: string } | ApiFailure> {
+let resolving: Promise<{ base: string } | ApiFailure> | undefined
+
+/** The server's base URL from `engram status --json`; concurrent callers share one lookup. */
+function resolveBase(io: ModIo): Promise<{ base: string } | ApiFailure> {
+  resolving ??= lookUpBase(io).finally(() => {
+    resolving = undefined
+  })
+  return resolving
+}
+
+async function lookUpBase(io: ModIo): Promise<{ base: string } | ApiFailure> {
   const state = await io.readShared()
   if (state.unsupported) return fail('unsupported')
   if (state.port !== null) return { base: `http://127.0.0.1:${state.port}` }
@@ -159,6 +168,7 @@ export function modApi<O extends ModOp>(
 export function modApi<T>(io: ModIo, op: string, body: object, opts: ModApiOptions): Promise<ApiResult<T>>
 export async function modApi(io: ModIo, op: string, body: object, opts: ModApiOptions): Promise<ApiResult<unknown>> {
   try {
+    if (opts.signal?.aborted) return fail('timeout')
     const base = await resolveBase(io)
     if (!('base' in base)) return base
 

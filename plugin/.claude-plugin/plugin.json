@@ -71,7 +71,7 @@
     "belief_diff_scope": {
       "type": "string",
       "title": "Belief diff scope",
-      "description": "Which revised facts the belief diff shows: none, only the user's own, or all.",
+      "description": "Which revised facts the belief diff shows: off, only the user's own, or all.",
       "default": "personal",
       "options": ["off", "personal", "all"]
     },
