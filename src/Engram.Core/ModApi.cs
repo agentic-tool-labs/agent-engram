@@ -189,7 +189,9 @@ public static class ModApi
             throw NotFound(request.FactId!);
         }
 
-        var closed = FactStore.Forget(connection, factId, ForgetReason, DateTimeOffset.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var sessionRow = SessionStore.EnsureSession(connection, null, sessionId, now);
+        var closed = FactStore.Forget(connection, factId, ForgetReason, now, sessionRow);
         if (closed)
         {
             RecordCall(home, request, sessionId, "forget");

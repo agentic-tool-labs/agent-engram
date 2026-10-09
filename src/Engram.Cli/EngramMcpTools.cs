@@ -249,7 +249,9 @@ public sealed class EngramMcpTools
         // declines to write back anything this store has held before, so a retraction
         // survives a corpus revision.
         using var connection = EngramDatabase.OpenInitialized(home);
-        var closed = FactStore.Forget(connection, factId, "retracted by the user", DateTimeOffset.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var sessionRow = SessionStore.EnsureSession(connection, null, session.Value, now);
+        var closed = FactStore.Forget(connection, factId, "retracted by the user", now, sessionRow);
 
         // Reporting success for something that was never live would leave the user believing
         // a fact is gone while recall keeps returning it.

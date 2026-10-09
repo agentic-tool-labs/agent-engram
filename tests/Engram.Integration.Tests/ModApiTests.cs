@@ -465,6 +465,27 @@ public class ModApiTests
         Assert.Equal(callsBefore, Telemetry(sandbox, TelemetryEventKind.ModCall).Count);
     }
 
+    private static string? SessionThatRetracted(SandboxHome sandbox, string handle)
+    {
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT s.external_id FROM supersession x LEFT JOIN session s ON s.id = x.session_id WHERE x.old_fact_id = $id;";
+        command.Parameters.AddWithValue("$id", long.Parse(handle[1..]));
+        return command.ExecuteScalar() as string;
+    }
+
+    [Fact]
+    public void Forget_StampsTheRequestsClaudeSessionOnTheRetraction()
+    {
+        using var sandbox = new SandboxHome();
+        var handle = Remember(sandbox, "Retracted by a different session than wrote it.");
+
+        Call(sandbox, "forget", new JsonObject { ["session_id"] = "cc-session-2", ["fact_id"] = handle });
+
+        Assert.Equal("cc-session-2", SessionThatRetracted(sandbox, handle));
+    }
+
     [Fact]
     public void Forget_RecordsTheSameReasonAsTheMcpTool()
     {

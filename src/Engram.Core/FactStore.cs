@@ -137,11 +137,20 @@ public static class FactStore
     /// Closes a fact without replacing it. The fact is not deleted — a forgotten belief is
     /// still a belief that was held, and D8 forbids destroying authored truth.
     /// </summary>
-    public static bool Forget(SqliteConnection connection, long factId, string reason, DateTimeOffset now)
+    /// <param name="sessionId">
+    /// The <c>session</c> row that asked for the retraction, stamped on the supersession row;
+    /// null leaves that column null, as every caller without a session has always done.
+    /// </param>
+    public static bool Forget(
+        SqliteConnection connection,
+        long factId,
+        string reason,
+        DateTimeOffset now,
+        long? sessionId = null)
     {
         using var transaction = EngramDatabase.BeginWrite(connection);
 
-        if (!Forget(connection, transaction, factId, reason, now))
+        if (!Forget(connection, transaction, factId, reason, now, sessionId))
         {
             transaction.Rollback();
             return false;
@@ -161,7 +170,8 @@ public static class FactStore
         SqliteTransaction transaction,
         long factId,
         string reason,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        long? sessionId = null)
     {
         var timestamp = now.ToUnixTimeSeconds();
 
@@ -185,11 +195,12 @@ public static class FactStore
             connection,
             transaction,
             """
-            INSERT INTO supersession (old_fact_id, new_fact_id, reason, created_at)
-            VALUES ($old, NULL, $reason, $now);
+            INSERT INTO supersession (old_fact_id, new_fact_id, reason, session_id, created_at)
+            VALUES ($old, NULL, $reason, $session, $now);
             """,
             ("$old", factId),
             ("$reason", reason),
+            ("$session", (object?)sessionId ?? DBNull.Value),
             ("$now", timestamp));
 
         return true;

@@ -111,6 +111,26 @@ public class EngramMcpToolsTests
         Assert.DoesNotContain($"[{handle}]", result);
     }
 
+    // The MCP tool stamps the transport id, the same id space every other MCP write uses.
+    [Fact]
+    public void Forget_StampsTheTransportSessionOnTheRetraction()
+    {
+        using var sandbox = new SandboxHome();
+        var writer = new McpSessionId("session-a");
+        var retractor = new McpSessionId("session-b");
+        var handle = HandleOf(EngramMcpTools.Remember(
+            sandbox.Home, writer, Initialized, NoRuntime(sandbox.Home), "A note that session b will retract."));
+
+        EngramMcpTools.Forget(sandbox.Home, retractor, Initialized, handle);
+
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT s.external_id FROM supersession x JOIN session s ON s.id = x.session_id WHERE x.old_fact_id = $id;";
+        command.Parameters.AddWithValue("$id", long.Parse(handle[1..]));
+        Assert.Equal("session-b", command.ExecuteScalar());
+    }
+
     [Fact]
     public void Remember_ReturnsAFactHandleInResponseText()
     {
