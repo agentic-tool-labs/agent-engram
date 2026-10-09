@@ -127,7 +127,8 @@ public sealed class TelemetryFeed
     /// </summary>
     /// <remarks>
     /// The ring is filled before this returns, so whatever the caller does with the batch — however
-    /// slowly — cannot delay the tail.
+    /// slowly — cannot hide a record that has already been read. It can still delay the next read:
+    /// the caller that delivers the batch is the caller that polls.
     /// </remarks>
     public IReadOnlyList<FeedItem> Poll()
     {

@@ -422,9 +422,13 @@ public static class ModApi
         """;
 
     /// <summary>
-    /// Retractions in a window. Names its index: with <c>ANALYZE</c> run the planner still prefers
+    /// Retractions in a window. Two constructs here are load-bearing, and each has a test that goes
+    /// red without it. <c>INDEXED BY</c>: with <c>ANALYZE</c> run the planner still prefers
     /// <c>ix_supersession_new (new_fact_id=?)</c> for <c>IS NULL</c>, which reads every retraction
-    /// ever made and sorts them.
+    /// ever made and sorts them; a store without the index therefore fails here rather than
+    /// scanning. The unary plus in <see cref="TailSessionFilter"/>, appended to this statement for a
+    /// session scope: without it the planner starts at <c>session.external_id</c> and walks the
+    /// session's facts instead of seeking the retraction window.
     /// </summary>
     internal const string TailRetractionsSql =
         """

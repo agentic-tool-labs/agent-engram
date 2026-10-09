@@ -5679,10 +5679,13 @@ through `fact.superseded_by`, which has no index.
 process, as before) or while a `tail` request arrived in the last 10 s; the first request starts it at
 end-of-file, and a lapse stops it. Each start begins a new epoch: records written while it was stopped
 are gone, and a consumer comparing sequence numbers across the gap would read the hole as continuity.
-`Poll` fills the ring before it returns the batch, so a subscriber that hangs cannot stop the batch
-that provoked the hang from being visible. It does not make later batches immune: delivery still
-shares `WebhookService`'s poll loop (one failing attempt per URL per poll, bounded by the webhook
-timeout), which is unchanged and was left alone on purpose. `WebhookService` keeps its two-argument
+`Poll` fills the ring before it returns the batch, so a hanging subscriber never delays records
+already read. It *can* delay the next read, because the one loop both reads and delivers: by at most
+the delivery timeout times the number of unmuted URLs that hang. Each failing URL gets one attempt per
+poll and is then muted (2 s doubling to 30 s), so a persistently hanging URL costs about one timeout
+per mute expiry. A pump independent of delivery was rejected: it would change webhook semantics
+(today a slow subscriber delays the others' delivery; the alternative would drop their batches), and
+the stall only exists when a webhook URL is configured and hangs. `WebhookService` keeps its two-argument
 constructor, so `WebhookServiceTests` are unedited; its loop now runs without a subscriber too,
 because it is the only thing that pumps the feed. With no webhook and no open tail no reader exists,
 as today; with a tail open the starvation exposure equals today's webhook-configured exposure.
