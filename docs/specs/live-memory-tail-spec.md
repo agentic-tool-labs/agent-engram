@@ -48,6 +48,15 @@ Reviewer: reviewer
   - The M-test rewrite rule is broadened to all r5-string tests.
   - W2's falsification is now W2-specific.
 
+- **r8 (reload bug, live 1.3.7).** §6.10.
+  - The toggle and `session.start` decide from **shown** (`$.ui.panes()`, falling back to the atom) and **running** (a module-level flag a reload resets).
+  - Resume keeps the saved cursors, so nothing is missed and nothing replays.
+  - A heartbeat line shows liveness, and the empty state is split into connecting and watching forms.
+  - The atom carries a `shape` tag, and a mismatched atom is declined.
+  - `not-found`/`unsupported` retry every 300 s instead of stopping, and the shared client's sticky `unsupported` flag becomes a 300 s back-off.
+  - E3 is answered for hot reload; E2 is now load-bearing, with a safe failure. E16 is added.
+  - Plugin version 1.3.8.
+
 ## TL;DR
 
 - `/engram-tail` toggles the **Memory Tail** pane: a live, newest-first log of memory activity.
@@ -367,8 +376,8 @@ The tick never throws (`shared/guard.ts` pattern) and always reschedules unless 
 | `server-down` | `Engram server not reachable — /engram:start` | 15 s |
 | `timeout` | `Engram server slow to answer` | 15 s |
 | `not-initialised` | `Engram home not initialised — engram init` | 15 s |
-| `not-found` | `the running Engram server predates the memory tail — update, then /engram:restart` | **stop** |
-| `unsupported` | `the running Engram server has no mod API` | **stop** |
+| `not-found` | `the running Engram server predates the memory tail — update, then /engram:restart` | **300 s** (r8; was stop) |
+| `unsupported` | `the running Engram server has no mod API` | **300 s** (r8; was stop) |
 | `bad-request` | `memory tail request rejected: <detail>` | 15 s |
 | `error` | `memory tail error` | 15 s |
 | success with `events: null` | `activity feed unavailable — showing writes only` | 2 s |
@@ -528,6 +537,130 @@ Existing M-tests keep **every data assertion**: which rows appear, cursors, dedu
 | E14 | Does a row `Box flexDirection="row" flexWrap="wrap"`, with a non-shrinking head and a detail `Box minWidth={30} flexGrow={1}`, put the detail beside the head on wide panes and below it on narrow ones? | Yes → amendment: one-line rows on wide panes |
 | E15 | Does `$.ui.open({ columns })` set or floor a docked pane's width? | Recorded only; the design does not depend on it |
 
+### 6.10 Surviving a plugin reload (r8)
+
+**Bug, from live use of 1.3.7.** A plugin hot reload while the pane is open leaves it frozen and silent. The host cancels pending `$.clock` waits and resets module variables, but keeps `$.state`. The loop (a `$.clock.after` chain whose `timer`/`generation` live at module level in `plugin/mods/tail/index.tsx`) dies. `TAIL.paneOpen` stays true. `session.start` re-fires but only honours `tail_auto_open`. The toggle reads `paneOpen`, so the first press closes the pane and only the second restarts polling. A live pane and a dead one both say `No activity yet.`
+
+**Host facts this rests on** (host docs, read by the Implementor; confirm live as E3):
+- `$.state` survives a hot reload.
+- `$.clock` waits and module variables do not.
+- `session.start` fires again after a reload.
+
+#### 6.10.1 Two facts, two sources
+
+The toggle and `session.start` decide from two facts and never from `paneOpen` alone.
+
+| Fact | Source | Why |
+|---|---|---|
+| **shown**: the pane is on screen | `$.ui.panes()`: an entry with id `engram-tail` and `isPlaced: true`. If the call throws or rejects, fall back to the atom's `paneOpen` | The atom outlives the pane (a manual close has no event). `panes()` asks the host. Whether it reflects a manual close is E2 |
+| **running**: a poll chain is alive in *this* module instance | A module-level boolean, set when the chain starts and cleared by `stop()` | It must live at module level precisely so a reload resets it. That is what makes it truthful after the host kills the timers |
+
+#### 6.10.2 Decision table
+
+One pure function in `model.ts` maps (trigger, shown, running) to an action. `index.tsx` performs the action.
+
+| Trigger | shown | running | Action | Command reply |
+|---|---|---|---|---|
+| `session.start` | yes | no | **resume** | — |
+| `session.start` | no | — | set `paneOpen = false`; then, if `tail_auto_open`, open and start as today | — |
+| `session.start` | yes | yes | nothing | — |
+| `/engram-tail` | yes | yes | close the pane, `stop()`, `paneOpen = false` | `Memory Tail closed.` |
+| `/engram-tail` | yes | no | **resume** | `Memory Tail resumed.` |
+| `/engram-tail` | no | — | open, start (first request without cursors, as today) | `Memory Tail opened.` |
+
+**Resume** keeps the atom's cursors (`after`, `closed_after`, `event_epoch`, `event_after`), rows, filter and `filterOpen`. It inserts one marker row, `resumed`, at the current time, and starts the chain whose first request **sends the saved cursors**.
+
+Resuming from the saved cursors, rather than resetting to head as the brief suggested, was chosen because the atom survived. Those cursors are exactly the "no replay, no gap" state:
+- Writes and retractions that landed during the reload arrive on the first poll. A burst over `limit` shows the usual `… N more` marker.
+- The server's event epoch is unaffected by a plugin reload, so missed events still in the ring arrive too.
+- If the server restarted meanwhile, the epoch differs and the existing `event feed restarted` marker fires.
+- Rows already shown stay, and dedupe by key absorbs any overlap.
+
+Resetting to head would drop exactly the activity Jim reloads to see.
+
+#### 6.10.3 Heartbeat and the two empty states
+
+**Heartbeat.** The atom gains `lastOkAt` (ms), set on every successful poll and only then.
+- Whenever `lastOkAt` is set, a dim line `Updated HH:mm:ss` renders directly under the header (and under the filter list when it is open), above the status line.
+- It is `Text dimColor wrap="truncate-end"`, 16 characters, within §6.9's 24-column rule. It never wraps.
+- On failure it keeps its last value while the status line explains. A dead or failing loop therefore shows a time that stops advancing.
+- The time uses lens's `clock`.
+
+**Empty states** (§6.9.3), replacing the single `No activity yet.`:
+
+| When | Text |
+|---|---|
+| no successful poll since the chain (re)started | `Connecting to Engram…` |
+| at least one successful poll, nothing to show | `No activity yet.` |
+| rows exist, all filtered out | `All <n> rows hidden by the filter.` (unchanged) |
+
+Every token is ≤ 20 characters, and both texts are covered by W11. "Before the first successful poll" is a module-level fact that resets on reload, so a resumed pane says `Connecting…` until its first answer. The rows it already holds still render.
+
+#### 6.10.4 A declined atom (`shape`)
+
+The `tail` atom gains `shape`, a string-literal constant defined once in `model.ts`, with current value `tail-3`. Bump it whenever `TailState` changes incompatibly.
+- On every read, an atom whose `shape` is missing or different is **declined**. It is treated as absent and replaced by a fresh state: no rows, null cursors, `filterOpen: false`, default filter, and `paneOpen` taken from `shown`.
+- It is never read field by field and never migrated.
+- If `shown`, the chain starts as a fresh open: no cursors, no backlog.
+- This is the host types' recommended guard for an atom written by an older module version, which a reload makes routine.
+
+#### 6.10.5 404s: visible, and not permanent
+
+Today, `not-found` (the server lacks `tail`) and `unsupported` (the server lacks `/mod/v1`) stop the loop for good. Worse, `unsupported` sets the shared client's `shared.unsupported` flag, which is sticky for the session and survives a reload because it lives in `$.state`. That disables every mod's API even after the server is upgraded.
+
+**Tail.** Neither reason stops the loop. Both reschedule at **300 s**, and their status line (§6.9.3 texts) stays up until a success clears it. Upgrading and restarting the server recovers the tail within 5 minutes, with no reload.
+
+**Shared client** (`plugin/mods/shared/client.ts`). The flag becomes a back-off that expires 300 s after it was set, the same pattern as the existing 60 s `noPortAt`.
+- While unexpired, calls return `unsupported` without a request, as today.
+- After expiry the next call goes to the network and re-arms the flag if the 404 recurs.
+- Store the time it was set in `SharedState` (`plugin/mods/shared/state.d.ts`, `shared` key only).
+- Every reader of `shared.unsupported` across `plugin/mods` goes through the client's own check, never the raw field. The Implementor finds them with `grep -rn "unsupported" plugin/mods`.
+
+This is the one change outside the tail mod. It is justified because a 404 describes the server instance that answered, not the session, and recovery for every mod is the point.
+
+#### 6.10.6 E2 and E3, now
+
+- **E3 is answered by host docs for hot reload:** state survives, timers and module variables do not. §6.10 is built on that. What stays open is `/clear` and resume (does the atom persist across a session-id change?). Whichever way it falls, §6.10.2 handles it: a fresh atom means a declined or absent state, and a fresh open.
+- **E2 is now load-bearing, but with a safe failure.** Does `$.ui.panes()` drop or unplace `engram-tail` after a manual close?
+  - Yes: the stale-open ceiling (§6.5) goes away. `session.start` stops resuming closed panes, and the toggle opens rather than resumes.
+  - No: a manually closed pane reads as shown, so the toggle **resumes** instead of reopening. The reply `Memory Tail resumed.` then names what happened, a second press closes, and a third opens. Record which in D79.
+
+#### 6.10.7 Files (one commit, plugin `1.3.8`)
+
+| File | Change |
+|---|---|
+| `plugin/mods/tail/model.ts` | The decision table (§6.10.2). The `shape` constant and the decline rule. The heartbeat text. The two empty texts. The 300 s cadence for `not-found`/`unsupported` |
+| `plugin/mods/tail/index.tsx` | Module-level `running`. `shown` via `$.ui.panes()` with the atom fallback. `session.start` and the command perform the table's action and reply. The resume marker. Set `lastOkAt` on success. Render the heartbeat line. Connecting vs watching empty state |
+| `plugin/mods/shared/state.d.ts` | `tail` key: `shape`, `lastOkAt`. `shared` key: the expiring `unsupported` timestamp, replacing the boolean |
+| `plugin/mods/shared/client.ts` | Expiring `unsupported` (§6.10.5) |
+| `plugin/mods/shared/client.test.ts` | C1 |
+| any other `plugin/mods/**` reader of `shared.unsupported` | Read through the client's check |
+| `plugin/mods/tail/tail.test.tsx` | R1–R9. M13 updated (300 s, not stop) |
+| `plugin/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` | `1.3.8` |
+
+No server or C# change.
+
+#### 6.10.8 Tests
+
+| # | File | Assertion | Falsification |
+|---|---|---|---|
+| R1 | tail.test.tsx | Decision table, all six rows, as a pure function | Decide the toggle from `paneOpen` instead of `running` → (toggle, shown, not running) yields close → red |
+| R2 | tail.test.tsx | Mounted: open the pane (polls run). Simulate a reload: cancel the chain the way the host does and reset the module's `running`, keeping the atom. Fire `session.start` with `panes()` reporting the pane placed → polling resumes at 2 s, and the first resumed request carries the saved `after`/`closed_after`/`event_epoch`/`event_after` | Reset cursors on resume → the request omits `after`, red. Resume nothing on `session.start` → no fetch, red |
+| R3 | tail.test.tsx | Same, but via `/engram-tail` with the pane placed and nothing running → reply `Memory Tail resumed.` and polling resumes; the pane is not closed | Close on that press → red |
+| R4 | tail.test.tsx | Resume keeps the ring's rows and inserts exactly one `resumed` marker | Clear rows, or insert one marker per poll → red |
+| R5 | tail.test.tsx | Heartbeat: after a success, `Updated HH:mm:ss` renders as `dimColor` and `truncate-end`, ≤ 16 characters. It advances on the next success and is unchanged after a failure while the status renders | Update `lastOkAt` on failure → red |
+| R6 | tail.test.tsx | `Connecting to Engram…` before the first success, `No activity yet.` after; both in W11's token check | Single text → red |
+| R7 | tail.test.tsx | An atom with `shape` missing or `tail-2` is declined: no old rows render and the first request sends no cursors | Read the old atom → the old cursor is sent, red |
+| R8 | tail.test.tsx | `not-found` and `unsupported` keep the loop: next fetch at 300 s, status persists, a later success clears it | Stop on either → red |
+| R9 | tail.test.tsx | `session.start` with `panes()` rejecting falls back to `paneOpen` | Treat a rejection as not shown → no resume, red |
+| C1 | client.test.ts | After an unsupported 404, calls short-circuit for 300 s, then the next call reaches the fake server; a recurring 404 re-arms the flag | Keep the boolean sticky → no request after 300 s, red |
+
+**If the test kit cannot simulate a reload** (cancelling waits while keeping state), R2's mounted half becomes **E16**. In that case R1, R3 and R4 still hold the logic, since R3 needs only a module that never started its chain plus a placed pane.
+
+| ID | Question | Then |
+|---|---|---|
+| E16 | Can the plugin test kit simulate a hot reload: cancel `$.clock` waits, reset module state, keep `$.state`? | No → R2's mounted half is checked live once, and the result is recorded in D79 |
+
 ## 8. Options
 
 | Option | Type | Default | Meaning |
@@ -582,7 +715,7 @@ Neighbouring inputs (S = `scope=session`, A = `scope=all`):
 | server restart while open | cursors survive; event marker | same |
 | pane closed, MCP calls made, pane reopened | no rows from the closed period | — |
 
-Only `not-found` and `unsupported` stop the loop.
+*(r8: no reason stops the loop any more. `not-found` and `unsupported` slow it to 300 s, per §6.10.4.)*
 
 ## 11. Tests (each guard falsified: break it, see red, restore; falsify against a committed tree and check `git diff --quiet`, per D60)
 
