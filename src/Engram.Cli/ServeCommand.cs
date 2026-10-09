@@ -120,10 +120,15 @@ internal static class ServeCommand
         // one Unavailable note and returns, which is the ordinary case.
         builder.Services.AddHostedService<IndexFreshnessService>();
 
-        // Delivery of the telemetry log to whoever subscribed. Registered unconditionally for the
-        // same reason as the backlog — with no URL configured it returns immediately, which is the
-        // ordinary case — and it is the only component permitted to make outbound HTTP, because
-        // every other producer of these events is a hook on a latency budget.
+        // The one reader of telemetry.jsonl in this process and the ring it fills. The webhook
+        // pumps it; nothing else may open the log for reading.
+        builder.Services.AddSingleton(_ => new TelemetryFeed(home));
+
+        // Delivery of the telemetry log to whoever subscribed, and the loop that pumps the feed.
+        // Registered unconditionally for the same reason as the backlog — with no URL configured
+        // it delivers nothing, which is the ordinary case — and it is the only component permitted
+        // to make outbound HTTP, because every other producer of these events is a hook on a
+        // latency budget.
         builder.Services.AddHostedService<WebhookService>();
 
         // The generic WithTools<T>() calls below are load-bearing, not a style choice: the SDK's
