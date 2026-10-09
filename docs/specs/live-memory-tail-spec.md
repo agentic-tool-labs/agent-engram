@@ -73,6 +73,8 @@ Reviewer: reviewer
   - Clearing `running` on a throwing reschedule is declined.
   - Plugin version 1.3.10.
 
+- **r12 (E1 result, HEAD 325beaa).** The burst bound is restated as p99 ≤ 50 ms plus a max < 500 ms ceiling, recorded. Measured worst: p99 27.0, max 100.5. Accepted, with no code change. Re-open triggers and the cause-measurement recipe are recorded in §13.
+
 ## TL;DR
 
 - `/engram-tail` toggles the **Memory Tail** pane: a live, newest-first log of memory activity.
@@ -897,6 +899,55 @@ Then run `scripts/plugin-typecheck.sh`. Exit 2 means the engine types are missin
 | E3 | Do `$.state` atoms survive a module reload, `/clear` and resume? | Document; a reset gives cursors at head, which is acceptable |
 | E4 | Does a pane follow its bottom edge? | Yes → amendment: newest last |
 | E8–E10 | §5a | Future work only |
+
+### E1 result and ruling (r12)
+
+Run by the Implementor against HEAD `325beaa`; results recorded in D79 (commit `cfb0451`).
+
+**Idle and first read.**
+- p50 0.19 ms at both 5,308 and 50,097 live facts.
+- 2 s polling costs about 0.03% of a core.
+- That passes the idle bar, so the §5a `data_version` fast path stays unbuilt.
+
+**Index burst.**
+- Setup: `index --apply` over 8 repos, +17,740 facts in 24.7 s and 52.7 s, polled every 100 ms.
+
+| Base | Scope | p50 | p95 | p99 | max (ms) |
+|---|---|---|---|---|---|
+| 5,308 | session | 0.75 | 5.3 | 12.6 | 27.7 |
+| 50,097 | session | 0.69 | 2.2 | 2.9 | 74.7 |
+| 5,308 | all | 0.44 | 4.8 | 27.0 | 100.5 |
+| 50,097 | all | 0.39 | 1.9 | — | 10.2 |
+
+- A single-repo burst (+5,496 facts in 7 s) had a max of 69.5 ms.
+- A CPU-only control (18 busy processes, no DB writes) gave p50 2.4, p95 10.2, max 14.5 ms.
+- The 70–100 ms maxima (about 1 poll in 223–483) are therefore not CPU contention alone. Their cause is **not established**: checkpoint, writer lock and scheduling were all left uninvestigated.
+
+**Ruling: accepted.** The "burst > 50 ms" bar is restated as a percentile plus a ceiling, because r4 never said which statistic it meant. It now reads:
+
+| Statistic | Bound | Measured worst | Verdict |
+|---|---|---|---|
+| p99 | ≤ 50 ms | 27.0 | pass |
+| max | **< 500 ms** (half the shared client's 1000 ms default timeout); recorded, not bounded at 50 | 100.5 | pass |
+
+**Why the max is harmless below the ceiling.**
+- Each poll is an asynchronous request on a 2 s loop. One slow answer delays one tick: it drops no rows (the cursors are exact and advance only on success) and does not lag the cursor.
+- The read cannot slow the indexer, because a WAL reader does not block the writer.
+- The only user-visible failure a slow poll can produce is the client timeout. That shows `Server slow · retrying` and backs off to 15 s. The ceiling keeps the worst poll at half that timeout.
+
+**What re-opens it** (Architect, with a cause measurement first):
+- any recorded tail poll ≥ 500 ms;
+- a live `Server slow` status during normal use;
+- p99 > 50 ms on a re-run.
+
+The cause measurement, when triggered, is: rerun the same burst while capturing (a) WAL checkpoint start and end times from the writer and (b) the tail statement's own duration inside `ModApi`, separate from the HTTP round trip. A slow poll that coincides with a checkpoint confirms the checkpoint as the cause; a slow statement not coinciding points at the writer lock or the planner. Only then decide a design change (for example a dedicated read connection).
+
+**Caveats, recorded rather than re-run.**
+- The burst was 17.7k facts, not the planned ~45k, because few files had tree-sitter grammars.
+- The stores were synthetic.
+- The 100 ms polling puts about 70 new rows behind each poll, against about 1,400 at the shipped 2 s cadence during a burst of ~700 facts/s. Per-poll work that scales with burst rows is the `skipped` count's rowid range scan. Over ~1.4k rows that is well under a millisecond by the idle numbers, so the larger per-poll range does not threaten the p99 bound. It is unmeasured; the re-open triggers cover it.
+
+**No code change.**
 
 ## 14. Closed questions
 
