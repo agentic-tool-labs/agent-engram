@@ -528,10 +528,10 @@ public static class EngramDatabase
 
         if (from < 17)
         {
-            // Pure query planning, like ix_fact_thread at v5: creates no state and the retraction
-            // lookup is correct without it — only a scan of every retraction ever made. Partial on
-            // new_fact_id IS NULL so supersessions that have a successor, the bulk of the table,
-            // cost no write and are never matched.
+            // Creates no state, but unlike ix_fact_thread at v5 it is load-bearing: the tail's
+            // retraction lookup names it with INDEXED BY, so a store without it fails that query
+            // rather than scanning. Partial on new_fact_id IS NULL so supersessions that have a
+            // successor, the bulk of the table, cost no write and are never matched.
             Execute(
                 connection,
                 null,

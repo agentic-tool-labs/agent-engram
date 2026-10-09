@@ -7,7 +7,6 @@ import { parseDigest } from '../lens/parser'
 export const MAX_ROWS = 200
 export const POLL_MS = 2_000
 export const RETRY_MS = 15_000
-export const LIMIT = 50
 const CLIP = 120
 const MAX_HANDLES = 500
 

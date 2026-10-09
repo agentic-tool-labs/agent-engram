@@ -121,6 +121,30 @@ public class TelemetryFeedTests
     }
 
     [Fact]
+    public async Task WithNoUrl_ADemandedFeedStillFillsItsRingThroughTheRunningService()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        var feed = new TelemetryFeed(sandbox.Home);
+        var service = new WebhookService(sandbox.Home, NullLogger<WebhookService>.Instance, feed);
+
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            feed.Demand();
+            Record(sandbox, TelemetryEventKind.Remember, query: "pumped without a subscriber");
+
+            Assert.True(
+                await Settles(() => feed.Read(feed.Epoch, 0, 10, null).Rows.Count == 1),
+                "nothing pumped the feed while no webhook was configured");
+        }
+        finally
+        {
+            await service.StopAsync(CancellationToken.None);
+            service.Dispose();
+        }
+    }
+
+    [Fact]
     public void AWebhookStartsTheReaderOnce_AndNothingElseDoes()
     {
         using var sandbox = new SandboxHome(initialize: false);
