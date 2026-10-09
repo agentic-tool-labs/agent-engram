@@ -90,8 +90,9 @@ function stop() {
   running = false
 }
 
-// There is no pane-closed event, so a pane the person closes by hand keeps polling until
-// /engram-tail runs again or the session ends; the cost is one cheap request every two seconds.
+// A pane closed by hand sends no event, so its chain keeps polling (one cheap request every two
+// seconds) until /engram-tail runs or a session.start finds that the host no longer lists the pane.
+// If the host still lists it as placed, /engram-tail closes the running chain and the next press resumes it.
 function start($: EngineInterface, scope: 'session' | 'all') {
   stop()
   running = true

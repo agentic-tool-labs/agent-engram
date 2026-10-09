@@ -950,13 +950,16 @@ function hostPanes(on: On, list: object[] | 'reject') {
  */
 function seed(on: On, initial: unknown, key: 'tail' | 'shared' = 'tail') {
   let store = { value: initial, version: 1 }
+  let writes = 0
   on('state.get', { plugin: 'engram', key } as never, () => ({ value: { value: store.value, version: store.version } }) as never)
   on('state.set', { plugin: 'engram', key } as never, (_$, e) => {
     const write = e as unknown as { value: unknown; ifVersion?: number }
     if (write.ifVersion !== undefined && write.ifVersion !== store.version) return { value: { isSet: false, version: store.version } } as never
     store = { value: write.value, version: store.version + 1 }
+    writes += 1
     return { value: { isSet: true, version: store.version } } as never
   })
+  return { writes: () => writes }
 }
 
 const saved = (over: object = {}) => ({
@@ -1182,6 +1185,21 @@ test('R8: a missing mod API is polled every 15 s behind the client back-off, so 
   await w.advance(10_001)
   expect(w.tails().length).toBeGreaterThanOrEqual(1)
   expect(await shown($)).not.toContain('Server has no mod API')
+})
+
+test('R8: behind the back-off the tail sends nothing and writes its status at most once per 15 s', async ($, on) => {
+  const w = world(on)
+  const tail = seed(on, { shape: 'tail-3', value: TAIL_INITIAL })
+  seed(on, { binary: { path: '/fake/bin/engram' }, port: 7433, noPortAt: null, unsupportedAt: NOW_MS - 100_000 }, 'shared')
+
+  await openAndSettle($, w)
+  const before = tail.writes()
+  await w.advance(150_000)
+
+  // Each failed poll writes the status once, so the writes count the polls.
+  expect(w.tails().length).toBe(0)
+  expect(tail.writes() - before).toBeLessThanOrEqual(150_000 / 15_000)
+  expect(tail.writes() - before).toBeGreaterThanOrEqual(150_000 / 15_000 - 1)
 })
 
 test('R8: a real 404 for the mod API keeps the line and is retried once the back-off has run out', async ($, on) => {
