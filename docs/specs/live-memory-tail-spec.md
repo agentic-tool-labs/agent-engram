@@ -39,6 +39,15 @@ Reviewer: reviewer
   - The host has no popup and no width reader, so the layout is width-agnostic.
   - ce26162's button strip is deleted. Plugin version 1.3.7.
 
+- **r7 (spec matched to the r6 build, 392a39e).** No code change.
+  - Head marks are adjacent.
+  - The `qualifier` field on `TailRow` is confirmed.
+  - The empty state wraps too (W6, W11).
+  - Unknown long labels are never cut by the mod.
+  - Day separators over marker rows are intended.
+  - The M-test rewrite rule is broadened to all r5-string tests.
+  - W2's falsification is now W2-specific.
+
 ## TL;DR
 
 - `/engram-tail` toggles the **Memory Tail** pane: a live, newest-first log of memory activity.
@@ -385,14 +394,14 @@ So the mod **cannot compute a layout for a given width**. The design has to be w
 
 Every row renders as up to two `Text` lines in a column, **both `wrap="truncate-end"`**, so the host never wraps a row mid-token.
 
-**Head** (always present). Fields in this order, single spaces between:
+**Head** (always present). Its exact shape is `<session mark><state mark> HH:mm:ss <label>[ <qualifier>]`. The two marks are **adjacent**, with no space between them, and a single space separates each later field. That is what makes the fixed prefix 12 characters. *(r7: r6 said "single spaces between", which contradicted the 12.)*
 
 | # | Field | Width | Values |
 |---|---|---|---|
 | 1 | session mark | 1 | `•` known this session (§6.6), else a space |
 | 2 | state mark | 1 | `✗` for a retraction row or a write row now retracted, else a space |
 | 3 | time | 8 | `HH:mm:ss` via lens's `clock`; always today's form (see day separators) |
-| 4 | label | ≤ 14 | the exact kind, origin or tool name |
+| 4 | label | whole | The exact kind, origin or tool name, **never cut or abbreviated by the mod**. Every known label is ≤ 14 characters. An unknown longer kind renders whole and the host's `truncate-end` cuts the line. *(r7 ruling: a mod-side cut would display a label that is not the stored kind, against D18/D43's exact-label rule, while a host cut shows its `…`.)* |
 | 5 | qualifier | rest | only where present: `← fN` (write that replaces), the retracted fact's origin (retraction) |
 
 At 24 columns the fixed prefix (marks, spaces, time) is 12 characters. Labels of up to 11 characters always show whole. A 12-character label shows whole only when no qualifier follows. Longer labels such as `subagent-start` lose their tail. At 80 and 120 the whole head shows.
@@ -414,7 +423,9 @@ At 24 columns a recall keeps `7 facts · high` and loses the query. A write keep
 
 **Clip.** The 120-character `CLIP` (r5) stays as a **payload cap** applied to each free-text field before layout. It is not a layout width: the host's `truncate-end` cuts to the real pane width, which the mod cannot know.
 
-**Day separators.** The time column is always `HH:mm:ss`. Between two adjacent displayed rows whose local dates differ, and above the first row when its date is not today, render one separator line: `── yyyy-MM-dd ──`. The date is the first 10 characters of lens's `stamp`; do not write another formatter. Separators are presentation only: not in the ring, not counted, never filtered.
+**Qualifier encoding** *(r7, confirmed as built).* The `TailRow` type in `plugin/mods/shared/state.d.ts` carries an optional `qualifier` string: `← fN` for a write that replaces, or the retracted fact's origin for a retraction. The head is built from it, kept separate from the detail text. This is a second permitted edit to the `tail` key's types besides `filterOpen`.
+
+**Day separators.** The time column is always `HH:mm:ss`. Between two adjacent displayed rows whose local dates differ, and above the first row when its date is not today, render one separator line: `── yyyy-MM-dd ──`. The date is the first 10 characters of lens's `stamp`; do not write another formatter. Separators are presentation only: not in the ring, not counted, never filtered. *(r7 ruling: they apply to marker rows too, such as `event feed restarted`, `store rewound` and `… N more`. That is intended: markers carry a time and sort like any row, and a marker on a new day belongs under that day's separator.)*
 
 **Rejected:**
 - *A single line with the body after the head.* At 24 columns the head alone fills the line and the body disappears.
@@ -442,7 +453,7 @@ At 24 columns a recall keeps `7 facts · high` and loses the query. A write keep
 
 #### 6.9.3 Status and empty states
 
-These render on their own line under the header, as `Text wrap="wrap"`. A status is the one element allowed to wrap, because its action must be readable whole. To make host word-wrap safe, every status token (space-separated) is **at most 20 characters**, and the action comes first:
+These render on their own line under the header, as `Text wrap="wrap"`. Statuses and empty states are the **only** elements allowed to wrap, because each must be readable whole. *(r7: r6 said only the status could wrap; the build wraps both, and that is correct.)* To make host word-wrap safe, every token (space-separated) in both is **at most 20 characters**, and in a status the action comes first:
 
 | Reason | Text |
 |---|---|
@@ -467,7 +478,7 @@ The `bad-request` detail is server text and may hold a long token. It renders in
 |---|---|
 | `plugin/mods/tail/model.ts` | (a) A pure row-layout that returns the head string and an optional detail string per §6.9.1. (b) The day-separator insertion over the displayed list. (c) The filter label (`Filter n/8 ▾/▴`). (d) The §6.9.3 status texts. (e) `CLIP` kept as the payload cap |
 | `plugin/mods/tail/index.tsx` | The header renders the single Filter button. When `filterOpen`, a `Box flexDirection="column"` of eight toggle buttons follows, then the status line, then the empty state or the rows. Each row is a column `Box` holding the head `Text` and, if present, the detail `Text`, both `wrap="truncate-end"`. **Delete the interim `<Box flexWrap="wrap">` button strip from ce26162.** |
-| `plugin/mods/shared/state.d.ts` | The `tail` key gains `filterOpen: boolean`. Edit only that key |
+| `plugin/mods/shared/state.d.ts` | The `tail` key gains `filterOpen: boolean`, and `TailRow` gains optional `qualifier: string` (r7). Edit only the `tail` key's types |
 | `plugin/mods/tail/tail.test.tsx` | Tests below. Update or remove ce26162's wrap-strip assertions, which assert the deleted layout |
 | `plugin/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` | Version `1.3.7` |
 
@@ -491,21 +502,21 @@ The test kit's ability to render at a set width is unconfirmed (**E13**). The gu
 | # | Guard | Assertion | Falsification |
 |---|---|---|---|
 | W1 | Marks and time survive at 24 | For every row kind, `truncateEnd(head, 24)` starts with the two marks, a space and `HH:mm:ss` | Put the label before the time → red |
-| W2 | Labels ≤ 11 survive at 24 | Every label of ≤ 11 characters, with a qualifier present, appears whole in `truncateEnd(head, 24)` (the ruler keeps a line of ≤ 24 whole and otherwise cuts to 23 + `…`) | Add a third mark column → red for 11-character labels |
+| W2 | Labels ≤ 11 survive at 24 | Every label of ≤ 11 characters, with a qualifier present, appears whole in `truncateEnd(head, 24)` (the ruler keeps a line of ≤ 24 whole and otherwise cuts to 23 + `…`) | Put two spaces between the time and the label, making the prefix 13 characters → W2 red, W1 (marks, space, time) stays green. *(r7: the r6 arm, "add a third mark column", reddens W1 as well, so it cannot tell the two guards apart.)* |
 | W3 | Recall degrades to count and coverage | At 24, a recall's truncated detail contains `facts · <coverage>` and not the query | Put the query first → red |
 | W4 | Write keeps its handle | At 24, a write's truncated detail starts with `fN ` | Put the body before the handle → red |
 | W5 | Wide panes lose nothing | At 120, every head and detail built from fields at or under the CLIP equals its untruncated form whenever its length ≤ 119 | Cap the head at 24 characters in the model → red |
-| W6 | No row line can wrap | The mounted Pane: every row line `Text` has `wrap="truncate-end"`; the only `wrap="wrap"` Text is the status line | Remove `truncate-end` from the detail → red |
+| W6 | No row line can wrap | The mounted Pane: every row line `Text` has `wrap="truncate-end"`; the only `wrap="wrap"` Texts are the status line and the empty state (r7) | Remove `truncate-end` from the detail → red |
 | W7 | No blank detail | A `remember` event renders exactly one row line | Always render the detail Text → red |
 | W8 | Filter collapsed by default and narrow | The header holds exactly one Button, label `Filter 6/8 ▾` under the default groups, at most 14 characters | Default `filterOpen: true`, or restore the strip → red |
 | W9 | Expanded list is vertical | After pressing Filter: eight toggle Buttons, each the only Button in its own row (parent Box `flexDirection="column"`), each label ≤ 13 characters | Lay toggles out in a row → red |
 | W10 | A toggle keeps the list open and updates the count | Press `· Sessions` → label `✓ Sessions`, header `Filter 7/8 ▴`, list still shown | Collapse on toggle → red |
-| W11 | Status tokens wrap safely | Every §6.9.3 text: each space-separated token is ≤ 20 characters | Restore the r4 long text with a 21+ character token, or add one → red |
+| W11 | Status and empty-state tokens wrap safely | Every §6.9.3 status and empty-state text: each space-separated token is ≤ 20 characters (r7: empty states included) | Restore the r4 long text with a 21+ character token, or add one → red |
 | W12 | Filtered-empty explains itself | Ring of 5 `index` rows (Maintenance off) → `All 5 rows hidden by the filter.` | Show `No activity yet.` → red |
 | W13 | Day separator | Two rows on different local dates → exactly one `── yyyy-MM-dd ──` between them; none between same-day rows; separators are not counted in W12's `n` | Drop the separator, or emit one per row → red |
 | W14 | CLIP is a payload cap, not a layout width | A 500-character body: the detail before host truncation is `fN ` + 120 characters + `…` | Remove the cap → red |
 
-Existing tests M1–M18 stay as they are, except where M11 and M12 assert the r5 layout. Those are rewritten against §6.9's head and detail shape, with the same data assertions.
+Existing M-tests keep **every data assertion**: which rows appear, cursors, dedupe, order, filtering, failure cadence and markers. Only their expected **string forms** change to §6.9's head and detail shape. *(r7, matching the build: r6 named only M11 and M12, but M4, M7, M8, M9, M11–M17 and M19 all asserted r5 line strings and were rewritten this way.)* A rewrite that drops or weakens a data assertion is a defect.
 
 #### 6.9.6 NEEDS-EVIDENCE (live; none gate the build)
 
