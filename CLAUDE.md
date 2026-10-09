@@ -741,7 +741,9 @@ Relaxing the writer to `FileShare.Read` admits readers but was measured to let *
 succeed**, destroying exactly the cross-process lost-update protection that `None` is there for, so
 the reader cannot be made harmless from the writer's side. In practice the tail holds the file for
 microseconds twice a second against a 500 ms retry budget, so collisions retry rather than drop —
-but do not add a second reader without revisiting this. **`TelemetryEventKind.All` must be checked
+but do not add a second reader without revisiting this. The one reader now also runs while a memory
+tail is polling (D79), and that rule stands: the tail reads the ring that reader fills, never the file.
+**`TelemetryEventKind.All` must be checked
 against the constants by reflection, not by walking itself**: the obvious test iterates `All` and
 asserts each entry is accepted, which is a tautology — deleting a kind from the list means it is
 simply never visited, and that version passed with the defect in place. **A `BackgroundService`
@@ -836,7 +838,7 @@ whether the model used memory. Every request needs `Content-Type: application/js
 `X-Engram-Mod` header equal to the body's `mod`, and the middleware that 403s any `Origin` also 403s
 any `Host` that is not loopback, on every route. Deleting any of those three guards leaves the rest
 of the suite green, which is why each has its own falsification row. Lookups (`fact`, `history`,
-`captures`, `path-facts`) write nothing, and handlers log nothing from the request (D76).
+`captures`, `path-facts`, `tail`) write nothing, and handlers log nothing from the request (D76).
 
 ## Build constraints
 
