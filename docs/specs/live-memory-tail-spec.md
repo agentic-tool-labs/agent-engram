@@ -57,6 +57,13 @@ Reviewer: reviewer
   - E3 is answered for hot reload; E2 is now load-bearing, with a safe failure. E16 is added.
   - Plugin version 1.3.8.
 
+- **r9 (spec matched to the r8 build, 21f0809).** §6.10.9.
+  - Connecting line above existing rows: confirmed.
+  - A declined atom with a shown pane is a plain open: text fixed.
+  - **Open clears rows and `lastOkAt`; resume keeps them** (code change, 1.3.9).
+  - `TAIL_SHAPE` / `Shaped<TailState>` recorded.
+  - Call rows gate on `paneOpen`, not `running`: confirmed.
+
 ## TL;DR
 
 - `/engram-tail` toggles the **Memory Tail** pane: a live, newest-first log of memory activity.
@@ -660,6 +667,37 @@ No server or C# change.
 | ID | Question | Then |
 |---|---|---|
 | E16 | Can the plugin test kit simulate a hot reload: cancel `$.clock` waits, reset module state, keep `$.state`? | No → R2's mounted half is checked live once, and the result is recorded in D79 |
+
+#### 6.10.9 Rules settled against the build (r9, plugin 21f0809)
+
+These supersede the §6.10 text above wherever the two differ.
+
+1. **Connecting line placement** *(confirmed as built)*.
+   - While the current chain has had no successful answer: with no rows, `Connecting to Engram…` is the empty state; with rows (including the `resumed` marker), the same text renders as a line **above the rows**, below the heartbeat and status.
+   - Same element rule as the empty state: `Text wrap="wrap"`, tokens ≤ 20. W6's list of wrapping elements reads "status, empty state, connecting line".
+   - Why: a resumed pane always has at least its marker row, so an empty-state-only rule could never show the line at all.
+2. **A declined atom with a shown pane is a plain open, not a resume** *(text fixed to match the build)*. Declining (§6.10.4) happens first and yields fresh state. The decision table then sees nothing to resume, so the chain starts exactly like `/engram-tail` on a not-shown pane: no cursors, a first request carrying none, no `resumed` marker. The table's "shown + not running → resume" row applies only to an accepted atom.
+3. **Open on a not-shown pane starts a fresh view** *(ruling: **code change**)*.
+   - `open()` (the not-shown row of the table, and auto-open) **clears the ring's rows and `lastOkAt`**. It keeps the filter and `filterOpen`.
+   - Resume keeps everything (§6.10.2).
+   - Why:
+     - Open resets the cursors to head, so any rows kept from an earlier viewing would sit directly above a silent gap, reading as continuous history that is not.
+     - A kept `lastOkAt` would show an old `Updated` time as if current.
+     - Q2 says opening shows new activity only, and M18 already discards call rows made while closed.
+   - The build currently keeps both; change it.
+4. **Shape mechanism** *(recorded as built)*. The atom's shape is the constant `TAIL_SHAPE` in `plugin/mods/tail/model.ts`, and the atom's type is declared as `Shaped<TailState>` in `plugin/mods/shared/state.d.ts`. That is the host types' own mechanism for a versioned atom, and nothing hand-rolled replaces it.
+5. **Call-row recording follows `paneOpen`** *(confirmed as built)*.
+   - §6.4's `tool.call` hook records call rows only while the atom's `paneOpen` is true and `tail_scope` is `session`.
+   - `paneOpen` becomes true on open and resume. It becomes false on close, and when `session.start` finds the pane not shown.
+   - It deliberately does **not** gate on `running`. Between a reload and the re-fired `session.start` the chain is dead but the pane is up, and calls made then must appear once the pane resumes. That is the same no-gap promise resume makes for server data.
+   - If E2 shows `panes()` misses a manual close, recording continues into an invisible pane's ring. That is bounded at 200 rows and harmless.
+
+Files for item 3: `plugin/mods/tail/index.tsx` (`open()` clears rows and `lastOkAt`), `plugin/mods/tail/tail.test.tsx` (R10, R11), and plugin version `1.3.9` in `plugin/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`.
+
+| # | Assertion | Falsification |
+|---|---|---|
+| R10 | Open, receive rows, close, reopen → no earlier rows render, no `Updated` line until the first success, filter and `filterOpen` unchanged. Resume (R4) still keeps rows | Keep rows on open → red. Clear rows on resume → R4 red |
+| R11 | With `paneOpen` true and the chain not running (simulated reload), an `engram_remember` tool call records a call row that renders after resume. With `paneOpen` false it records none | Gate on `running` → the row is missing, red. Ignore `paneOpen` → a row is recorded while closed, red (also M18) |
 
 ## 8. Options
 
