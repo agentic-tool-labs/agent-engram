@@ -288,7 +288,7 @@ public class TelemetryFeedTests
     /// for the delivery to give up, as they always have; this holds the ordering within one.
     /// </summary>
     [Fact]
-    public async Task AHangingSubscriber_DoesNotDelayTheRing()
+    public async Task AHangingSubscriber_DoesNotHideTheBatchAlreadyRead()
     {
         using var sandbox = new SandboxHome(initialize: false);
         using var sink = new HangingSink();
