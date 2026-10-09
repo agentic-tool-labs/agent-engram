@@ -187,13 +187,16 @@ export const register: Register = (on, options) => {
 
       return (
         <Box flexDirection="column">
-          <Box>
+          <Box flexWrap="wrap">
             {GROUPS.map((group) => (
-              <Button
-                key={`g-${group.id}`}
-                label={`${group.title} ${state.groups[group.id] ? '✓' : '✗'}`}
-                onPress={() => update($, TAIL, (s) => ({ ...s, groups: { ...s.groups, [group.id]: !s.groups[group.id] } }))}
-              />
+              // A button that does not fit starts the next line whole instead of being split inside.
+              <Box key={`gb-${group.id}`} flexShrink={0}>
+                <Button
+                  key={`g-${group.id}`}
+                  label={`${group.title} ${state.groups[group.id] ? '✓' : '✗'}`}
+                  onPress={() => update($, TAIL, (s) => ({ ...s, groups: { ...s.groups, [group.id]: !s.groups[group.id] } }))}
+                />
+              </Box>
             ))}
           </Box>
           {state.status === undefined ? null : <Text dimColor>{state.status}</Text>}
@@ -201,7 +204,7 @@ export const register: Register = (on, options) => {
             <Text dimColor>No memory activity yet.</Text>
           ) : (
             shown.map((row) => (
-              <Text key={row.key} dimColor={row.kind === 'marker'}>
+              <Text key={row.key} dimColor={row.kind === 'marker'} wrap="truncate-end">
                 {rowLine(row, state.handles, nowMs)}
               </Text>
             ))

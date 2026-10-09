@@ -625,3 +625,61 @@ test('M18: calls made while the pane was closed are not shown when it opens', as
   expect((await rowsOf($)).length).toBe(0)
   expect((await shown($)).some((t) => t.includes('before the pane'))).toBe(false)
 })
+
+type Drawn = { type: string; props?: Record<string, unknown>; children?: Drawn[] }
+
+const descendants = (node: Drawn): Drawn[] => [node, ...(node.children ?? []).flatMap(descendants)]
+
+const GROUP_TITLES = ['Writes', 'Retractions', 'Reads', 'Remember', 'Mods', 'Sessions', 'Maintenance', 'Other']
+
+for (const columns of [24, 80, 120]) {
+  test(`M20: at ${columns} columns the eight filter buttons wrap between buttons and each is reachable`, async ($, on) => {
+    const w = world(on)
+    w.script(response(), response({ head: 11, writes: { rows: [write(11, { body: 'w'.repeat(200) })], skipped: null } }))
+    await openAndSettle($, w)
+    await w.advance(2_000)
+    const pane = await $.ui.mount({
+      plugin: 'engram',
+      surface: 'terminal',
+      component: 'Pane',
+      props: { title: 'Memory Tail', isFocused: false, bodyColumns: columns } as never,
+      requestId: PANE,
+    })
+
+    const tree = (await pane.drawn()) as unknown as Drawn
+    const all = descendants(tree)
+
+    // The row of toggles holds each button in an item that cannot shrink, and wraps between items.
+    const row = all.find((n) => n.props?.['flexWrap'] === 'wrap')
+    expect(row).toBeDefined()
+    const items = row!.children ?? []
+    expect(items.length).toBe(GROUP_TITLES.length)
+    for (const item of items) {
+      expect(item.type).toBe('Box')
+      expect(item.props?.['flexShrink']).toBe(0)
+      expect(item.children?.length).toBe(1)
+      expect(item.children![0]!.type).toBe('Button')
+    }
+
+    // Every label is one whole string on one line, and fits the pane with its brackets.
+    const labels = items.map((item) => String(item.children![0]!.props?.['label']))
+    expect(labels.map((l) => l.replace(/ [✓✗]$/, ''))).toEqual(GROUP_TITLES)
+    for (const label of labels) {
+      expect(label).not.toContain('\n')
+      expect(label.length + 4).toBeLessThanOrEqual(columns)
+    }
+
+    // A row longer than the pane is cut to one line, never left to wrap inside a token.
+    const rowText = all.filter((n) => n.type === 'Text' && String(n.children?.[0] ?? '').includes(' f11 '))
+    expect(rowText.length).toBe(1)
+    expect(rowText[0]!.props?.['wrap']).toBe('truncate-end')
+
+    // All eight can be pressed.
+    for (const title of GROUP_TITLES) {
+      await pane.press({ key: `g-${title.toLowerCase()}` })
+    }
+    const after = (await pane.drawn()) as unknown as Drawn
+    const flipped = descendants(after).filter((n) => n.type === 'Button').map((n) => String(n.props?.['label']))
+    expect(flipped).toEqual(['Writes ✗', 'Retractions ✗', 'Reads ✗', 'Remember ✗', 'Mods ✗', 'Sessions ✓', 'Maintenance ✓', 'Other ✗'])
+  })
+}
