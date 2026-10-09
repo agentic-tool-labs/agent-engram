@@ -61,6 +61,8 @@ export type LensRecall = {
 }
 
 export type LensState = {
+  /** The session id `autoOpened` belongs to; a different current id resets it. */
+  session?: string
   /** Newest first, at most 20. */
   recalls: LensRecall[]
   currentTurnId?: string
@@ -70,7 +72,7 @@ export type LensState = {
   selected?: Record<string, number>
   /** Whether `/engram-lens` last left the pane open. */
   paneOpen?: boolean
-  /** The pane has already been opened by `lens_auto_open` this session. */
+  /** The pane has already been opened by `lens_auto_open` in the session named by `session`. */
   autoOpened?: boolean
 }
 
@@ -102,13 +104,17 @@ export type BandState = {
 }
 
 export type ToastsState = {
-  /** Fact handles already announced. */
+  /** The session id `shown` belongs to; a different current id resets it. */
+  session?: string
+  /** Fact handles toasted in the session named by `session`. */
   shown: string[]
 }
 
 export type SentinelState = {
-  /** Paths already announced, keyed by agentId + path for subagents. */
-  seen: string[]
+  /** The session id `seen` and `failedAt` belong to; a different current id resets them. */
+  session?: string
+  /** Invariant handles already announced, keyed by agentId + path so a subagent has its own set. */
+  seen: Record<string, string[]>
   /** Last API failure time per path (`io.now()`), for the 60 s skip. */
   failedAt: Record<string, number>
   /** What the `engram-why` pane shows; absent until `/engram-why` ran. */
@@ -205,7 +211,7 @@ declare module 'claude-code' {
       lens: LensState
       band: BandState
       toasts: ToastsState
-      sentinel: SentinelState
+      sentinel: Shaped<SentinelState>
       beliefDiff: BeliefDiffState
       digest: DigestState
       tail: Shaped<TailState>

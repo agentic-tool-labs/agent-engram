@@ -211,6 +211,46 @@ test('a play that is refused is silent and the toasts still show', { options: { 
   expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT])
 })
 
+test('T1: the undo hint is on the first toast of each session, not of the saved state', async ($, on) => {
+  let current = [capture('f1', 'one')]
+  const r = rig(on, { captures: () => ({ status: 200, json: { captures: current } }) })
+
+  await submit($, 'I live in Lyon')
+  current = [capture('f1', 'one'), capture('f2', 'two')]
+  await submit($, 'I like tea')
+  expect(r.toasts).toEqual(['Remembered [f1]: one' + HINT, 'Remembered [f2]: two'])
+
+  r.router.sessionId = () => 'session-B'
+  current = [capture('f3', 'three')]
+  await submit($, 'I like rain')
+
+  expect(r.toasts[2]).toBe('Remembered [f3]: three' + HINT)
+})
+
+test('T2: a reload keeps the session, so the next toast has no new hint', async ($, on) => {
+  let current = [capture('f1', 'one')]
+  const r = rig(on, { captures: () => ({ status: 200, json: { captures: current } }) })
+
+  await submit($, 'I live in Lyon')
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+  current = [capture('f1', 'one'), capture('f2', 'two')]
+  await submit($, 'I like tea')
+
+  expect(r.toasts).toEqual(['Remembered [f1]: one' + HINT, 'Remembered [f2]: two'])
+})
+
+test('T3: in a new session with nothing toasted, undo forgets nothing, even though the last session toasted handles', async ($, on) => {
+  const r = rig(on, { captures: reply(capture('f1', 'one')), forget: forgot(true) })
+
+  await submit($, 'I live in Lyon')
+  r.router.sessionId = () => 'session-B'
+  r.toasts.length = 0
+  await undo($)
+
+  expect(r.toasts).toEqual(['No captured memory to forget'])
+  expect(calls(r, 'forget').length).toBe(0)
+})
+
 test('the first capture toast of a session carries the undo hint; the second does not', async ($, on) => {
   let n = 0
   const r = rig(on, { captures: () => ({ status: 200, json: { captures: [capture(`f${++n}`, `s${n}`)] } }) })

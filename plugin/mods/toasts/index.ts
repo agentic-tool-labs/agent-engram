@@ -4,10 +4,14 @@ import { SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
 import { ANY_SESSION_START } from '../shared/events'
 import { once } from '../shared/guard'
+import { forSession } from '../shared/session'
 
 // The scanner reads an atom's reference only from a const of the file that uses it.
 const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, SHARED_INITIAL)
 const TOASTS = atom({ plugin: 'engram', key: 'toasts' } as const, { shown: [] as string[] })
+
+// What a new session starts the per-session fields at.
+const TOASTS_SESSION = { shown: [] as string[] }
 
 // Pure forwards (see ../shared/binding.template.ts); the behaviour is the client's.
 const bindIo = ($: EngineInterface): ModIo => ({
@@ -69,19 +73,16 @@ export const register: Register = (on, options) => {
         }
         const ran = await go(e)
         try {
-          const found = await modApi(
-            io,
-            'captures',
-            { session_id: await io.sessionId(), since },
-            { mod: 'toasts', signal: next.signal },
-          )
+          const sessionId = await io.sessionId()
+          const found = await modApi(io, 'captures', { session_id: sessionId, since }, { mod: 'toasts', signal: next.signal })
           if (!found.ok) return ran
           let fresh: { handle: string; body: string }[] = []
           let isFirst = false
           await update($, TOASTS, (s) => {
-            fresh = found.value.captures.filter((c) => !s.shown.includes(c.handle))
-            isFirst = s.shown.length === 0 && fresh.length > 0
-            return { shown: [...s.shown, ...fresh.map((c) => c.handle)] }
+            const t = forSession(s, sessionId, TOASTS_SESSION)
+            fresh = found.value.captures.filter((c) => !t.shown.includes(c.handle))
+            isFirst = t.shown.length === 0 && fresh.length > 0
+            return { ...t, shown: [...t.shown, ...fresh.map((c) => c.handle)] }
           })
           fresh.forEach((c, i) => $.ui.toast(`Remembered [${c.handle}]: ${c.body}${isFirst && i === 0 ? UNDO_HINT : ''}`))
           if (chimeOnCaptures && fresh.length > 0) $.audio.play(CHIME).catch(() => {})
@@ -99,7 +100,7 @@ export const register: Register = (on, options) => {
       try {
         try {
           const io = bindIo($)
-          const { shown } = await read($, TOASTS)
+          const { shown } = forSession(await read($, TOASTS), await io.sessionId(), TOASTS_SESSION)
           const handle = shown[shown.length - 1]
           if (handle === undefined) {
             $.ui.toast('No captured memory to forget')

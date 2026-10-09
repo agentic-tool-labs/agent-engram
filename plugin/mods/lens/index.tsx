@@ -8,6 +8,10 @@ import type { LensRecall } from '../shared/state'
 import { LENS_INITIAL, addRecall, headerLine, selectedIndex, versionLine } from './model'
 import { parseDigest } from './parser'
 import { once } from '../shared/guard'
+import { forSession } from '../shared/session'
+
+// What a new session starts the Lens's per-session fields at.
+const LENS_SESSION = { autoOpened: false }
 
 const PANE = 'engram-lens'
 const TITLE = 'Memory Lens'
@@ -86,8 +90,10 @@ export const register: Register = (on, options) => {
 
         await update($, LENS, (s) => addRecall(s, recall))
 
-        if (options.lens_auto_open === true && !state.autoOpened) {
-          await update($, LENS, (s) => ({ ...s, autoOpened: true }))
+        if (options.lens_auto_open === true) {
+          const sessionId = await $.session.id()
+          if (forSession(state, sessionId, LENS_SESSION).autoOpened) return ran
+          await update($, LENS, (s) => ({ ...forSession(s, sessionId, LENS_SESSION), autoOpened: true }))
           const opened = await $.ui.open({ id: PANE, title: TITLE })
           await update($, LENS, (s) => ({ ...s, paneOpen: opened.isPlaced }))
         }

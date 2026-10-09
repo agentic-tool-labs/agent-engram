@@ -239,9 +239,43 @@ test('/engram-lens opens the pane, then closes it', async ($, on) => {
 test('lens_auto_open opens the pane once, on the first recall only', { options: { lens_auto_open: true } }, async ($, on) => {
   const opened: string[] = []
   on('ui.open', (_$, e) => (opened.push((e as { id: string }).id), { value: { isPlaced: true } }) as never)
+  on('session.id', () => ({ value: 'session-A' }))
   answerRecall(on, DIGEST)
 
   await $.tool.call(recallCall('t1'))
+  await $.tool.call(recallCall('t2'))
+
+  expect(opened).toEqual(['engram-lens'])
+})
+
+test('L1: lens_auto_open opens again for the first recall of a new session', { options: { lens_auto_open: true } }, async ($, on) => {
+  const opened: string[] = []
+  let session = 'session-A'
+  on('ui.open', (_$, e) => (opened.push((e as { id: string }).id), { value: { isPlaced: true } }) as never)
+  on('session.id', () => ({ value: session }))
+  answerRecall(on, DIGEST)
+
+  await $.tool.call(recallCall('t1'))
+  await $.tool.call(recallCall('t2'))
+  expect(opened).toEqual(['engram-lens'])
+
+  session = 'session-B'
+  await $.tool.call(recallCall('t3'))
+  await $.tool.call(recallCall('t4'))
+
+  expect(opened).toEqual(['engram-lens', 'engram-lens'])
+})
+
+test('L2: a reload keeps the session, so the next recall does not open the pane again', { options: { lens_auto_open: true } }, async ($, on) => {
+  const opened: string[] = []
+  on('ui.open', (_$, e) => (opened.push((e as { id: string }).id), { value: { isPlaced: true } }) as never)
+  on('session.id', () => ({ value: 'session-A' }))
+  on('command.register', (_$, e) => ({ value: { command: (e as { name: string }).name } }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  answerRecall(on, DIGEST)
+
+  await $.tool.call(recallCall('t1'))
+  await $.session.start({ cwd: '/anywhere', surface: 'terminal', isInteractive: true } as never)
   await $.tool.call(recallCall('t2'))
 
   expect(opened).toEqual(['engram-lens'])

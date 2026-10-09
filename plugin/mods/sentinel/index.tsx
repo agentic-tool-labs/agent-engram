@@ -6,8 +6,16 @@ import type { ModIo } from '../shared/client'
 import type { SentinelState } from '../shared/state'
 import type { PathFact } from '../shared/types'
 import { once } from '../shared/guard'
+import { forSession } from '../shared/session'
 
-const SENTINEL = atom({ plugin: 'engram', key: 'sentinel' } as const, { seen: [], failedAt: {} })
+// Bump when SentinelState changes incompatibly. The host reads an atom written under another shape
+// as absent, so an older module's state is replaced, never read field by field or migrated.
+export const SENTINEL_SHAPE = 'sentinel-2'
+
+const SENTINEL = atom({ plugin: 'engram', key: 'sentinel' } as const, { seen: {}, failedAt: {} }, { shape: SENTINEL_SHAPE })
+
+// What a new session starts the per-session fields at.
+const SENTINEL_SESSION = { seen: {}, failedAt: {} }
 
 // The scanner reads an atom's reference only from a const of the file that uses it, and follows
 // `$` only into a function of this file, so the shared client gets the engine through this binding.
@@ -106,7 +114,14 @@ export const register: Register = (on, options) => {
       // down with it, `.catch` or not. So nothing before or after `next` may throw: the lookup is
       // planned inside a guard, `next` is called exactly once, and the bookkeeping after it is guarded.
       let key: string | undefined
-      const release = () => update($, SENTINEL, (s) => ({ ...s, seen: s.seen.filter((k) => k !== key) }))
+      let sessionId = ''
+      let announced: string[] = []
+      // Takes back exactly the handles this call announced, so the next attempt announces them again.
+      const release = () =>
+        update($, SENTINEL, (s) => {
+          const t = forSession(s, sessionId, SENTINEL_SESSION)
+          return { ...t, seen: { ...t.seen, [key!]: (t.seen[key!] ?? []).filter((h) => !announced.includes(h)) } }
+        })
       const quietly = async (work: () => Promise<unknown> | void) => {
         try {
           await work()
@@ -124,36 +139,44 @@ export const register: Register = (on, options) => {
         const cwd = (await $.session.cwd()).replace(/\/+$/, '')
         const path = absolute(given, cwd)
         const mine = `${e.agentId ?? ''}\0${path}`
-        const state = await read($, SENTINEL)
-        if (state.seen.includes(mine)) return undefined
+        const session = await $.session.id()
+        const state = forSession(await read($, SENTINEL), session, SENTINEL_SESSION)
 
         const io = bindIo($)
         const now = await io.now()
         const failedAt = state.failedAt[mine]
         if (failedAt !== undefined && now - failedAt < FAILURE_SKIP_MS) return undefined
 
+        // Every edit asks again: only a lookup can show an invariant added since the last one.
         const res = await modApi(io, 'path-facts', { path, predicate: 'invariant' }, {
           mod: 'sentinel',
           timeoutMs: LOOKUP_TIMEOUT_MS,
           signal: next.signal,
         })
         if (!res.ok) {
-          await update($, SENTINEL, (s) => ({ ...s, failedAt: { ...s.failedAt, [mine]: now } }))
+          await update($, SENTINEL, (s) => {
+            const t = forSession(s, session, SENTINEL_SESSION)
+            return { ...t, failedAt: { ...t.failedAt, [mine]: now } }
+          })
           return undefined
         }
 
-        // The claim is made inside the update so two concurrent edits of one file cannot both announce.
+        // The handles are recorded inside the update so two concurrent edits of one file cannot both
+        // announce them. Only handles this agent has not been told are announced.
         // ponytail: `seen` grows with the files edited in a session; cap it if that ever matters.
-        let claimed = false
+        let fresh: PathFact[] = []
         await update($, SENTINEL, (s) => {
-          claimed = !s.seen.includes(mine)
-          return claimed ? { ...s, seen: [...s.seen, mine] } : s
+          const t = forSession(s, session, SENTINEL_SESSION)
+          const held = t.seen[mine] ?? []
+          fresh = res.value.facts.filter((f) => !held.includes(f.handle))
+          return fresh.length === 0 ? t : { ...t, seen: { ...t.seen, [mine]: [...held, ...fresh.map((f) => f.handle)] } }
         })
-        const facts = res.value.facts
-        if (!claimed || facts.length === 0) return undefined
+        if (fresh.length === 0) return undefined
         key = mine
+        sessionId = session
+        announced = fresh.map((f) => f.handle)
         const rel = relative(path, cwd)
-        return { mode, rel, block: describe(rel, facts), count: facts.length }
+        return { mode, rel, block: describe(rel, fresh), count: fresh.length }
       }
 
       let planned: Plan | undefined
