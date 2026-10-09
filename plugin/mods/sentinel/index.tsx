@@ -66,7 +66,7 @@ type Why = NonNullable<SentinelState['why']>
 type Row = { text: string; heading?: boolean }
 
 function whyRows(why: Why | undefined): Row[] {
-  if (why === undefined) return [{ text: 'Run /why <path>.' }]
+  if (why === undefined) return [{ text: 'Run /engram-why <path>.' }]
   if (why.state === 'loading') return [{ text: 'Loading…' }]
   if (why.state === 'unsupported') return [{ text: 'This needs a newer Engram: its mod API is missing.' }]
   if (why.state === 'unavailable') return [{ text: 'The Engram server did not answer.' }]
@@ -89,10 +89,10 @@ export const register: Register = (on, options) => {
     const go = once(next)
     try {
       await $.command.register({
-        name: 'invariant',
-        description: 'Record an invariant for a file: /invariant <file> <statement>',
+        name: 'engram-invariant',
+        description: 'Record an invariant for a file: /engram-invariant <file> <statement>',
       })
-      await $.command.register({ name: 'why', description: 'Show what Engram records for a file: /why <path>' })
+      await $.command.register({ name: 'engram-why', description: 'Show what Engram records for a file: /engram-why <path>' })
       return go(e)
     } catch {
       return go.fallback(e)
@@ -186,11 +186,11 @@ export const register: Register = (on, options) => {
     }
   }).catch(($, e, next) => next(e))
 
-  on('command.run', { command: 'invariant' }, async ($, e, next) => {
+  on('command.run', { command: 'engram-invariant' }, async ($, e, next) => {
     const go = once(next)
     try {
       const m = /^\s*(\S+)\s+([\s\S]*\S)\s*$/.exec(e.args)
-      if (m === null) return { text: 'Usage: /invariant <file> <statement>' }
+      if (m === null) return { text: 'Usage: /engram-invariant <file> <statement>' }
       const ran = await engramCli(bindIo($), ['invariant', 'add', m[1]!, m[2]!])
       const text =
         ran === undefined
@@ -205,11 +205,11 @@ export const register: Register = (on, options) => {
     }
   })
 
-  on('command.run', { command: 'why' }, async ($, e, next) => {
+  on('command.run', { command: 'engram-why' }, async ($, e, next) => {
     const go = once(next)
     try {
       const arg = e.args.trim()
-      if (arg === '') return { text: 'Usage: /why <path>' }
+      if (arg === '') return { text: 'Usage: /engram-why <path>' }
       const cwd = (await $.session.cwd()).replace(/\/+$/, '')
       const path = absolute(arg, cwd)
       const rel = relative(path, cwd)

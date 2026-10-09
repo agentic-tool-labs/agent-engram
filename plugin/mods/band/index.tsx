@@ -61,6 +61,8 @@ export const register: Register = (on, options) => {
     try {
       stop()
       const mine = generation
+      // A line pinned by an earlier load outlives it, so turning the option off must replace it.
+      if (!wantsStatusEntry) $.ui.status(undefined)
       const tick = async () => {
         if (mine !== generation) return
         let delay = pollIntervalMs(undefined)

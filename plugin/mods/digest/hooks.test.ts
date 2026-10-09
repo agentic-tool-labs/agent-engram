@@ -210,7 +210,7 @@ test('candidates open the pane unfocused and toast once; nothing is written', ON
   await turn($)
   await rig.clock.advance(0)
   expect(rig.opened).toEqual([{ id: 'engram-digest', focus: undefined }])
-  expect(rig.toasts).toEqual(['2 memory candidates — /digest-review'])
+  expect(rig.toasts).toEqual(['2 memory candidates — /engram-digest-review'])
   expect(rig.fetches.filter((f) => f.op === 'remember').length).toBe(0)
 })
 
@@ -238,7 +238,7 @@ test('seven candidates: the first five are checked against recall and shown', ON
   await turn($)
   await rig.clock.advance(0)
   expect(rig.fetches.filter((f) => f.op === 'recall').map((f) => (f.body as { query: string }).query)).toEqual(['1', '2', '3', '4', '5'])
-  expect(rig.toasts).toEqual(['5 memory candidates — /digest-review'])
+  expect(rig.toasts).toEqual(['5 memory candidates — /engram-digest-review'])
 })
 
 test('recall request: session id, the statement, a 100-token budget, mod digest', ON(1), async ($, on) => {
@@ -259,7 +259,7 @@ test('a candidate recall already covers (high) is dropped; partial and none stay
   })
   await turn($)
   await rig.clock.advance(0)
-  expect(rig.toasts).toEqual(['1 memory candidates — /digest-review'])
+  expect(rig.toasts).toEqual(['1 memory candidates — /engram-digest-review'])
 })
 
 test('every candidate known: nothing shown', ON(1), async ($, on) => {
@@ -274,7 +274,7 @@ test('API down: candidates are kept, dedupe is best effort', ON(1), async ($, on
   const rig = proposing(on, 'none', { recall: () => ({ status: 500, json: { error: 'boom' } }) })
   await turn($)
   await rig.clock.advance(0)
-  expect(rig.toasts).toEqual(['2 memory candidates — /digest-review'])
+  expect(rig.toasts).toEqual(['2 memory candidates — /engram-digest-review'])
 })
 
 test('the next digest reads only what was said since the last one', ON(1), async ($, on) => {
@@ -363,7 +363,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.press({ key: 'skip' })
     expect(rig.fetches.filter((f) => f.op === 'remember').length).toBe(0)
     expect(rig.closed).toEqual(['engram-digest'])
-    const again = await $.command.run({ command: 'digest-review', args: '' } as never)
+    const again = await $.command.run({ command: 'engram-digest-review', args: '' } as never)
     expect(again.text).toBe('No memory candidates to review.')
   })
 
@@ -401,42 +401,42 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
-test('/digest-review opens the pane focused when a batch is waiting', ON(1), async ($, on) => {
+test('/engram-digest-review opens the pane focused when a batch is waiting', ON(1), async ($, on) => {
   const rig = proposing(on)
   await turn($)
   await rig.clock.advance(0)
   rig.opened.length = 0
-  await $.command.run({ command: 'digest-review', args: '' } as never)
+  await $.command.run({ command: 'engram-digest-review', args: '' } as never)
   expect(rig.opened).toEqual([{ id: 'engram-digest', focus: true }])
 })
 
-test('/digest-review with no batch opens nothing', ON(1), async ($, on) => {
+test('/engram-digest-review with no batch opens nothing', ON(1), async ($, on) => {
   const rig = rigUp(on)
-  const out = await $.command.run({ command: 'digest-review', args: '' } as never)
+  const out = await $.command.run({ command: 'engram-digest-review', args: '' } as never)
   expect(out.text).toBe('No memory candidates to review.')
   expect(rig.opened).toEqual([])
 })
 
-test('/remember-selection fills the prompt and calls no API', async ($, on) => {
+test('/engram-remember-selection fills the prompt and calls no API', async ($, on) => {
   const rig = rigUp(on)
   rig.selection = { text: 'tabs, not spaces' }
-  await $.command.run({ command: 'remember-selection', args: '' } as never)
+  await $.command.run({ command: 'engram-remember-selection', args: '' } as never)
   expect(rig.filled).toEqual(['Remember this: "tabs, not spaces"'])
   expect(rig.fetches.length).toBe(0)
   expect(rig.toasts).toEqual([])
 })
 
-test('/remember-selection with no selection toasts and fills nothing', async ($, on) => {
+test('/engram-remember-selection with no selection toasts and fills nothing', async ($, on) => {
   const rig = rigUp(on)
-  await $.command.run({ command: 'remember-selection', args: '' } as never)
+  await $.command.run({ command: 'engram-remember-selection', args: '' } as never)
   expect(rig.filled).toEqual([])
   expect(rig.toasts).toEqual(['Select text in fullscreen mode first.'])
 })
 
-test('/remember-selection with a whitespace-only selection is no selection', async ($, on) => {
+test('/engram-remember-selection with a whitespace-only selection is no selection', async ($, on) => {
   const rig = rigUp(on)
   rig.selection = { text: '  \n ' }
-  await $.command.run({ command: 'remember-selection', args: '' } as never)
+  await $.command.run({ command: 'engram-remember-selection', args: '' } as never)
   expect(rig.filled).toEqual([])
   expect(rig.toasts).toEqual(['Select text in fullscreen mode first.'])
 })
@@ -444,6 +444,36 @@ test('/remember-selection with a whitespace-only selection is no selection', asy
 test('session start registers both commands', async ($, on) => {
   const rig = rigUp(on)
   await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true } as never)
-  expect(rig.registered.includes('digest-review')).toBe(true)
-  expect(rig.registered.includes('remember-selection')).toBe(true)
+  expect(rig.registered.includes('engram-digest-review')).toBe(true)
+  expect(rig.registered.includes('engram-remember-selection')).toBe(true)
+})
+
+const AUTO = { options: { digest_every_n_turns: 1, digest_auto_save: true } }
+
+test('auto-save: survivors are remembered as unreviewed, no pane opens, and one toast shows each statement', AUTO, async ($, on) => {
+  let next = 1
+  const rig = proposing(on, 'none', { remember: () => ({ status: 200, json: { handle: `f${next++}`, id: 1, created: true } }) })
+  await turn($)
+  await rig.clock.advance(0)
+  const written = rig.fetches.filter((f) => f.op === 'remember').map((f) => f.body as { statement: string; evidence: string })
+  expect(written.map((b) => b.statement)).toEqual(['Jim prefers tabs in Go files', 'The build uses Native AOT'])
+  expect(written.every((b) => b.evidence === 'proposed and saved by auto-digest, not reviewed by the user')).toBe(true)
+  expect(rig.opened).toEqual([])
+  expect(rig.toasts).toEqual(['Auto-saved [f1] Jim prefers tabs in Go files\nAuto-saved [f2] The build uses Native AOT'])
+})
+
+test('auto-save: a statement that fails to save is named in the toast and kept for /engram-digest-review', AUTO, async ($, on) => {
+  let calls = 0
+  const rig = proposing(on, 'none', {
+    remember: () => (calls++ === 0 ? { status: 200, json: { handle: 'f7', id: 7, created: true } } : { status: 400, json: { error: 'bad' } }),
+  })
+  await turn($)
+  await rig.clock.advance(0)
+  expect(rig.opened).toEqual([])
+  expect(rig.toasts.length).toBe(1)
+  expect(rig.toasts[0]).toContain('Auto-saved [f7] Jim prefers tabs in Go files')
+  expect(rig.toasts[0]).toContain('Not saved: "The build uses Native AOT"')
+  expect(rig.toasts[0]).toContain('/engram-digest-review to retry')
+  await $.command.run({ command: 'engram-digest-review', args: '' } as never)
+  expect(rig.opened.length).toBe(1)
 })

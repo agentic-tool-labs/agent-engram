@@ -132,7 +132,7 @@ const EVENTS: { name: string; drive: ($: Engine) => Promise<unknown>; expected: 
 
 // A command a mod answers itself may answer from its own state without touching a failing noun, or
 // answer nothing when it cannot; what must hold is that the run completes.
-const COMMANDS = ['lens', 'digest-review', 'remember-selection', 'undo-capture', 'invariant', 'why']
+const COMMANDS = ['engram-lens', 'engram-digest-review', 'engram-remember-selection', 'engram-undo-capture', 'engram-invariant', 'engram-why']
 
 for (const mode of MODES) {
   for (const event of EVENTS) {
@@ -162,11 +162,11 @@ for (const mode of MODES) {
   test(`${mode}: every mod that registers a command at session start is still reached`, async (eng, on) => {
     const rig = inject(on, mode)
     await eng.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
-    expect(rig.registered).toContain('undo-capture')
-    expect(rig.registered).toContain('digest-review')
-    expect(rig.registered).toContain('lens')
+    expect(rig.registered).toContain('engram-undo-capture')
+    expect(rig.registered).toContain('engram-digest-review')
+    expect(rig.registered).toContain('engram-lens')
     // The sentinel registers `invariant` then `why` in one step, so a failure of the first ends its hook.
-    expect(rig.registered).toContain('invariant')
+    expect(rig.registered).toContain('engram-invariant')
   })
 
   for (const [name, props] of [

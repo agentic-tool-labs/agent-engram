@@ -4,12 +4,14 @@ import { EDIT_TOOLS, SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
 import { ANY_SESSION_START, ANY_TURN_COMPLETE } from '../shared/events'
 import {
+  AUTO_EVIDENCE,
   DIGEST_INITIAL,
   DIGEST_SYSTEM,
   EVIDENCE,
   NO_SELECTION,
   PANE,
   buildTranscript,
+  digestAutoSave,
   digestEvery,
   fingerprint,
   parseCandidates,
@@ -35,8 +37,29 @@ const bindIo = ($: EngineInterface): ModIo => ({
   updateShared: (fn) => update($, SHARED, fn),
 })
 
+/** One `remember` per statement; reports the saved handles and which statements failed, and why. */
+async function rememberAll($: EngineInterface, texts: string[], evidence: string) {
+  const io = bindIo($)
+  const sessionId = await io.sessionId()
+  const saved: string[] = []
+  const savedLines: string[] = []
+  const failed: string[] = []
+  const failedTexts = new Set<string>()
+  for (const text of texts) {
+    const res = await modApi(io, 'remember', { session_id: sessionId, statement: text, evidence }, { mod: MOD })
+    if (res.ok) {
+      saved.push(`[${res.value.handle}]`)
+      savedLines.push(`[${res.value.handle}] ${text}`)
+    } else {
+      failed.push(`Not saved: "${text}" (${res.reason})`)
+      failedTexts.add(text)
+    }
+  }
+  return { saved, savedLines, failed, failedTexts }
+}
+
 /** Reads what was said since the last digest, asks for statements, drops the ones recall already covers. */
-async function runDigest($: EngineInterface): Promise<void> {
+async function runDigest($: EngineInterface, autoSave: boolean): Promise<void> {
   try {
     const messages = await $.session.messages()
     const { seenMessages, lastSeen } = await read($, DIGEST)
@@ -66,9 +89,20 @@ async function runDigest($: EngineInterface): Promise<void> {
     const candidates = proposed.filter((_, i) => !known[i]).map((text) => ({ text, ticked: false }))
     if (candidates.length === 0) return
 
+    if (autoSave) {
+      const { savedLines, failed, failedTexts } = await rememberAll($, candidates.map((c) => c.text), AUTO_EVIDENCE)
+      // A statement that did not save stays for /engram-digest-review; nothing retries on its own.
+      const kept = candidates.filter((c) => failedTexts.has(c.text))
+      if (kept.length > 0) await update($, DIGEST, (s) => ({ ...s, candidates: kept }))
+      // One toast: a plugin's new toast replaces its previous one, so saved lines and failures travel together.
+      const lines = [...savedLines.map((l) => `Auto-saved ${l}`), ...failed, ...(kept.length > 0 ? ['/engram-digest-review to retry'] : [])]
+      $.ui.toast(lines.join('\n'))
+      return
+    }
+
     await update($, DIGEST, (s) => ({ ...s, candidates }))
     await $.ui.open({ id: PANE, title: 'Memory candidates' })
-    $.ui.toast(`${candidates.length} memory candidates — /digest-review`)
+    $.ui.toast(`${candidates.length} memory candidates — /engram-digest-review`)
   } catch {
     // A digest is a convenience; nothing it hits may surface.
   }
@@ -80,19 +114,7 @@ async function saveTicked($: EngineInterface): Promise<void> {
   const ticked = candidates.filter((c) => c.ticked)
   if (ticked.length === 0) return
 
-  const io = bindIo($)
-  const sessionId = await io.sessionId()
-  const saved: string[] = []
-  const failed: string[] = []
-  const failedTexts = new Set<string>()
-  for (const { text } of ticked) {
-    const res = await modApi(io, 'remember', { session_id: sessionId, statement: text, evidence: EVIDENCE }, { mod: MOD })
-    if (res.ok) saved.push(`[${res.value.handle}]`)
-    else {
-      failed.push(`Not saved: "${text}" (${res.reason})`)
-      failedTexts.add(text)
-    }
-  }
+  const { saved, failed, failedTexts } = await rememberAll($, ticked.map((c) => c.text), EVIDENCE)
   // Rows that did not save stay, unticked, so the user can press Save again; nothing retries on its own.
   const kept = candidates.filter((c) => failedTexts.has(c.text)).map((c) => ({ ...c, ticked: false }))
   await update($, DIGEST, (s) => ({ ...s, candidates: kept }))
@@ -108,6 +130,7 @@ async function skipAll($: EngineInterface): Promise<void> {
 
 export const register: Register = (on, options) => {
   const every = digestEvery(options)
+  const autoSave = digestAutoSave(options)
 
   on('session.start', ANY_SESSION_START, async ($, e, next) => {
     const go = once(next)
@@ -115,11 +138,11 @@ export const register: Register = (on, options) => {
       // The event is shared with other mods; a failure here must not stop their hooks.
       try {
         await $.command.register({
-          name: 'digest-review',
+          name: 'engram-digest-review',
           description: 'Review the memory candidates the auto-digest proposed',
         })
         await $.command.register({
-          name: 'remember-selection',
+          name: 'engram-remember-selection',
           description: 'Put the selected text in the prompt as "Remember this: …" so you can edit it and submit',
         })
       } catch {
@@ -155,7 +178,7 @@ export const register: Register = (on, options) => {
           isDue = shouldDigest(every, turns, s.editedThisTurn)
           return { ...s, turnsSinceDigest: isDue ? 0 : turns, editedThisTurn: false }
         })
-        if (isDue) $.clock.after(0, () => runDigest($))
+        if (isDue) $.clock.after(0, () => runDigest($, autoSave))
       } catch {
         // This turn is not counted.
       }
@@ -165,7 +188,7 @@ export const register: Register = (on, options) => {
     }
   })
 
-  on('command.run', { command: 'digest-review' }, async ($, e, next) => {
+  on('command.run', { command: 'engram-digest-review' }, async ($, e, next) => {
     const go = once(next)
     try {
       const { candidates } = await read($, DIGEST)
@@ -177,7 +200,7 @@ export const register: Register = (on, options) => {
     }
   })
 
-  on('command.run', { command: 'remember-selection' }, async ($, e, next) => {
+  on('command.run', { command: 'engram-remember-selection' }, async ($, e, next) => {
     const go = once(next)
     try {
       const selected = await $.ui.selection()

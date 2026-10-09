@@ -21,8 +21,8 @@ const bindIo = ($: EngineInterface): ModIo => ({
   updateShared: (fn) => update($, SHARED, fn),
 })
 
-const UNDO_COMMAND = 'undo-capture'
-const UNDO_HINT = ' · /undo-capture to forget'
+const UNDO_COMMAND = 'engram-undo-capture'
+const UNDO_HINT = ' · /engram-undo-capture to forget'
 const CHIME = { asset: 'mods/toasts/chime.wav' }
 
 type RecallsValue = { recalls?: { toolUseId: string; coverage?: string }[] } | undefined

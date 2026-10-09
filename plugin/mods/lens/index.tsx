@@ -27,12 +27,15 @@ const bindIo = ($: EngineInterface): ModIo => ({
   updateShared: (fn) => update($, SHARED, fn),
 })
 
+// The host does not namespace a mod's commands and the plugin test kit rejects a colon in the name, so the plugin name is joined with a hyphen.
+const LENS_COMMAND = 'engram-lens'
+
 export const register: Register = (on, options) => {
   on('session.start', ANY_SESSION_START, async ($, e, next) => {
     const go = once(next)
     try {
       try {
-        await $.command.register({ name: 'lens', description: 'Show or hide the Memory Lens pane' })
+        await $.command.register({ name: LENS_COMMAND, description: 'Show or hide the Memory Lens pane' })
       } catch {
         // another mod's session.start must still run
       }
@@ -98,7 +101,7 @@ export const register: Register = (on, options) => {
     }
   })
 
-  on('command.run', { command: 'lens' }, async ($, e, next) => {
+  on('command.run', { command: LENS_COMMAND }, async ($, e, next) => {
     const go = once(next)
     try {
       const state = await read($, LENS)

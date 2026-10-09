@@ -43,14 +43,14 @@ function rig(on: On, ops: RoutingTable['ops'] = {}, table: RoutingTable = {}): R
 const submit = ($: Engine, prompt: string) => $.classic.UserPromptSubmit({ prompt })
 const undo = ($: Engine) =>
   $.command.run({
-    command: 'undo-capture',
+    command: 'engram-undo-capture',
     args: '',
     origin: { kind: 'user' },
     presentation: { isFullscreen: false, columns: 80 },
   } as never)
 const calls = (r: Rig, op: string) => r.router.fetchCalls.filter((c) => c.op === op)
 const CHIME = { asset: 'mods/toasts/chime.wav' }
-const HINT = ' · /undo-capture to forget'
+const HINT = ' · /engram-undo-capture to forget'
 
 test('a prompt with no capture: no toast, one captures call', async ($, on) => {
   const r = rig(on, { captures: reply() })
@@ -225,15 +225,15 @@ test('only the first toast of the first batch carries the hint', async ($, on) =
   expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT, 'Remembered [f2]: b'])
 })
 
-const undoRegs = (r: Rig) => r.commands.filter((n) => n === 'undo-capture')
+const undoRegs = (r: Rig) => r.commands.filter((n) => n === 'engram-undo-capture')
 const start = ($: Engine) => $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true } as never)
 
-test('session start registers /undo-capture before any capture, and a capture does not register it again', async ($, on) => {
+test('session start registers /engram-undo-capture before any capture, and a capture does not register it again', async ($, on) => {
   const r = rig(on, { captures: reply(capture('f1', 'a')) })
   await start($)
-  expect(undoRegs(r)).toEqual(['undo-capture'])
+  expect(undoRegs(r)).toEqual(['engram-undo-capture'])
   await submit($, 'I like tea')
-  expect(undoRegs(r)).toEqual(['undo-capture'])
+  expect(undoRegs(r)).toEqual(['engram-undo-capture'])
 })
 
 test('no registration happens without a session start', async ($, on) => {

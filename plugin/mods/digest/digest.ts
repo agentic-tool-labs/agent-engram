@@ -2,7 +2,8 @@ import type { DigestState } from '../shared/state'
 
 export const PANE = 'engram-digest'
 export const EVIDENCE = 'proposed by auto-digest, approved by the user'
-export const NO_SELECTION = 'Select text in fullscreen mode first.'
+export const AUTO_EVIDENCE = 'proposed and saved by auto-digest, not reviewed by the user'
+export const NO_SELECTION ='Select text in fullscreen mode first.'
 
 export const MAX_CANDIDATES = 5
 export const MAX_STATEMENT_CHARS = 300
@@ -28,6 +29,11 @@ export function fingerprint(row: { role: string; text: string }): string {
 export function digestEvery(options: Readonly<Record<string, unknown>>): number {
   const value = options['digest_every_n_turns']
   return typeof value === 'number' && value >= 1 ? Math.floor(value) : 0
+}
+
+/** Only boolean `true` skips the review pane, so a mistyped value keeps the safer behaviour. */
+export function digestAutoSave(options: Readonly<Record<string, unknown>>): boolean {
+  return options['digest_auto_save'] === true
 }
 
 /** `turns` counts the turn that just completed. */

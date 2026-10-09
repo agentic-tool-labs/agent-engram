@@ -65,7 +65,7 @@ export type LensState = {
   history: Record<string, HistoryView | 'loading' | 'unavailable' | 'failed'>
   /** Index into a loaded history's versions, keyed by fact handle; absent means the newest. Optional so readers of the recalls (the band) can build a LensState without it. */
   selected?: Record<string, number>
-  /** Whether `/lens` last left the pane open. */
+  /** Whether `/engram-lens` last left the pane open. */
   paneOpen?: boolean
   /** The pane has already been opened by `lens_auto_open` this session. */
   autoOpened?: boolean
@@ -108,7 +108,7 @@ export type SentinelState = {
   seen: string[]
   /** Last API failure time per path (`io.now()`), for the 60 s skip. */
   failedAt: Record<string, number>
-  /** What the `engram-why` pane shows; absent until `/why` ran. */
+  /** What the `engram-why` pane shows; absent until `/engram-why` ran. */
   why?: {
     path: string
     state: 'loading' | 'ready' | 'unsupported' | 'unavailable'

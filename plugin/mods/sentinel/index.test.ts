@@ -221,12 +221,12 @@ test('an engine failure inside the hook fails open: the edit still runs, nothing
   expect(r.ran.length).toBe(1)
 })
 
-test('session start registers /invariant and /why', async ($, on) => {
+test('session start registers /engram-invariant and /engram-why', async ($, on) => {
   const r = rig(on)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
-  expect(r.registered).toContain('invariant')
-  expect(r.registered).toContain('why')
+  expect(r.registered).toContain('engram-invariant')
+  expect(r.registered).toContain('engram-why')
 })
 
 test('Write is matched too', async ($, on) => {
@@ -370,47 +370,47 @@ test('three quick edits of one slow file share one request, none waits past 300 
   expect(r.ran.length).toBe(3)
 })
 
-test('/invariant forwards file and statement to the CLI and toasts its line', async ($, on) => {
+test('/engram-invariant forwards file and statement to the CLI and toasts its line', async ($, on) => {
   const r = rig(on, {
     cli: { 'invariant add src/a.ts keep the list sorted': { exitCode: 0, stdout: '[f9] added: "keep the list sorted"\nmore\n' } },
   })
-  const out = await run($, 'invariant', 'src/a.ts keep the list sorted')
+  const out = await run($, 'engram-invariant', 'src/a.ts keep the list sorted')
   expect(out.text).toBe('[f9] added: "keep the list sorted"')
   expect(r.toasts).toEqual(['[f9] added: "keep the list sorted"'])
 })
 
-test('/invariant: a failing CLI toasts its first stderr line', async ($, on) => {
+test('/engram-invariant: a failing CLI toasts its first stderr line', async ($, on) => {
   const r = rig(on, {
     cli: { 'invariant add src/a.ts x': { exitCode: 1, stdout: '', stderr: '\nerror: not enrolled\nsecond\n' } },
   })
-  const out = await run($, 'invariant', 'src/a.ts x')
+  const out = await run($, 'engram-invariant', 'src/a.ts x')
   expect(out.text).toBe('error: not enrolled')
   expect(r.toasts).toEqual(['error: not enrolled'])
 })
 
-test('/invariant: a failing CLI that printed nothing still says it failed', async ($, on) => {
+test('/engram-invariant: a failing CLI that printed nothing still says it failed', async ($, on) => {
   const r = rig(on, { cli: { 'invariant add src/a.ts x': { exitCode: 2, stdout: 'noise', stderr: '  \n' } } })
-  const out = await run($, 'invariant', 'src/a.ts x')
+  const out = await run($, 'engram-invariant', 'src/a.ts x')
   expect(out.text).toBe('engram invariant add failed (exit 2).')
   expect(r.toasts.length).toBe(1)
 })
 
-test('/invariant: exit 0 with no stdout says Recorded, whatever stderr holds', async ($, on) => {
+test('/engram-invariant: exit 0 with no stdout says Recorded, whatever stderr holds', async ($, on) => {
   rig(on, { cli: { 'invariant add src/a.ts x': { exitCode: 0, stdout: '', stderr: 'warning: slow' } } })
-  expect((await run($, 'invariant', 'src/a.ts x')).text).toBe('Recorded.')
+  expect((await run($, 'engram-invariant', 'src/a.ts x')).text).toBe('Recorded.')
 })
 
-test('/invariant: no binary installed', async ($, on) => {
+test('/engram-invariant: no binary installed', async ($, on) => {
   const r = rig(on, { binary: '' })
-  const out = await run($, 'invariant', 'src/a.ts x')
+  const out = await run($, 'engram-invariant', 'src/a.ts x')
   expect(out.text).toBe('Engram binary not found.')
   expect(r.toasts).toEqual(['Engram binary not found.'])
 })
 
-test('/invariant: a file with no statement runs nothing', async ($, on) => {
+test('/engram-invariant: a file with no statement runs nothing', async ($, on) => {
   const r = rig(on)
-  const out = await run($, 'invariant', 'src/a.ts')
-  expect(out.text).toBe('Usage: /invariant <file> <statement>')
+  const out = await run($, 'engram-invariant', 'src/a.ts')
+  expect(out.text).toBe('Usage: /engram-invariant <file> <statement>')
   expect(r.router.processCalls.length).toBe(0)
   expect(r.toasts.length).toBe(0)
 })
@@ -426,9 +426,9 @@ async function paneText($: Parameters<TestBody>[0]) {
   return JSON.stringify(await ui.drawn())
 }
 
-test('/why opens the pane: invariants first, then other authored facts, then code facts', async ($, on) => {
+test('/engram-why opens the pane: invariants first, then other authored facts, then code facts', async ($, on) => {
   const r = rig(on, { path: answer(WHY_FACTS) })
-  const out = await run($, 'why', 'src/a.ts')
+  const out = await run($, 'engram-why', 'src/a.ts')
   expect(out.text).toBe('Opened engram-why for src/a.ts.')
   expect(r.panes[0]).toMatchObject({ id: 'engram-why' })
   const body = (r.router.fetchCalls[0]!.body as { path: string; predicate?: string })
@@ -442,22 +442,22 @@ test('/why opens the pane: invariants first, then other authored facts, then cod
   expect(at('[f2] a decision about a.ts')).toBeLessThan(at('[f1] code gist of a.ts'))
 })
 
-test('/why on a file outside an enrolled repo says so', async ($, on) => {
+test('/engram-why on a file outside an enrolled repo says so', async ($, on) => {
   rig(on, { path: answer([], null) })
-  await run($, 'why', 'src/a.ts')
+  await run($, 'engram-why', 'src/a.ts')
   expect(await paneText($)).toMatch('Not inside an enrolled repo')
 })
 
-test('/why against a server without the mod API says it needs a newer Engram', async ($, on) => {
+test('/engram-why against a server without the mod API says it needs a newer Engram', async ($, on) => {
   rig(on)
-  await run($, 'why', 'src/a.ts')
+  await run($, 'engram-why', 'src/a.ts')
   expect(await paneText($)).toMatch('needs a newer Engram')
 })
 
-test('/why with no path opens nothing', async ($, on) => {
+test('/engram-why with no path opens nothing', async ($, on) => {
   const r = rig(on, { path: answer(WHY_FACTS) })
-  const out = await run($, 'why', '  ')
-  expect(out.text).toBe('Usage: /why <path>')
+  const out = await run($, 'engram-why', '  ')
+  expect(out.text).toBe('Usage: /engram-why <path>')
   expect(r.panes.length).toBe(0)
   expect(r.router.fetchCalls.length).toBe(0)
 })

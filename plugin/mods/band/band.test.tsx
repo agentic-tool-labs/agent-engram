@@ -262,22 +262,22 @@ test('the embed status exiting non-zero draws no backlog line and does not retry
   expect(polls()).toBe(2)
 })
 
-test('embed status that is not JSON draws no backlog line, and no status entry unless asked', async (eng, on) => {
+test('embed status that is not JSON draws no backlog line, and no status text unless asked', async (eng, on) => {
   const w = world(on, lensOf([]), TABLE('engram: boom'))
   await start(eng, w)
   const ui = await draw(eng, 'terminal')
   expect(await ui.find({ type: 'Text', text: /embedding/ })).toBeUndefined()
-  expect(w.statuses).toEqual([])
+  expect(w.statuses).toEqual([undefined])
 })
 
-test('no binary installed: no backlog line, no status call, no retry storm', async (eng, on) => {
+test('no binary installed: no backlog line, no status text, no retry storm', async (eng, on) => {
   const w = world(on, lensOf([]), {})
   await start(eng, w)
   const ui = await draw(eng, 'terminal')
   expect(await ui.find({ type: 'Text', text: /embedding/ })).toBeUndefined()
   await w.advance(30_000)
   expect(w.processes().filter((a) => a.includes('--status')).length).toBe(0)
-  expect(w.statuses).toEqual([])
+  expect(w.statuses).toEqual([undefined])
 })
 
 test('the poller outlives session.end, which also fires on /clear', async (eng, on) => {
@@ -352,10 +352,10 @@ test('status_entry on, status output not JSON: the entry is cleared', ON, async 
   expect(w.statuses).toEqual([undefined])
 })
 
-test('status_entry off (the default): $.ui.status is never called and status is never run', async (eng, on) => {
+test('status_entry off (the default): the entry is cleared once at start, never written, and status is never run', async (eng, on) => {
   const w = world(on, lensOf([]), TABLE(embed(), { 'status --json': STATUS }))
   await start(eng, w)
   await w.advance(10_000)
-  expect(w.statuses).toEqual([])
+  expect(w.statuses).toEqual([undefined])
   expect(w.processes().filter((a) => a === 'status --json').length).toBe(0)
 })
