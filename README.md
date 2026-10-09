@@ -557,6 +557,9 @@ engram backup replay --apply           # read facts.jsonl into the store, adding
 | `/engram:doctor` | Read-only diagnosis: resolved binary, port holder, home contents, telemetry, log tail. |
 | `/engram:statusline` | Add live Engram activity to your status line — adds a segment to whatever you already have rather than replacing it. |
 
+The plugin's mods add seven more commands, spelled `/engram-lens` with a hyphen rather than a colon;
+they are listed under [Claude Code mods](#claude-code-mods) below.
+
 The split in how they reach engram is deliberate. `recall`, `remember`, and `digest` go
 through the MCP tools, because that is where the ranking, the token budget, and the
 session identity live. The four lifecycle and diagnostic commands shell out to the binary
@@ -575,6 +578,207 @@ time; a command naming a moved script or a renamed MCP tool would fail for the f
 user who typed it. `PluginCommandTests` closes that gap in CI: every
 `${CLAUDE_PLUGIN_ROOT}` path must exist, every shell script must be executable, and
 every MCP tool a command names is checked against `tools/list` on a real running server.
+
+### Claude Code mods
+
+Beyond hooks and slash commands, the plugin carries eight **mods**: panes, toasts, a prompt band and
+a few commands that Claude Code itself runs, written in TypeScript under `plugin/mods/` and installed
+with the plugin. They make memory visible while you work — what the model recalled, what was captured,
+what changed — and in two cases (the primer and the sentinel) put memory in front of the model. Every
+mod fails open: when its server call fails, your prompt or the model's tool call goes through
+untouched.
+
+**What they need.** A Claude Code build with mod support, and the Engram server running, because the
+mods read and write through it. The mods were built against the host types of Claude Code 2.1.295;
+no minimum Claude Code version has been established. The Memory Tail also needs an Engram server whose
+mod API has the `tail` op (`POST /mod/v1/tail`, schema version 17), and against an older server its
+pane says so instead of showing nothing.
+
+**Sessions.** Several mods keep per-session state: the Lens's auto-open, the toasts' undo hint and
+the sentinel's announcements. A session here is the host's session id, which a plugin reload keeps and
+`/clear` is expected to change. Whether `/clear` does change it, and whether `claude --resume` keeps
+it, have not been confirmed live. If `/clear` keeps the id, nothing
+resets on `/clear`: the Lens stays opened, no new undo hint appears and the sentinel stays quiet. If a
+resumed session gets a new id, that state resets once on resume.
+
+**Changing an option.** Each option below is a plugin setting. Open `/plugin`, change it, then run
+`/reload-plugins`: the mods read their options when they load. There are twelve options, listed with
+the mod each belongs to.
+
+**Updating the mods.** They ship inside the plugin, and the cache is pinned per plugin version, so a
+new mod build arrives only with a new plugin version:
+
+```
+claude plugin marketplace update engram
+claude plugin update engram@engram
+```
+
+then `/reload-plugins` in a running session.
+
+| Command | What it does |
+| --- | --- |
+| `/engram-lens` | Show or hide the Memory Lens pane. |
+| `/engram-tail` | Show or hide the Memory Tail pane; resumes it after a plugin reload. |
+| `/engram-undo-capture` | Forget the most recent capture toasted in this session. |
+| `/engram-invariant <file> <statement>` | Record an invariant for a file (runs `engram invariant add`). |
+| `/engram-why <path>` | Open a pane listing what Engram records for a file. |
+| `/engram-digest-review` | Open the memory candidates the automatic digest proposed. |
+| `/engram-remember-selection` | Put the selected text in the prompt as `Remember this: "…"`. |
+
+#### Memory Lens
+
+Option: `lens_auto_open` (default `false`). Command: `/engram-lens`.
+
+A pane listing every `engram_recall` the model makes: the query, the coverage, any notes, and each fact
+with its handle, body and metadata, plus the `gaps:` line when the digest has one. A fact that has been
+revised carries a **History** button, with **Prev** and **Next** to step through its versions; that
+button uses the server's mod API, and says so when the server is down or too old. The Lens only
+watches — what it sees, the model still receives untouched. With `lens_auto_open` it opens itself
+once per session, on the first model recall, rather than at session start.
+
+#### Status band and status entry
+
+Option: `status_entry` (default `false`). No command; the band itself is always on.
+
+A band above the prompt, shown only when it has something to say. After a model recall it reads
+`memory high · 7 facts` (or `none`, `medium`, …) with the recall's notes. While the embedding backlog
+is draining it adds `embedding 208/873` and an estimate. When a recall came back with coverage `none`,
+the band offers **Remember the answer**: one press, once per recall, never while the model is working,
+which asks the model to save the answer once it has worked it out. The band polls the binary
+(`engram embed --status --json`), not the server. `status_entry` additionally pins an entry to the
+status line — `engram <state> <version> · embed 208/873` — which is independent of the
+`/engram:statusline` command above.
+
+#### Toasts
+
+Options: `toasts_enabled` (default `true`), `chime` (`off` default, `captures`, `recalls`, `both`).
+Command: `/engram-undo-capture`.
+
+When a prompt of yours makes Engram capture a fact, a toast shows `Remembered [handle]: body`; the
+first one shown in each session adds `/engram-undo-capture to forget`, and the command forgets the most
+recent capture toasted in this session; with none it says "No captured memory to forget". The toast reads the server's list of this session's captures after your prompt has been
+submitted, so it reports what was stored. `chime` plays a sound on a capture, on a recall that came
+back with `high` coverage, or both. The capture chime is part of the same code as the toast, so with
+`toasts_enabled = false` there is no toast, no undo command and no capture chime.
+
+#### Just-in-time primer
+
+Options: `jit_mode` (`off` default, `shadow`, `inject`), `jit_budget_tokens` (default `400`; a value
+outside 50–4000 falls back to 400). No command.
+
+The session primer is written once, at session start. This mod asks for a recall against each prompt
+you type in the composer: at least 12 characters, not a slash command, using the first 2,000 characters as the query
+and an 800 ms timeout. In `inject` mode a result with `high` coverage is attached to that prompt as
+context only the model sees, headed `Memory relevant to this message (recalled automatically):`;
+anything less leaves the prompt alone. `shadow` runs the same recall without waiting for it or using
+the answer, so the server's `mod-call` records show, prompt by prompt, the coverage `inject` would have seen
+before you let it add anything.
+
+#### Invariant sentinel
+
+Options: `sentinel_mode` (`inform` default, `off`, `deny-once`). Commands: `/engram-invariant`,
+`/engram-why`.
+
+An invariant is a rule you attach to one file — `/engram-invariant src/Db.cs never open a deferred
+transaction here` — stored as an ordinary non-regenerable fact (D77); the file has to be inside an
+indexed repository. Every Edit or Write looks the file up, bounded by a 300 ms timeout once the server's port is known;
+finding it, when it is not known, can take longer. Each invariant is announced to
+each agent once per session, and one added or replaced later is announced on that agent's next Edit or
+Write of the file. `inform` appends the invariants to the edit's result as context and shows a toast;
+`deny-once` refuses the first attempt with the same text and "Re-issue the edit if it respects
+these", and lets the re-issued edit proceed. A failed lookup is not retried for a minute, so a slow
+server costs the announcement and never the edit. `/engram-why <path>` opens a pane grouping a file's
+invariants, other authored facts and indexed code facts.
+
+#### Belief diff
+
+Option: `belief_diff_scope` (`personal` default, `off`, `all`). No command.
+
+When the model calls `engram_revise` on a live fact, a dialog shows the current text, the proposed
+text and the stated reason, with **Approve** and **Keep old**. Keeping the old belief, or dismissing
+the dialog, refuses the revision and tells the model not to retry it. It also warns when the revision
+would drop the fact's `details`, since a revise never carries them forward. `personal` reviews only
+your own beliefs — statements, directives and invariants — and `all` reviews every revision. If the
+dialog cannot be shown, the revision goes ahead and one toast says it was applied unreviewed.
+
+#### Digest
+
+Options: `digest_every_n_turns` (default `0`, off), `digest_auto_save` (default `false`).
+Commands: `/engram-digest-review`, `/engram-remember-selection`.
+
+Every N turns — or sooner, from the second turn, when the model edited files — the mod reads what has
+been said since the last digest and asks Claude Code for a small Haiku completion that proposes
+durable statements. Anything recall already covers with `high` coverage is dropped. What is left
+appears in a **Memory candidates** pane with a tick box each and **Save** and **Skip**; nothing is
+saved until you press Save, and those facts record "proposed by auto-digest, approved by the user" as
+their evidence. This is separate from `/engram:digest`, which has the model flush its own session notes.
+
+**`digest_auto_save` removes the review step.** The candidates are saved at once and listed in a
+toast, and their evidence reads "proposed and saved by auto-digest, not reviewed by the user", so the
+facts are marked as unreviewed. A candidate that fails to save stays
+for `/engram-digest-review`. `/engram-remember-selection` puts the text you selected in the prompt as
+`Remember this: "…"` so you can edit it before sending; it needs fullscreen mode to see a selection.
+
+#### Memory Tail
+
+Options: `tail_scope` (`session` default, `all`), `tail_auto_open` (default `false`).
+Command: `/engram-tail`.
+
+A pane that follows memory as it changes, polling the server every two seconds. Each row is a head
+line — `HH:mm:ss`, then the exact kind or tool name — and, when there is more to say, a detail line:
+a write shows its handle and body, a retraction adds its reason, a recall shows `7 facts · high` and
+the query. A `•` marks a row that belongs to this session and a `✗` marks a retraction row and a
+write whose fact has since been retracted; a dated line separates days. It shows authored facts, not the indexer's code facts, and
+keeps the newest 200 rows.
+
+**Filter.** One button, `Filter 6/8 ▾`, opens eight toggles: Writes, Retractions, Reads, Remember,
+Mods, Sessions, Maintenance, Other. Sessions and Maintenance start off. The filter is applied in the
+pane and survives closing and reopening it.
+
+**Updated.** The line under the header, `Updated 14:02:31`, is the time of the last successful poll.
+When the server is down, slow or too old it stops advancing and a status line says why, so a frozen
+pane reads as frozen rather than as "no activity".
+
+**Only new activity.** The tail starts from the store's head each time it opens: nothing from before
+is replayed, and a fresh open clears the rows of an earlier viewing, because they would sit above a
+gap and read as continuous history. `/reload-plugins` is different — as the host documents it, a
+reload cancels the pane's timers and keeps its state, so `/engram-tail` (or the session start after the reload) resumes from the saved
+position, keeps everything on screen, adds one `resumed` row, and anything that landed during the
+reload arrives on the first poll.
+
+**Scope.** `session` shows what is keyed to this Claude Code session — captures, digest saves, mod
+`remember` and `forget`, hook events — plus this session's own Engram tool calls, which the mod sees
+in-process and only while the pane is open. `all` shows every authored write and retraction, from every session and every writer: the model,
+you, the command line, `import`, sync and the server — except a sync close that has an unsynced
+successor, which writes no retraction row and is never shown. The two cannot be merged by id: the model's MCP calls and Claude Code's hooks
+identify a session in different id spaces (D43, D79), which is why `session` observes the calls
+itself. The tail is a lookup and writes no telemetry; the server's log reader runs only while a tail
+has asked within the last ten seconds (or a webhook is configured).
+
+#### Why mods do not use MCP
+
+Mods call `POST /mod/v1/<op>` on the server's loopback port, never the MCP tools. MCP calls are
+recorded as the model's own `recall`, `remember` and `session-open`, so a per-prompt mod recall would
+inflate the adoption numbers that decide whether the model reaches for memory on its own; mod traffic
+is recorded as its own `mod-call` kind instead (D76).
+
+#### Limits
+
+- Mod command names use a hyphen, e.g. `/engram-lens`. The host does not add the plugin prefix to mod
+  commands: a command registered as `lens` was reached as a bare `/lens`, observed live. A colon in a
+  mod command name was rejected by the plugin test kit and has not been tried against the real host.
+- The test kit cannot paint, so the pane layout tests check the drawn tree and not a rendered frame.
+  Treat the layout at unusual widths as unproven.
+- A 404 from a server without the mod API makes every mod's server-API calls short-circuit for 300 seconds, so one
+  old server affects all of them, and the tail polls every 15 seconds only to notice a recovery.
+- The sentinel ignores `MultiEdit`.
+- The tail never shows a sync close that has an unsynced successor.
+- The tail polls because the mod's HTTP calls cannot hold a stream open. Push designs are future
+  work and nothing here depends on them.
+- Closing the tail pane by hand is not confirmed to be noticed. If the host reports the pane gone, the
+  next session start stops the polling; if it still reports the pane as placed, `/engram-tail` resumes
+  polling instead of closing it, and only a second press closes it. Which of the two happens has not
+  been confirmed live. Neither has whether saved pane state survives `/clear` and a resumed session.
 
 ### Where memory lives
 
