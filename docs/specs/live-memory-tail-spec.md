@@ -25,6 +25,12 @@ Reviewer: reviewer
     - Event times render `HH:mm:ss`, so lens's formatter is reused unchanged.
     - The formatter is imported from `lens/model.ts`, not moved.
 
+- **r5 (Reviewer ruling on the build).**
+  - F2: §5.1's "a hanging subscriber cannot delay the tail" is weakened to the true bound. Option (a): no code change, bound recorded in D79.
+  - F4: M1's falsification replaced with one that can fail.
+  - F5: body clip fixed at 120 characters.
+  - §4/S9: `INDEXED BY` plus the unary `+` are stated as load-bearing; the planner does not pick the index unaided.
+
 ## TL;DR
 
 - `/engram-tail` toggles the **Memory Tail** pane: a live, newest-first log of memory activity.
@@ -116,6 +122,12 @@ Response part: `retractions: { rows }`.
 
 **Index.** This is the one schema change: `ix_supersession_retracted ON supersession(created_at) WHERE new_fact_id IS NULL`. Schema version 16 → 17. Without the index every 2 s poll scans every retraction ever made, a set that grows with each reindex.
 
+**The planner does not pick this index unaided** *(r5, Reviewer ruling; r1–r4 assumed it would)*. The retraction statement must:
+- name the index with `INDEXED BY ix_supersession_retracted`;
+- use a unary `+` to disable the competing index, as built and recorded in D79.
+
+Both are load-bearing. A comment at the statement says why, and S9 holds each by its own falsification row. Because of `INDEXED BY`, a store missing the index fails at prepare rather than silently scanning. That is acceptable: the store always migrates on open (`OpenInitialized`), and S14 covers the migration.
+
 **Fields.** `handle` (the retracted fact), `id`, `retracted_at`, `reason`, `body`, `origin` (of the retracted fact, by §3's function), `this_session`.
 
 **Who retracted.** `FactStore.Forget`, both overloads, gains an optional session row id, written to `supersession.session_id`.
@@ -146,7 +158,8 @@ Response part: `events: { epoch, head, rows, skipped } | null`.
 - **The reader runs while either holds:**
   - a webhook URL is configured, from server start, as today;
   - a `tail` request arrived within the last **10 s**. The first such request starts the reader at EOF if it is not running. It stops when demand lapses and no webhook is configured.
-- **Each batch reaches the ring before webhook delivery runs**, so a hanging subscriber cannot delay the tail.
+- **Each batch reaches the ring before webhook delivery runs.** A hanging subscriber therefore never delays records already read. It *can* delay the **next** read, because the one loop both reads and delivers. The bound: at most the delivery timeout × the number of unmuted URLs that hang, per poll. Each failing URL gets at most one attempt per poll and is then muted (2 s doubling to 30 s), so one persistently hanging URL costs about one timeout of ring staleness each time its mute expires. Record this bound in D79.
+  - *(r5, Reviewer F2; option (a) chosen, no code change.)* A pump independent of delivery, with its own tick and batches dropped while delivery is busy, was rejected for two reasons. It changes webhook semantics: today a slow subscriber delays the others' delivery, and the alternative would *drop* their batches, which §10 forbids. And the stall only exists when a webhook URL is configured *and* hangs, while the tail's own cadence is 2 s. Reopen if E7 or live use shows lag that matters.
 - **Unchanged:**
   - start at EOF at server start;
   - no cursor or resume;
@@ -303,7 +316,7 @@ The tie order exists because telemetry is appended after the write it reports, s
 
 | Row | Shows |
 |---|---|
-| write | handle, time, origin label, body on one line clipped like lens's fact rows, `← fN` when `replaces`, `(retracted)` when not live or retracted later |
+| write | handle, time, origin label, body on one line clipped to **120 characters** plus `…` (one constant in `plugin/mods/tail/model.ts`, also used for retraction bodies, call-row statements and queries), `← fN` when `replaces`, `(retracted)` when not live or retracted later. *(r5, Reviewer F5: lens has no clip helper.)* |
 | retraction | handle, time, `retract`, the retracted fact's origin, body, `— <reason>` |
 | `recall` event | `"<query>"`, `fact_count` facts, `coverage` |
 | `mod-call` event | `mod · tool`; for `tool = recall` also `"<query>"` and `coverage`. **No fact count** (D76) |
@@ -415,7 +428,7 @@ Only `not-found` and `unsupported` stop the loop.
 | S6 | ModApiTests.cs | Mod `forget` → retraction under `session`; a null-session forget appears only under `all` | Ignore `supersession.session_id` |
 | S7 | ModApiTests.cs | A code-fact forget is not a retraction; a supersede is not a retraction | Drop the `regenerable` join; drop `new_fact_id IS NULL` |
 | S8 | ModApiTests.cs | A retraction stamped `T-7` committed after a read at `closed_after = T` comes back on the next read | Slack 0 |
-| S9 | ModApiTests.cs | `EXPLAIN QUERY PLAN`: rowid seek; `ix_supersession_retracted`; an index for `replaces`; no `SCAN fact`/`SCAN supersession` | Drop `ix_supersession_retracted` in the fixture |
+| S9 | ModApiTests.cs | `EXPLAIN QUERY PLAN`: rowid seek; `ix_supersession_retracted`; an index for `replaces`; no `SCAN fact`/`SCAN supersession` | (i) Drop `ix_supersession_retracted` in the fixture. (ii) Remove `INDEXED BY` → plan red. (iii) Remove the unary `+` → plan red. If (ii) or (iii) leaves S9 green, that construct is not load-bearing: drop it and correct D79 to match. |
 | S10 | ModApiTests.cs | `tail` writes no telemetry (file size unchanged across a success, a 400 and a first read) | Add `RecordCall` |
 | S11 | ModApiTests.cs | Each invalid field → 400 | Remove each check |
 | S12 | ModApiTests.cs | `"tail"` added to every per-op guard theory (`[InlineData]`) | Existing guard falsifications redden the `tail` row; remove the Content-Type check once |
@@ -445,7 +458,7 @@ Use a real barrier, not the return of `StartAsync`, before writing records (D55)
 
 | # | Test | Falsification |
 |---|---|---|
-| M1 | The composer loads with the tail registered; `composer.test.ts` is green | Register `session.start` without a matcher |
+| M1 | The composer loads with the tail registered; `composer.test.ts` asserts `engram-tail` is registered (`toContain('engram-tail')`) | Remove `tail(on, options)` from `plugin/hooks/register.tsx` → red. *(r5, Reviewer F4: the earlier "register without a matcher" falsification could not fail, because the engine refuses only a **second** matcher-less registration.)* |
 | M2 | Pane never opened → zero `tail` fetches over 60 s | Start the loop on `session.start` |
 | M3 | Open → one fetch every 2 s; close → none after | Drop the cancel |
 | M4 | First fetch sends no cursors; the fake returns rows anyway and none render | Render first-fetch rows |
