@@ -1,9 +1,10 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, PromptSubmitInput, Register, Timer } from 'claude-code'
 
 import { ENGRAM_TOOLS, SHARED_INITIAL, modApi } from '../shared/client'
-import { ANY_SESSION_START } from '../shared/events'
+import { ANY_PROMPT_SUBMIT, ANY_SESSION_START, isOwnPrompt } from '../shared/events'
 import { once } from '../shared/guard'
+import { forSession } from '../shared/session'
 import type { ModIo } from '../shared/client'
 import {
   CONNECTING,
@@ -12,7 +13,10 @@ import {
   POLL_MS,
   RETRY_MS,
   TAIL_INITIAL,
+  TAIL_SESSION_INITIAL,
+  TAIL_SESSION_SHAPE,
   TAIL_SHAPE,
+  appendDiag,
   applyResponse,
   callRow,
   decide,
@@ -31,6 +35,9 @@ const TITLE = 'Memory Tail'
 const TAIL_COMMAND = 'engram-tail'
 
 const TAIL = atom({ plugin: 'engram', key: 'tail' } as const, TAIL_INITIAL, { shape: TAIL_SHAPE })
+const TAIL_SESSION = atom({ plugin: 'engram', key: 'tail-session' } as const, TAIL_SESSION_INITIAL, { shape: TAIL_SESSION_SHAPE })
+// Temporary (1.3.14): the lines the diagnostic toasts showed, kept so /engram-tail can print them.
+const TAIL_DIAG = atom({ plugin: 'engram', key: 'tail-diag' } as const, { lines: [] as string[] })
 const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, SHARED_INITIAL)
 
 // Every Engram MCP tool shares the prefix the existing constants carry, so the pattern is built
@@ -139,6 +146,57 @@ async function isShown($: EngineInterface, atomSaysOpen: boolean): Promise<boole
   }
 }
 
+// The diagnostic exists only for a user who has the auto-open on, the only one who can show the bug.
+let diagOn = false
+const DIAG_TOAST_MS = 15_000
+const errText = (err: unknown) => (err instanceof Error ? err.message : String(err))
+
+// A throw from the toast or the atom write costs only the line.
+async function diag($: EngineInterface, text: string) {
+  if (!diagOn) return
+  const line = `tail diag: ${text}`
+  try {
+    await $.ui.toast(line, { timeoutMs: DIAG_TOAST_MS })
+  } catch {
+    // diagnostic only
+  }
+  try {
+    await update($, TAIL_DIAG, (s) => ({ lines: appendDiag(s.lines, line) }))
+  } catch {
+    // diagnostic only
+  }
+}
+
+async function sessionTag($: EngineInterface): Promise<string> {
+  try {
+    return String(await $.session.id()).slice(0, 8)
+  } catch {
+    return '?'
+  }
+}
+
+/** The command's reply with the stored diagnostic lines under it. */
+async function withDiag($: EngineInterface, text: string): Promise<{ text: string }> {
+  if (!diagOn) return { text }
+  try {
+    const { lines } = await read($, TAIL_DIAG)
+    return { text: lines.length === 0 ? text : `${text}\n\ntail diag:\n${lines.join('\n')}` }
+  } catch {
+    return { text }
+  }
+}
+
+/** Raw host record of this plugin's panes, for the session.start diagnostic. */
+async function panesText($: EngineInterface): Promise<string> {
+  if (!diagOn) return ''
+  try {
+    const list = await $.ui.panes()
+    return list.length === 0 ? 'none' : list.map((pane) => `${pane.id}:${pane.isPlaced}`).join(',')
+  } catch (err) {
+    return `threw: ${errText(err)}`
+  }
+}
+
 /** Carries on polling from the saved cursors after the timers were lost. */
 async function resume($: EngineInterface, scope: 'session' | 'all') {
   const nowMs = await $.clock.now()
@@ -146,29 +204,86 @@ async function resume($: EngineInterface, scope: 'session' | 'all') {
   start($, scope)
 }
 
+/** Opens the pane on the first prompt of each session id, awaited so the open answers the person's prompt. */
+async function autoOpen($: EngineInterface, e: PromptSubmitInput, scope: 'session' | 'all', enabled: boolean) {
+  if (!enabled) return
+
+  const sessionId = await $.session.id()
+  const current = forSession(await read($, TAIL_SESSION), sessionId, TAIL_SESSION_INITIAL)
+  if (current.autoOpened) return
+  if (!isOwnPrompt(e)) {
+    const why = e.origin?.kind === 'composer' ? 'slash' : `origin ${e.origin?.kind ?? 'none'}`
+    await diag($, `first prompt sid=${sessionId.slice(0, 8)} shown=n/a open=skipped: ${why}`)
+    return
+  }
+  // Marked before the open so an open that fails or is left undrawn is not retried on every prompt.
+  await update($, TAIL_SESSION, (s) => ({ ...forSession(s, sessionId, TAIL_SESSION_INITIAL), autoOpened: true }))
+
+  const tag = sessionId.slice(0, 8)
+  const state = await read($, TAIL)
+  const shown = await isShown($, state.paneOpen)
+  if (shown) {
+    await diag($, `first prompt sid=${tag} shown=true open=skipped: shown`)
+    return
+  }
+  try {
+    const opened = await open($, scope)
+    await diag($, `first prompt sid=${tag} shown=false open=${opened.isPlaced ? 'placed' : `undrawn: ${opened.reason}`}`)
+  } catch (err) {
+    await diag($, `first prompt sid=${tag} shown=false open=threw: ${errText(err)}`)
+  }
+}
+
 export const register: Register = (on, options) => {
+  diagOn = options.tail_auto_open === true
   const scope = options.tail_scope === 'all' ? 'all' : 'session'
 
   on('session.start', ANY_SESSION_START, async ($, e, next) => {
     const go = once(next)
     try {
+      let registered = 'ok'
+      let wasRunning = running
+      let taken = 'n/a'
       try {
-        await $.command.register({ name: TAIL_COMMAND, description: 'Show or hide the Memory Tail pane' })
+        try {
+          await $.command.register({ name: TAIL_COMMAND, description: 'Show or hide the Memory Tail pane' })
+        } catch (err) {
+          registered = `threw: ${errText(err)}`
+          throw err
+        }
         const state = await read($, TAIL)
+        wasRunning = running
         const action = decide('session.start', await isShown($, state.paneOpen), running)
+        taken = action
         if (action === 'resume') {
           await resume($, scope)
         } else if (action === 'clear') {
           // The pane is known to be gone, so a chain still polling it has no reader.
           stop()
           await update($, TAIL, (s) => ({ ...s, paneOpen: false }))
-          if (options.tail_auto_open === true) $.clock.after(0, () => void open($, scope).catch(() => undefined))
         }
       } catch {
         // another mod's session.start must still run
       }
 
+      if (diagOn) await diag($, `session.start sid=${await sessionTag($)} register=${registered} panes=${await panesText($)} running=${wasRunning} action=${taken}`)
       return go(e)
+    } catch {
+      return go.fallback(e)
+    }
+  })
+
+  on('prompt.submit', ANY_PROMPT_SUBMIT, async ($, e, next) => {
+    const go = once(next)
+    try {
+      // Observation only: the prompt always goes through once, whatever happens here.
+      try {
+        await autoOpen($, e, scope, options.tail_auto_open === true)
+      } catch {
+        // fail open
+      }
+
+      return await go(e)
     } catch {
       return go.fallback(e)
     }
@@ -212,18 +327,18 @@ export const register: Register = (on, options) => {
         await $.ui.close({ id: PANE })
         await update($, TAIL, (s) => ({ ...s, paneOpen: false }))
 
-        return { text: 'Memory Tail closed.' }
+        return withDiag($, 'Memory Tail closed.')
       }
 
       if (action === 'resume') {
         await resume($, scope)
 
-        return { text: 'Memory Tail resumed.' }
+        return withDiag($, 'Memory Tail resumed.')
       }
 
       const opened = await open($, scope)
 
-      return { text: opened.isPlaced ? 'Memory Tail opened.' : `Memory Tail could not open: ${opened.reason}` }
+      return withDiag($, opened.isPlaced ? 'Memory Tail opened.' : `Memory Tail could not open: ${opened.reason}`)
     } catch {
       return go.fallback(e)
     }

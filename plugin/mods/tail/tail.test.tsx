@@ -1,8 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { On } from 'claude-code'
+import type { On, PromptSubmitInput } from 'claude-code'
 
 import { ENGRAM_TOOLS } from '../shared/client'
+import { isOwnPrompt } from '../shared/events'
 import { installFakeEngine } from '../shared/testing'
 import type { FetchCall, RoutingTable } from '../shared/testing'
 import type { TailEventRecord, TailResponse, TailWrite } from '../shared/types'
@@ -58,6 +59,12 @@ type World = {
   script: (...responses: (TailResponse | { status: number; json?: unknown } | 'hang')[]) => void
   opened: string[]
   closed: string[]
+  toasts: string[]
+  /** What the hooks beneath saw, in order: 'open' for a ui.open, 'next' for a prompt reaching the engine. */
+  order: string[]
+  submitted: PromptSubmitInput[]
+  control: { open: 'placed' | 'undrawn' | 'throw'; toastThrows: boolean }
+  setSession: (id: string) => void
 }
 
 function world(on: On, table: RoutingTable = RUNNING): World {
@@ -65,6 +72,10 @@ function world(on: On, table: RoutingTable = RUNNING): World {
   let served = 0
   const opened: string[] = []
   const closed: string[] = []
+  const toasts: string[] = []
+  const order: string[] = []
+  const submitted: PromptSubmitInput[] = []
+  const control: World['control'] = { open: 'placed', toastThrows: false }
   const router = installFakeEngine(on, {
     ...table,
     ops: {
@@ -76,7 +87,18 @@ function world(on: On, table: RoutingTable = RUNNING): World {
     },
   })
   const clock = mock.clock(on, { now: NOW_MS })
-  on('ui.open', (_$, e) => (opened.push((e as { id: string }).id), { value: { isPlaced: true } }) as never)
+  on('ui.open', (_$, e) => {
+    opened.push((e as { id: string }).id)
+    order.push('open')
+    if (control.open === 'throw') throw new Error('open failed')
+    return { value: control.open === 'undrawn' ? { isPlaced: false, reason: 'R' } : { isPlaced: true } } as never
+  })
+  on('ui.toast', (_$, e) => {
+    if (control.toastThrows) throw new Error('toast failed')
+    toasts.push((e as { text: string }).text)
+    return { value: undefined } as never
+  })
+  on('prompt.submit', (_$, e) => (order.push('next'), submitted.push(e), { text: e.text, context: e.context }))
   on('ui.close', (_$, e) => (closed.push((e as { id: string }).id), { value: undefined }) as never)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('command.register', (_$, e) => ({ value: { command: (e as { name: string }).name } }) as never)
@@ -90,6 +112,13 @@ function world(on: On, table: RoutingTable = RUNNING): World {
     },
     opened,
     closed,
+    toasts,
+    order,
+    submitted,
+    control,
+    setSession: (id) => {
+      router.sessionId = () => id
+    },
   }
 }
 
@@ -1030,15 +1059,14 @@ test('R2: a session.start with the pane not on screen forgets the saved open fla
   expect(w.opened).toEqual([PANE])
 })
 
-test('R2: tail_auto_open opens a pane that is not on screen', { options: { tail_auto_open: true } }, async ($, on) => {
+test('T1: session.start with tail_auto_open on and the pane not on screen opens nothing', { options: { tail_auto_open: true } }, async ($, on) => {
   const w = await reloaded($, on, survived(saved()), [])
 
   await startSession($)
-  await w.advance(0)
+  await w.advance(60_000)
 
-  expect(w.opened).toEqual([PANE])
-  expect(w.tails().length).toBe(1)
-  expect(Object.keys(w.tails()[0]!.body as Record<string, unknown>).sort()).toEqual(['mod', 'scope', 'session_id'])
+  expect(w.opened).toEqual([])
+  expect(w.tails().length).toBe(0)
 })
 
 test('R3: /engram-tail on a pane that is on screen with nothing polling resumes it, and does not close it', async ($, on) => {
@@ -1301,4 +1329,171 @@ test('R11: with the saved open flag false, a call is not recorded', async ($, on
 
   // Looked at without opening: a fresh open would clear rows, and this must not pass for that reason.
   expect((await rowViews($)).some((r) => r.label === 'remember')).toBe(false)
+})
+
+// Prompt submission: the auto-open runs on the person's first prompt of each session id.
+
+const composer = { kind: 'composer' } as const
+const prompt = (text = 'how should I format this file?', extra: Partial<PromptSubmitInput> = {}): PromptSubmitInput =>
+  ({ text, wait: false, origin: composer, ...extra }) as PromptSubmitInput
+const OPTION_ON = { options: { tail_auto_open: true } }
+const diagLines = (texts: string[]) => texts.filter((t) => t.startsWith('tail diag:'))
+
+test('T2: the first prompt opens the pane once, before the prompt goes on, and the prompt is unchanged', OPTION_ON, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+  const e = prompt()
+
+  await $.prompt.submit(e)
+
+  expect(w.opened).toEqual([PANE])
+  expect(w.order).toEqual(['open', 'next'])
+  expect(w.submitted.length).toBe(1)
+  expect(w.submitted[0]).toEqual(e)
+})
+
+test('T3: a second prompt in the same session opens nothing, even after the pane was closed by hand', OPTION_ON, async ($, on) => {
+  const list: object[] = []
+  const w = await reloaded($, on, survived(saved()), list)
+
+  await $.prompt.submit(prompt())
+  expect(w.opened).toEqual([PANE])
+  list.push(...PLACED)
+  await toggle($)
+  expect(w.closed).toEqual([PANE])
+  list.length = 0
+  await $.prompt.submit(prompt('and another thing to say'))
+
+  expect(w.opened).toEqual([PANE])
+})
+
+test('T4: the first prompt after the session id changes opens again, with no session.start between', OPTION_ON, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+
+  await $.prompt.submit(prompt())
+  w.setSession('claude-session-2')
+  await $.prompt.submit(prompt())
+
+  expect(w.opened).toEqual([PANE, PANE])
+})
+
+test('T5: with the option off nothing opens; a slash command neither opens nor marks the session', async ($, on) => {
+  const off = await reloaded($, on, survived(saved()), [])
+  for (let i = 0; i < 3; i++) await $.prompt.submit(prompt())
+  expect(off.opened).toEqual([])
+  expect(off.submitted.length).toBe(3)
+})
+
+test('T5: a slash command first, then a real prompt, opens exactly once and on the real one', OPTION_ON, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+
+  await $.prompt.submit(prompt('/engram-tail'))
+  expect(w.opened).toEqual([])
+  await $.prompt.submit(prompt())
+
+  expect(w.opened).toEqual([PANE])
+  expect(w.submitted.length).toBe(2)
+})
+
+test('T6: a pane on screen and polling at the first prompt is left alone', OPTION_ON, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()))
+  w.script(response({ head: 12 }))
+  await startSession($)
+  await w.advance(0)
+  expect(w.tails().length).toBe(1)
+
+  await $.prompt.submit(prompt())
+  await w.advance(2_000)
+
+  expect(w.opened).toEqual([])
+  expect(w.closed).toEqual([])
+  expect(w.tails().length).toBe(2)
+})
+
+test('T7 (diag): an undrawn open is toasted and printed by the next /engram-tail; session.start is reported too', OPTION_ON, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+  w.control.open = 'undrawn'
+
+  await startSession($)
+  await $.prompt.submit(prompt())
+
+  const lines = diagLines(w.toasts)
+  expect(lines.length).toBe(2)
+  expect(lines[0]).toMatch(/^tail diag: session\.start sid=claude-s register=ok panes=none running=false action=clear$/)
+  expect(lines[1]).toMatch(/^tail diag: first prompt sid=claude-s shown=false open=undrawn: R$/)
+  const reply = (await toggle($)) as { text: string }
+  expect(reply.text).toContain('\ntail diag:\n' + lines.join('\n'))
+})
+
+test('T8 (diag, fail-open): ui.open throwing still lets the prompt through once and records the throw', OPTION_ON, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+  w.control.open = 'throw'
+  const e = prompt()
+
+  await $.prompt.submit(e)
+
+  expect(w.submitted).toEqual([e])
+  expect(diagLines(w.toasts).at(-1)).toMatch(/^tail diag: first prompt sid=claude-s shown=false open=threw: /)
+  w.control.open = 'placed'
+  await $.prompt.submit(prompt())
+  expect(w.opened).toEqual([PANE])
+})
+
+test('T8 (diag, fail-open): a throwing toast costs the toast, not the stored line or the prompt', OPTION_ON, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+  w.control.toastThrows = true
+  const e = prompt()
+
+  await $.prompt.submit(e)
+
+  expect(w.submitted).toEqual([e])
+  expect(w.opened).toEqual([PANE])
+  const reply = (await toggle($)) as { text: string }
+  expect(reply.text).toContain('tail diag: first prompt sid=claude-s shown=false open=placed')
+})
+
+test('T8 (diag, fail-open): a failing write of the stored line costs the line, not the prompt or the open', OPTION_ON, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+  on('state.set', { plugin: 'engram', key: 'tail-diag' } as never, () => ({ value: { isSet: false, version: 99 } }) as never)
+  const e = prompt()
+
+  await $.prompt.submit(e)
+
+  expect(w.submitted).toEqual([e])
+  expect(w.opened).toEqual([PANE])
+  expect(diagLines(w.toasts).map((l) => l.replace(/sid=\S+ /, ''))).toEqual(['tail diag: first prompt shown=false open=placed'])
+})
+
+test('T9: a plugin-origin prompt and one with no origin neither open nor mark; the composer prompt after them does', OPTION_ON, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+
+  await $.prompt.submit(prompt('from a plugin', { origin: { kind: 'plugin', name: 'other' } as never }))
+  await $.prompt.submit({ text: 'from nowhere', wait: false } as PromptSubmitInput)
+  expect(w.opened).toEqual([])
+  await $.prompt.submit(prompt())
+
+  expect(w.opened).toEqual([PANE])
+  expect(w.submitted.length).toBe(3)
+  const lines = diagLines(w.toasts)
+  expect(lines[0]).toContain('open=skipped: origin plugin')
+  expect(lines[1]).toContain('open=skipped: origin none')
+  expect(lines[2]).toContain('open=placed')
+})
+
+test('T10: the tail takes its notion of a person\'s own prompt from the shared predicate', async () => {
+  expect(isOwnPrompt(prompt())).toBe(true)
+  expect(isOwnPrompt(prompt('/clear'))).toBe(false)
+  expect(isOwnPrompt(prompt('hi', { origin: { kind: 'plugin', name: 'x' } as never }))).toBe(false)
+  expect(isOwnPrompt({ text: 'hi', wait: false } as PromptSubmitInput)).toBe(false)
+})
+
+test('T11: with the option off the diagnostic does not exist: no toast, no stored line, no suffix', async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+
+  await startSession($)
+  await $.prompt.submit(prompt())
+  const reply = (await toggle($)) as { text: string }
+
+  expect(diagLines(w.toasts)).toEqual([])
+  expect(reply.text).toBe('Memory Tail opened.')
+  expect(w.opened).toEqual([PANE])
 })

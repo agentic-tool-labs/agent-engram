@@ -204,6 +204,13 @@ export type TailState = {
   lastOkAt?: number | undefined
 }
 
+export type TailSessionState = {
+  /** The session id `autoOpened` belongs to; a different current id resets it. */
+  session?: string
+  /** The first prompt of the session named by `session` has already been through the auto-open. */
+  autoOpened: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
     engram: {
@@ -215,6 +222,8 @@ declare module 'claude-code' {
       beliefDiff: BeliefDiffState
       digest: DigestState
       tail: Shaped<TailState>
+      'tail-session': Shaped<TailSessionState>
+      'tail-diag': { lines: string[] }
     }
   }
 }
