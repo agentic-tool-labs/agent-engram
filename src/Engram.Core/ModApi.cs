@@ -210,9 +210,25 @@ public static class ModApi
             throw NotFound(request.FactId!);
         }
 
+        // The session row is resolved inside the write transaction, as SessionFacts.Append does: in
+        // autocommit two first forgets from one new session race the select-then-insert on
+        // external_id, and a forget that closes nothing would still leave a session row behind.
         var now = DateTimeOffset.UtcNow;
-        var sessionRow = SessionStore.EnsureSession(connection, null, sessionId, now);
-        var closed = FactStore.Forget(connection, factId, ForgetReason, now, sessionRow);
+        bool closed;
+        using (var transaction = EngramDatabase.BeginWrite(connection))
+        {
+            var sessionRow = SessionStore.EnsureSession(connection, transaction, sessionId, now);
+            closed = FactStore.Forget(connection, transaction, factId, ForgetReason, now, sessionRow);
+            if (closed)
+            {
+                transaction.Commit();
+            }
+            else
+            {
+                transaction.Rollback();
+            }
+        }
+
         if (closed)
         {
             RecordCall(home, request, sessionId, "forget");

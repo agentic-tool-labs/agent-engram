@@ -249,9 +249,24 @@ public sealed class EngramMcpTools
         // declines to write back anything this store has held before, so a retraction
         // survives a corpus revision.
         using var connection = EngramDatabase.OpenInitialized(home);
+        // The session row is resolved inside the write transaction, so a concurrent first forget from
+        // this session cannot lose the select-then-insert race, and a forget that closes nothing
+        // leaves no session row behind.
         var now = DateTimeOffset.UtcNow;
-        var sessionRow = SessionStore.EnsureSession(connection, null, session.Value, now);
-        var closed = FactStore.Forget(connection, factId, "retracted by the user", now, sessionRow);
+        bool closed;
+        using (var transaction = EngramDatabase.BeginWrite(connection))
+        {
+            var sessionRow = SessionStore.EnsureSession(connection, transaction, session.Value, now);
+            closed = FactStore.Forget(connection, transaction, factId, "retracted by the user", now, sessionRow);
+            if (closed)
+            {
+                transaction.Commit();
+            }
+            else
+            {
+                transaction.Rollback();
+            }
+        }
 
         // Reporting success for something that was never live would leave the user believing
         // a fact is gone while recall keeps returning it.

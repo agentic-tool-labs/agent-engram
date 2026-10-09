@@ -687,4 +687,60 @@ public class EngramMcpToolsTests
             return false;
         }
     }
+
+    private static long SessionRows(SandboxHome sandbox, string externalId)
+    {
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM session WHERE external_id = $id;";
+        command.Parameters.AddWithValue("$id", externalId);
+        return (long)command.ExecuteScalar()!;
+    }
+
+    [Fact]
+    public async Task Forget_ConcurrentFirstForgetsFromOneNewSession_AllRetractAndShareOneSessionRow()
+    {
+        using var sandbox = new SandboxHome();
+        var writer = new McpSessionId("session-writer");
+        for (var round = 0; round < 25; round++)
+        {
+            var retractor = new McpSessionId($"session-race-{round}");
+            var handles = Enumerable.Range(0, 6)
+                .Select(i => HandleOf(EngramMcpTools.Remember(
+                    sandbox.Home, writer, Initialized, NoRuntime(sandbox.Home), $"Race note {round}/{i} concerns subject {round}-{i}.")))
+                .ToList();
+            using var gate = new Barrier(handles.Count);
+
+            var forgets = handles
+                .Select(handle => Task.Factory.StartNew(
+                    () =>
+                    {
+                        gate.SignalAndWait();
+                        return EngramMcpTools.Forget(sandbox.Home, retractor, Initialized, handle);
+                    },
+                    TestContext.Current.CancellationToken,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default))
+                .ToArray();
+            var results = await Task.WhenAll(forgets);
+
+            Assert.All(results, r => Assert.StartsWith("Retracted", r, StringComparison.Ordinal));
+            Assert.Equal(1L, SessionRows(sandbox, retractor.Value));
+        }
+    }
+
+    [Fact]
+    public void Forget_OfAnAlreadyClosedFact_LeavesNoSessionRowBehind()
+    {
+        using var sandbox = new SandboxHome();
+        var handle = HandleOf(EngramMcpTools.Remember(
+            sandbox.Home, new McpSessionId("session-writer"), Initialized, NoRuntime(sandbox.Home), "Closed before the late session arrives."));
+        EngramMcpTools.Forget(sandbox.Home, new McpSessionId("session-first"), Initialized, handle);
+
+        var response = EngramMcpTools.Forget(sandbox.Home, new McpSessionId("session-late"), Initialized, handle);
+
+        Assert.StartsWith("No live fact", response, StringComparison.Ordinal);
+        Assert.Equal(0L, SessionRows(sandbox, "session-late"));
+        Assert.Equal(1L, SessionRows(sandbox, "session-first"));
+    }
 }

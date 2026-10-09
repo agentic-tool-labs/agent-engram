@@ -1311,4 +1311,59 @@ public class ModApiTests
 
         Assert.Null(Tail(sandbox)["events"]);
     }
+
+    private static long SessionRows(SandboxHome sandbox, string externalId)
+    {
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM session WHERE external_id = $id;";
+        command.Parameters.AddWithValue("$id", externalId);
+        return (long)command.ExecuteScalar()!;
+    }
+
+    [Fact]
+    public async Task Forget_ConcurrentFirstForgetsFromOneNewSession_AllSucceedAndShareOneSessionRow()
+    {
+        using var sandbox = new SandboxHome();
+        for (var round = 0; round < 25; round++)
+        {
+            var session = $"cc-race-{round}";
+            var handles = Enumerable.Range(0, 6)
+                .Select(i => Remember(sandbox, $"Race fact {round}/{i} concerns subject {round}-{i}."))
+                .ToList();
+            using var gate = new Barrier(handles.Count);
+
+            var forgets = handles
+                .Select(handle => Task.Factory.StartNew(
+                    () =>
+                    {
+                        gate.SignalAndWait();
+                        return Call(sandbox, "forget", new JsonObject { ["session_id"] = session, ["fact_id"] = handle });
+                    },
+                    TestContext.Current.CancellationToken,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default))
+                .ToArray();
+            var results = await Task.WhenAll(forgets);
+
+            Assert.All(results, r => Assert.Equal(200, r.Status));
+            Assert.All(results, r => Assert.True((bool)r.Body["retracted"]!));
+            Assert.Equal(1L, SessionRows(sandbox, session));
+        }
+    }
+
+    [Fact]
+    public void Forget_OfAnAlreadyClosedFact_LeavesNoSessionRowBehind()
+    {
+        using var sandbox = new SandboxHome();
+        var handle = Remember(sandbox, "Closed before the late session arrives.");
+        Call(sandbox, "forget", new JsonObject { ["session_id"] = Session, ["fact_id"] = handle });
+
+        var (status, body) = Call(sandbox, "forget", new JsonObject { ["session_id"] = "cc-late-session", ["fact_id"] = handle });
+
+        Assert.Equal(200, status);
+        Assert.False((bool)body["retracted"]!);
+        Assert.Equal(0L, SessionRows(sandbox, "cc-late-session"));
+        Assert.Equal(1L, SessionRows(sandbox, Session));
+    }
 }
