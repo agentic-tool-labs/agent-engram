@@ -22,5 +22,6 @@ test('every mod that takes session.start runs when the plugin loads', async (eng
 
   expect(registered).toContain('engram-digest-review')
   expect(registered).toContain('engram-remember-selection')
+  expect(registered).toContain('engram-tail')
   expect(router.processCalls.some((c) => c.argv.includes('--status'))).toBe(true)
 })

@@ -136,6 +136,59 @@ export type DigestState = {
   candidates: DigestCandidate[]
 }
 
+/** The pane's toggles; a row belongs to exactly one, and a marker to none. */
+export type TailGroup =
+  | 'writes'
+  | 'retractions'
+  | 'reads'
+  | 'remember'
+  | 'mods'
+  | 'sessions'
+  | 'maintenance'
+  | 'other'
+
+export type TailRow = {
+  /** `w<id>`, `r<id>`, `e<epoch>:<seq>`, `c<n>` or `m<n>`; a row with an existing key replaces it. */
+  key: string
+  /** Epoch milliseconds the row sorts by. */
+  ms: number
+  /** Breaks a tie in `ms`: writes 0, retractions 1, activity 2, markers 3. */
+  rank: number
+  /** Breaks a tie in `ms` and `rank`. */
+  id: number
+  kind: 'write' | 'retraction' | 'event' | 'call' | 'marker'
+  group: TailGroup | null
+  /** The exact kind, origin or tool name; empty on a marker. */
+  label: string
+  handle?: string
+  /** Everything after the label, without the retracted suffix. */
+  text: string
+  /** Known to be this session's. */
+  mine: boolean
+  retracted: boolean
+}
+
+export type TailState = {
+  /** Whether `/engram-tail` last left the pane open. */
+  paneOpen: boolean
+  /** Newest first, at most 200. */
+  rows: TailRow[]
+  /** Write cursor: the store's head at the last read. Absent until the first read. */
+  after?: number
+  /** Retraction cursor, in the server's unix seconds. */
+  closedAfter?: number
+  /** Activity feed epoch and the last sequence number seen in it. */
+  epoch?: string
+  eventAfter?: number
+  callSeq: number
+  markerSeq: number
+  /** Handles known to be this session's, from its own Engram calls and the rows the server marked. */
+  handles: string[]
+  groups: Record<TailGroup, boolean>
+  /** The line shown above the rows; absent when the last request succeeded. */
+  status?: string | undefined
+}
+
 declare module 'claude-code' {
   interface PluginState {
     engram: {
@@ -146,6 +199,7 @@ declare module 'claude-code' {
       sentinel: SentinelState
       beliefDiff: BeliefDiffState
       digest: DigestState
+      tail: TailState
     }
   }
 }
