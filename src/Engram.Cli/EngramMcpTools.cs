@@ -452,7 +452,6 @@ public sealed class EngramMcpTools
         }
 
         var now = DateTimeOffset.UtcNow;
-        var sessionId = SessionStore.EnsureSession(connection, null, session.Value, now);
 
         // Read before Remember closes the incumbent: FactSyncRequests keys on fact_id, and the
         // old row stays exactly what it was (the flag never moves to a closed fact).
@@ -461,6 +460,10 @@ public sealed class EngramMcpTools
         RememberResult result;
         using (var transaction = EngramDatabase.BeginWrite(connection))
         {
+            // Resolved on the write, as SessionFacts.Append does: in autocommit a first revise from
+            // a session races any other first write of that session on the UNIQUE external_id.
+            var sessionId = SessionStore.EnsureSession(connection, transaction, session.Value, now);
+
             // The store's own collision rule does the revision: one live fact per
             // (subject, predicate), so remembering the correction closes the incumbent and
             // records the reason on the supersession row.

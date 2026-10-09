@@ -743,4 +743,78 @@ public class EngramMcpToolsTests
         Assert.Equal(0L, SessionRows(sandbox, "session-late"));
         Assert.Equal(1L, SessionRows(sandbox, "session-first"));
     }
+
+    private static Task<T>[] RaceThreads<T>(int count, Func<int, T> work)
+    {
+        var gate = new Barrier(count);
+        return Enumerable.Range(0, count)
+            .Select(i => Task.Factory.StartNew(
+                () =>
+                {
+                    gate.SignalAndWait();
+                    return work(i);
+                },
+                TestContext.Current.CancellationToken,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default))
+            .ToArray();
+    }
+
+    [Fact]
+    public async Task Revise_ConcurrentFirstRevisesFromOneNewSession_AllSucceedAndShareOneSessionRow()
+    {
+        using var sandbox = new SandboxHome();
+        var writer = new McpSessionId("session-writer");
+        for (var round = 0; round < 25; round++)
+        {
+            var reviser = new McpSessionId($"session-revise-race-{round}");
+            var handles = Enumerable.Range(0, 6)
+                .Select(i => HandleOf(EngramMcpTools.Remember(
+                    sandbox.Home, writer, Initialized, NoRuntime(sandbox.Home), $"Revise race {round}/{i} concerns subject {round}-{i}.")))
+                .ToList();
+
+            var results = await Task.WhenAll(RaceThreads(handles.Count, i => EngramMcpTools.Revise(
+                sandbox.Home, reviser, Initialized, handles[i], $"Revised race {round}/{i} now concerns subject {round}-{i}-b.", "corrected")));
+
+            Assert.All(results, r => Assert.Contains("revised", r, StringComparison.Ordinal));
+            Assert.Equal(1L, SessionRows(sandbox, reviser.Value));
+        }
+    }
+
+    [Fact]
+    public async Task Revise_RacingTheSameSessionsFirstRemember_BothSucceedAndShareOneSessionRow()
+    {
+        using var sandbox = new SandboxHome();
+        var writer = new McpSessionId("session-writer");
+        for (var round = 0; round < 25; round++)
+        {
+            var shared = new McpSessionId($"session-first-write-{round}");
+            var target = HandleOf(EngramMcpTools.Remember(
+                sandbox.Home, writer, Initialized, NoRuntime(sandbox.Home), $"Target {round} concerns subject {round}-t."));
+
+            var results = await Task.WhenAll(RaceThreads(2, i => i == 0
+                ? EngramMcpTools.Revise(sandbox.Home, shared, Initialized, target, $"Target {round} now concerns subject {round}-u.", "corrected")
+                : EngramMcpTools.Remember(sandbox.Home, shared, Initialized, NoRuntime(sandbox.Home), $"First write {round} concerns subject {round}-w.")));
+
+            Assert.Contains("revised", results[0], StringComparison.Ordinal);
+            Assert.Matches(@"^\[f\d+\] remembered:", results[1]);
+            Assert.Equal(1L, SessionRows(sandbox, shared.Value));
+        }
+    }
+
+    [Fact]
+    public void Revise_RefusedBeforeAnyWrite_LeavesNoSessionRowBehind()
+    {
+        using var sandbox = new SandboxHome();
+        var handle = HandleOf(EngramMcpTools.Remember(
+            sandbox.Home, new McpSessionId("session-writer"), Initialized, NoRuntime(sandbox.Home), "Closed before it is revised."));
+        EngramMcpTools.Forget(sandbox.Home, new McpSessionId("session-first"), Initialized, handle);
+
+        var closed = EngramMcpTools.Revise(sandbox.Home, new McpSessionId("session-late"), Initialized, handle, "Too late.", "why");
+        var unknown = EngramMcpTools.Revise(sandbox.Home, new McpSessionId("session-late"), Initialized, "f999999", "Nothing here.", "why");
+
+        Assert.Contains("already closed", closed, StringComparison.Ordinal);
+        Assert.Contains("No fact", unknown, StringComparison.Ordinal);
+        Assert.Equal(0L, SessionRows(sandbox, "session-late"));
+    }
 }
