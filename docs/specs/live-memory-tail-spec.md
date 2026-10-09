@@ -64,6 +64,15 @@ Reviewer: reviewer
   - `TAIL_SHAPE` / `Shaped<TailState>` recorded.
   - Call rows gate on `paneOpen`, not `running`: confirmed.
 
+- **r10 (spec matched to 9fc358d).** No code change. M18 is downgraded to a behaviour test; R11's closed case and R2 are named as the `paneOpen` guards. The M4 rewrite is recorded.
+
+- **r11 (Reviewer nits on r8/r9).** §6.10.10.
+  - `session.start` on a not-shown pane also `stop()`s.
+  - `unsupported` polls at 15 s; the true recovery bound is stated, and the short-circuit must come before port lookup.
+  - R3 gains a third toggle that guards `running = false`.
+  - Clearing `running` on a throwing reschedule is declined.
+  - Plugin version 1.3.10.
+
 ## TL;DR
 
 - `/engram-tail` toggles the **Memory Tail** pane: a live, newest-first log of memory activity.
@@ -384,7 +393,7 @@ The tick never throws (`shared/guard.ts` pattern) and always reschedules unless 
 | `timeout` | `Engram server slow to answer` | 15 s |
 | `not-initialised` | `Engram home not initialised — engram init` | 15 s |
 | `not-found` | `the running Engram server predates the memory tail — update, then /engram:restart` | **300 s** (r8; was stop) |
-| `unsupported` | `the running Engram server has no mod API` | **300 s** (r8; was stop) |
+| `unsupported` | `the running Engram server has no mod API` | **15 s** (r11; r8 300 s; was stop) |
 | `bad-request` | `memory tail request rejected: <detail>` | 15 s |
 | `error` | `memory tail error` | 15 s |
 | success with `events: null` | `activity feed unavailable — showing writes only` | 2 s |
@@ -569,7 +578,7 @@ One pure function in `model.ts` maps (trigger, shown, running) to an action. `in
 | Trigger | shown | running | Action | Command reply |
 |---|---|---|---|---|
 | `session.start` | yes | no | **resume** | — |
-| `session.start` | no | — | set `paneOpen = false`; then, if `tail_auto_open`, open and start as today | — |
+| `session.start` | no | — | `stop()` the chain if one is running (r11), set `paneOpen = false`; then, if `tail_auto_open`, open and start as today | — |
 | `session.start` | yes | yes | nothing | — |
 | `/engram-tail` | yes | yes | close the pane, `stop()`, `paneOpen = false` | `Memory Tail closed.` |
 | `/engram-tail` | yes | no | **resume** | `Memory Tail resumed.` |
@@ -615,7 +624,14 @@ The `tail` atom gains `shape`, a string-literal constant defined once in `model.
 
 Today, `not-found` (the server lacks `tail`) and `unsupported` (the server lacks `/mod/v1`) stop the loop for good. Worse, `unsupported` sets the shared client's `shared.unsupported` flag, which is sticky for the session and survives a reload because it lives in `$.state`. That disables every mod's API even after the server is upgraded.
 
-**Tail.** Neither reason stops the loop. Both reschedule at **300 s**, and their status line (§6.9.3 texts) stays up until a success clears it. Upgrading and restarting the server recovers the tail within 5 minutes, with no reload.
+**Tail.** Neither reason stops the loop, and the status line (§6.9.3 texts) stays up until a success clears it.
+- `not-found` (a real request each time) reschedules at **300 s**.
+- `unsupported` reschedules at **15 s** (r11). While the shared back-off is unexpired those calls are short-circuited and cost nothing.
+- Bounds:
+  - After an upgrade-and-restart, the tail recovers within about **300 s + 15 s of the last 404 any mod received**, and that 404 is no later than the upgrade.
+  - For `not-found`: within 300 s of the restart.
+- No reload is needed.
+- *(r11, Reviewer nit 2: r8's "within 5 minutes" was wrong for `unsupported`. Any mod's 404 re-arms the shared back-off, so a 300 s tail poll could land just inside a re-armed window and wait almost two windows, about 10 minutes.)*
 
 **Shared client** (`plugin/mods/shared/client.ts`). The flag becomes a back-off that expires 300 s after it was set, the same pattern as the existing 60 s `noPortAt`.
 - While unexpired, calls return `unsupported` without a request, as today.
@@ -692,12 +708,37 @@ These supersede the §6.10 text above wherever the two differ.
    - It deliberately does **not** gate on `running`. Between a reload and the re-fired `session.start` the chain is dead but the pane is up, and calls made then must appear once the pane resumes. That is the same no-gap promise resume makes for server data.
    - If E2 shows `panes()` misses a manual close, recording continues into an invisible pane's ring. That is bounded at 200 rows and harmless.
 
+6. **M18 is no longer a guard on the `tool.call` gate** *(r10 ruling; no code change)*. Since item 3, `open()` clears rows, so M18 (call rows made while closed do not appear on open) passes whatever the hook records. Its claim stays true, but it now overlaps R10.
+   - The `paneOpen` gate is guarded by **R11's closed case**, which inspects the pane without opening it, so the clear cannot mask anything. **R2** also guards it, via resumed call rows.
+   - M18 stays as a behaviour test, and its falsification entry is withdrawn.
+   - Reshaping M18 to look at the ring before an open was rejected. It would duplicate R11's closed case, which is two tests for one guard, the kind of pair where either can be deleted with the suite still green.
+7. **M4 rewritten** *(recorded)*. Its last assertion ("a pane opened again after being closed … keeps what it drew") encoded the behaviour item 3 replaced. It now asserts fresh cursors **and** a cleared view. That is the same rule as §6.9.5: data assertions are kept unless the spec changed the data behaviour, and here it did.
+
+#### 6.10.10 Reviewer nits on r8/r9 (r11)
+
+1. **`session.start` on a not-shown pane also `stop()`s a running chain** *(confirmed; **code change**)*. If E2 is yes, a manual close followed by `/clear` re-fires `session.start` in the same module instance. The code then *knows* the pane is gone, and must not keep polling it every 2 s until the next toggle. There is no data effect, because `open()` resets anyway.
+   - File: `plugin/mods/tail/index.tsx` (the not-shown branch of `session.start`).
+   - Test **R12**: with a chain running and `panes()` reporting the pane absent, firing `session.start` leaves no `tail` fetch over the next 60 s. Falsification: drop the `stop()` → fetches continue, red.
+2. **`unsupported` polls at 15 s** *(choice; **code change**)*. See §6.10.5.
+   - Why 15 s over restating the bound as "≤ 10 minutes": short-circuited calls send nothing, so the faster cadence is free and brings recovery back to the back-off plus 15 s after the last 404.
+   - **Precondition:** the shared client's unexpired-`unsupported` check comes **before** port lookup, so a short-circuited call neither fetches nor spawns `engram status`. If the built order spawns first, fix the order in `plugin/mods/shared/client.ts` rather than slowing the cadence.
+   - Files: `plugin/mods/tail/model.ts` (cadence), `plugin/mods/shared/client.ts` (only if the order is wrong).
+   - Tests:
+     - **R8** updated: `unsupported` → next fetch attempt at 15 s, `not-found` → 300 s. Falsification: one shared 300 s → red.
+     - **C1** extended: during the back-off a call records **zero** `fetchCalls` **and zero** `processCalls`. Falsification: resolve the port before the check → `processCalls` > 0, red.
+3. **`stop()`'s `running = false` gets a guard** *(test only)*. **R3** gains a third toggle. The kit's static `panes()` still reports the pane placed, which models E2 = no, so after "closed" the third press must reply `Memory Tail resumed.`, not `Memory Tail closed.` Falsification: delete `running = false` from `stop()` → the third press replies "closed", red.
+4. **Clearing `running` when the reschedule itself throws** *(declined)*. If `$.clock.after` throws, the chain ends with `running = true`. The next toggle then closes a dead pane, and the press after reopens it with a working chain. A reload also resets the module.
+   - Recovery is two presses with no data effect, the failure is unobserved and improbable, and a guard for it could only be tested by forcing the host clock to throw.
+   - Reopen if it is ever seen.
+
+Files for this round: `plugin/mods/tail/index.tsx`, `plugin/mods/tail/model.ts`, `plugin/mods/tail/tail.test.tsx` (R3, R8, R12), `plugin/mods/shared/client.test.ts` (C1), and `plugin/mods/shared/client.ts` only if the check order is wrong. Plugin version **1.3.10** in `plugin/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`.
+
 Files for item 3: `plugin/mods/tail/index.tsx` (`open()` clears rows and `lastOkAt`), `plugin/mods/tail/tail.test.tsx` (R10, R11), and plugin version `1.3.9` in `plugin/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`.
 
 | # | Assertion | Falsification |
 |---|---|---|
 | R10 | Open, receive rows, close, reopen → no earlier rows render, no `Updated` line until the first success, filter and `filterOpen` unchanged. Resume (R4) still keeps rows | Keep rows on open → red. Clear rows on resume → R4 red |
-| R11 | With `paneOpen` true and the chain not running (simulated reload), an `engram_remember` tool call records a call row that renders after resume. With `paneOpen` false it records none | Gate on `running` → the row is missing, red. Ignore `paneOpen` → a row is recorded while closed, red (also M18) |
+| R11 | With `paneOpen` true and the chain not running (simulated reload), an `engram_remember` tool call records a call row that renders after resume. With `paneOpen` false it records none | Gate on `running` → the row is missing, red. Ignore `paneOpen` → a row is recorded while closed, red. *(r10: M18 no longer reddens here; see item 6.)* |
 
 ## 8. Options
 
