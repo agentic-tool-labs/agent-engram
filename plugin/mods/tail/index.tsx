@@ -158,6 +158,8 @@ export const register: Register = (on, options) => {
         if (action === 'resume') {
           await resume($, scope)
         } else if (action === 'clear') {
+          // The pane is known to be gone, so a chain still polling it has no reader.
+          stop()
           await update($, TAIL, (s) => ({ ...s, paneOpen: false }))
           if (options.tail_auto_open === true) $.clock.after(0, () => void open($, scope).catch(() => undefined))
         }

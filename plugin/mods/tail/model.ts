@@ -7,7 +7,10 @@ import { parseDigest } from '../lens/parser'
 export const MAX_ROWS = 200
 export const POLL_MS = 2_000
 export const RETRY_MS = 15_000
-// A server without the tail, or without the mod API, may be upgraded while the pane stays up.
+// A server without the tail may be upgraded while the pane stays up. A server without the mod API
+// is polled at the ordinary failure cadence instead: the shared client's own back-off turns each
+// call into a check that sends nothing, so polling often costs nothing and recovery follows the
+// back-off by at most one tick.
 export const MISSING_RETRY_MS = 300_000
 
 // Bump when TailState changes incompatibly. An atom written under another shape is read as absent
@@ -427,7 +430,7 @@ export function failureOutcome(failure: ApiFailure): Failure {
     case 'not-found':
       return { status: 'Server too old for the tail · update, then /engram:restart', delayMs: MISSING_RETRY_MS, stop: false }
     case 'unsupported':
-      return { status: 'Server has no mod API', delayMs: MISSING_RETRY_MS, stop: false }
+      return { status: 'Server has no mod API', delayMs: RETRY_MS, stop: false }
     case 'bad-request':
       return {
         status: failure.detail === undefined ? 'Tail request rejected:' : `Tail request rejected:\n${failure.detail.slice(0, MAX_DETAIL_CHARS)}`,

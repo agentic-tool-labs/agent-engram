@@ -52,6 +52,7 @@ const response = (over: Partial<TailResponse> = {}): TailResponse => ({
 
 type World = {
   tails: () => FetchCall[]
+  processes: () => number
   advance: (ms: number) => Promise<void>
   /** The responses the server gives in order; the last repeats. */
   script: (...responses: (TailResponse | { status: number; json?: unknown } | 'hang')[]) => void
@@ -81,6 +82,7 @@ function world(on: On, table: RoutingTable = RUNNING): World {
   on('command.register', (_$, e) => ({ value: { command: (e as { name: string }).name } }) as never)
   return {
     tails: () => router.fetchCalls.filter((c) => c.op === 'tail'),
+    processes: () => router.processCalls.length,
     advance: (ms) => clock.advance(ms),
     script: (...responses) => {
       queue = responses
@@ -946,10 +948,10 @@ function hostPanes(on: On, list: object[] | 'reject') {
  * Holds the tail atom as an earlier life of the plugin left it (or an older version). The store
  * answers reads and takes writes, so the module reads, updates and re-reads as it would live.
  */
-function seed(on: On, initial: unknown) {
+function seed(on: On, initial: unknown, key: 'tail' | 'shared' = 'tail') {
   let store = { value: initial, version: 1 }
-  on('state.get', { plugin: 'engram', key: 'tail' }, () => ({ value: { value: store.value, version: store.version } }) as never)
-  on('state.set', { plugin: 'engram', key: 'tail' }, (_$, e) => {
+  on('state.get', { plugin: 'engram', key } as never, () => ({ value: { value: store.value, version: store.version } }) as never)
+  on('state.set', { plugin: 'engram', key } as never, (_$, e) => {
     const write = e as unknown as { value: unknown; ifVersion?: number }
     if (write.ifVersion !== undefined && write.ifVersion !== store.version) return { value: { isSet: false, version: store.version } } as never
     store = { value: write.value, version: store.version + 1 }
@@ -1051,6 +1053,13 @@ test('R3: /engram-tail on a pane that is on screen with nothing polling resumes 
   const again = await toggle($)
   expect((again as { text: string }).text).toBe('Memory Tail closed.')
   expect(w.closed).toEqual([PANE])
+
+  // The kit's pane list still says placed after that close, which is what a host that does not
+  // drop a manually closed pane would say; with nothing running the press resumes, it does not close.
+  const third = await toggle($)
+  await w.advance(0)
+  expect((third as { text: string }).text).toBe('Memory Tail resumed.')
+  expect(w.closed).toEqual([PANE])
 })
 
 test('R4: a resume keeps the rows already drawn and adds exactly one marker', async ($, on) => {
@@ -1137,28 +1146,75 @@ for (const [name, atom] of [
   })
 }
 
-for (const [name, reply, line] of [
-  ['not-found', { status: 404, json: { error: 'not_found' } }, 'Server too old for the tail · update, then /engram:restart'],
-  ['unsupported', { status: 404 }, 'Server has no mod API'],
-] as const) {
-  test(`R8: ${name} keeps the loop: the next request is at 300 s, the line stays, a later success clears it`, async ($, on) => {
-    const w = world(on)
-    w.script(reply, response())
+test('R8: not-found keeps the loop: the next request is at 300 s, the line stays, a later success clears it', async ($, on) => {
+  const w = world(on)
+  w.script({ status: 404, json: { error: 'not_found' } }, response())
 
-    await openAndSettle($, w)
-    expect(await shown($)).toContain(line)
+  await openAndSettle($, w)
+  expect(await shown($)).toContain('Server too old for the tail · update, then /engram:restart')
 
-    await w.advance(299_999)
-    expect(w.tails().length).toBe(1)
-    expect(await shown($)).toContain(line)
+  await w.advance(299_999)
+  expect(w.tails().length).toBe(1)
+  expect(await shown($)).toContain('Server too old for the tail · update, then /engram:restart')
 
-    await w.advance(1)
-    expect(w.tails().length).toBe(2)
-    expect(await shown($)).not.toContain(line)
-    await w.advance(2_000)
-    expect(w.tails().length).toBe(3)
-  })
-}
+  await w.advance(1)
+  expect(w.tails().length).toBe(2)
+  expect(await shown($)).not.toContain('Server too old for the tail · update, then /engram:restart')
+  await w.advance(2_000)
+  expect(w.tails().length).toBe(3)
+})
+
+test('R8: a missing mod API is polled every 15 s behind the client back-off, so recovery follows its expiry by one tick', async ($, on) => {
+  const w = world(on)
+  // Another mod saw the 404 100 s before the pane opened, so the back-off ends 200 s after it.
+  seed(on, { binary: { path: '/fake/bin/engram' }, port: 7433, noPortAt: null, unsupportedAt: NOW_MS - 100_000 }, 'shared')
+  w.script(response(), response())
+
+  await openAndSettle($, w)
+  expect(await shown($)).toContain('Server has no mod API')
+  const spawned = w.processes()
+
+  await w.advance(199_999)
+  expect(w.tails().length).toBe(0)
+  expect(await shown($)).toContain('Server has no mod API')
+  expect(w.processes()).toBe(spawned)
+
+  await w.advance(10_001)
+  expect(w.tails().length).toBeGreaterThanOrEqual(1)
+  expect(await shown($)).not.toContain('Server has no mod API')
+})
+
+test('R8: a real 404 for the mod API keeps the line and is retried once the back-off has run out', async ($, on) => {
+  const w = world(on)
+  w.script({ status: 404 }, response())
+
+  await openAndSettle($, w)
+  expect(await shown($)).toContain('Server has no mod API')
+  expect(w.tails().length).toBe(1)
+
+  await w.advance(299_999)
+  expect(w.tails().length).toBe(1)
+  expect(await shown($)).toContain('Server has no mod API')
+
+  await w.advance(1)
+  expect(w.tails().length).toBe(2)
+  expect(await shown($)).not.toContain('Server has no mod API')
+})
+
+test('R12: a session.start that finds the pane gone stops a chain still polling it', async ($, on) => {
+  const w = world(on)
+  on('ui.panes', () => ({ value: [] }) as never)
+
+  await openAndSettle($, w)
+  expect(w.tails().length).toBe(1)
+
+  await startSession($)
+  await w.advance(0)
+  const polled = w.tails().length
+  await w.advance(60_000)
+
+  expect(w.tails().length).toBe(polled)
+})
 
 test('R9: when the host cannot be asked which panes are up, the saved open flag decides', async ($, on) => {
   const w = await reloaded($, on, survived(saved()), 'reject')

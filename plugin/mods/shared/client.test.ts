@@ -105,6 +105,30 @@ test('C1: an unsupported answer short-circuits for 300 s, then the next call rea
   expect(rig.router.fetchCalls.length).toBe(2)
 })
 
+test('C1: during the back-off a call sends nothing and spawns nothing, even with no port known', async () => {
+  const rig = fakeModIo(RUNNING)
+  await rig.io.updateShared((s) => ({ ...s, unsupportedAt: 1_000_000 - 1 }))
+
+  expect(await recall(rig)).toEqual({ ok: false, reason: 'unsupported' })
+  expect(await recall(rig, {}, { session_id: 's1', query: 'again' })).toEqual({ ok: false, reason: 'unsupported' })
+
+  expect(rig.router.fetchCalls.length).toBe(0)
+  expect(rig.router.processCalls.length).toBe(0)
+})
+
+test('C1: a call during the back-off after a real 404 neither fetches nor spawns', async () => {
+  const rig = fakeModIo(RUNNING)
+  await recall(rig)
+  const fetched = rig.router.fetchCalls.length
+  const spawned = rig.router.processCalls.length
+
+  await rig.clock.advance(60_000)
+  expect(await recall(rig, {}, { session_id: 's1', query: 'again' })).toEqual({ ok: false, reason: 'unsupported' })
+
+  expect(rig.router.fetchCalls.length).toBe(fetched)
+  expect(rig.router.processCalls.length).toBe(spawned)
+})
+
 test('C1: after the back-off a server that now answers is used', async () => {
   let upgraded = false
   const rig = fakeModIo({ ...RUNNING, ops: { recall: () => (upgraded ? { status: 200, json: { coverage: 'high' } } : { status: 404 }) } })
