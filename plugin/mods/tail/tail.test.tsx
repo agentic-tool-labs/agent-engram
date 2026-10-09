@@ -8,6 +8,7 @@ import type { FetchCall, RoutingTable } from '../shared/testing'
 import type { TailEventRecord, TailResponse, TailWrite } from '../shared/types'
 import { AUTO_EVIDENCE, EVIDENCE } from '../digest/digest'
 import type { TailRow } from '../shared/state'
+import { stamp } from '../lens/model'
 import type { ApiFailure } from '../shared/types'
 import { FEED_UNAVAILABLE, emptyText, eventText, failureOutcome, layoutRow } from './model'
 
@@ -123,8 +124,11 @@ async function rowViews($: Engine): Promise<RowView[]> {
   const views: RowView[] = []
   for (const box of boxes) {
     const [head = '', detail] = (box.children ?? []).map(textOf)
+    // A marker is a single note, not a row; anything else that does not parse is the layout
+    // changing under the tests, and an absence assertion must not pass on it.
+    if (String(box.props?.['key']).startsWith('row-m')) continue
     const m = HEAD.exec(head)
-    if (m === null) continue
+    if (m === null) throw new Error(`a row head does not parse: ${JSON.stringify(head)}`)
     views.push({
       head,
       ...(detail === undefined ? {} : { detail }),
@@ -315,17 +319,21 @@ test('M9: a retraction and a forget call each mark the write they name', async (
 
   await openAndSettle($, w)
   await w.advance(2_000)
-  const before = await rowsOf($)
-  expect(before.some((r) => r.includes('✗'))).toBe(false)
+  // The write row, by its kind and handle: a retraction row also carries f11 in its detail.
+  const writeRow = async (handle: string) => {
+    const found = (await rowViews($)).filter((v) => v.label === 'note' && v.detail?.startsWith(`${handle} `))
+    expect(found.length).toBe(1)
+    return found[0]!
+  }
+  expect((await rowViews($)).some((v) => v.state === '✗')).toBe(false)
 
   await w.advance(2_000)
-  const afterRetraction = await rowsOf($)
-  expect(afterRetraction.find((r) => r.includes(' note f11 '))).toContain('✗')
-  expect(afterRetraction.find((r) => r.includes(' note f12 '))).not.toContain('✗')
+  expect((await rowViews($)).some((v) => v.label === 'retract' && v.detail?.startsWith('f11 '))).toBe(true)
+  expect((await writeRow('f11')).state).toBe('✗')
+  expect((await writeRow('f12')).state).toBe(' ')
 
   await $.tool.call({ tool: ENGRAM_TOOLS.forget, tool_use_id: 't1', fact_id: 'f12' } as never)
-  const afterForget = await rowsOf($)
-  expect(afterForget.find((r) => r.includes(' note f12 '))).toContain('✗')
+  expect((await writeRow('f12')).state).toBe('✗')
 })
 
 test('M10: a new epoch is a marker without a replay, and a store behind the cursor says so', async ($, on) => {
@@ -894,7 +902,7 @@ test('W13: a date line appears where the day changes, and is never counted', asy
   await w.advance(2_000)
 
   const lines = (await shown($)).filter((t) => /^── \d{4}-\d{2}-\d{2} ──$/.test(t))
-  expect(lines.length).toBe(1)
+  expect(lines).toEqual([`── ${stamp(NOW - 30 * 3600).slice(0, 10)} ──`])
   const order = descendants(await drawn($))
     .filter((n) => n.type === 'Text' || (n.type === 'Box' && String(n.props?.['key'] ?? '').startsWith('row-')))
     .map((n) => (n.type === 'Text' ? textOf(n) : `row ${textOf(n.children![0]!)}`))
