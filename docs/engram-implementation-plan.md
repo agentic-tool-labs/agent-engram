@@ -5708,6 +5708,8 @@ forget is not shown. There is no pane-closed event, so a pane closed by hand kee
 sessions, because an evicted record's session id is no longer known, so under `scope=session` it can
 exceed what the session lost.
 
+**Command names.** The host does not add the plugin prefix to mod commands. This was observed live: a mod command registered as `lens` was reached as a bare `/lens`. It is the citable source for the claim in `plugin/mods/lens/index.tsx`'s comment and in README.md.
+
 **Post-build checks, pending.** None of these has been run. Each is filled in when measured.
 
 | ID | Measure | Decision rule |
