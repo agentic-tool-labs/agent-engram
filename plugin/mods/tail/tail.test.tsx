@@ -7,11 +7,13 @@ import { installFakeEngine } from '../shared/testing'
 import type { FetchCall, RoutingTable } from '../shared/testing'
 import type { TailEventRecord, TailResponse, TailWrite } from '../shared/types'
 import { AUTO_EVIDENCE, EVIDENCE } from '../digest/digest'
+import type { TailRow } from '../shared/state'
+import type { ApiFailure } from '../shared/types'
+import { FEED_UNAVAILABLE, emptyText, eventText, failureOutcome, layoutRow } from './model'
 
 const NOW_MS = Date.UTC(2026, 9, 8, 12, 0, 0)
 const NOW = NOW_MS / 1000
 const PANE = 'engram-tail'
-const TIME = /^\d{2}:\d{2}:\d{2}$/
 
 const RUNNING: RoutingTable = {
   binary: '/fake/bin/engram',
@@ -105,8 +107,44 @@ async function shown($: Engine): Promise<string[]> {
   return (await (await mountPane($)).findAll({ type: 'Text' })).map((t) => t.text)
 }
 
-/** The pane's rows (not its status line), newest first. */
-const rowsOf = async ($: Engine) => (await shown($)).filter((t) => TIME.test(t.slice(2, 10)) || /^[•\s] \d{4}-/.test(t))
+type Drawn = { type: string; props?: Record<string, unknown>; children?: (Drawn | string)[] }
+
+const descendants = (node: Drawn | string): Drawn[] => (typeof node === 'string' ? [] : [node, ...(node.children ?? []).flatMap(descendants)])
+const textOf = (node: Drawn | string): string => (typeof node === 'string' ? node : (node.children ?? []).map(textOf).join(''))
+const drawn = async ($: Engine) => (await (await mountPane($)).drawn()) as unknown as Drawn
+const buttons = (tree: Drawn) => descendants(tree).filter((n) => n.type === 'Button')
+
+type RowView = { head: string; detail?: string; session: string; state: string; time: string; label: string; qualifier?: string }
+const HEAD = /^(.)(.) (\d{2}:\d{2}:\d{2}) (\S+)(?: (.+))?$/
+
+/** The pane's rows, newest first, as the host is given them: the head line and the optional detail line. */
+async function rowViews($: Engine): Promise<RowView[]> {
+  const boxes = descendants(await drawn($)).filter((n) => n.type === 'Box' && String(n.props?.['key'] ?? '').startsWith('row-'))
+  const views: RowView[] = []
+  for (const box of boxes) {
+    const [head = '', detail] = (box.children ?? []).map(textOf)
+    const m = HEAD.exec(head)
+    if (m === null) continue
+    views.push({
+      head,
+      ...(detail === undefined ? {} : { detail }),
+      session: m[1]!,
+      state: m[2]!,
+      time: m[3]!,
+      label: m[4]!,
+      ...(m[5] === undefined ? {} : { qualifier: m[5] }),
+    })
+  }
+  return views
+}
+
+/** Each row as one string: head then detail. */
+const rowsOf = async ($: Engine) => (await rowViews($)).map((r) => (r.detail === undefined ? r.head : `${r.head} ${r.detail}`))
+
+/** The filter list is closed until pressed. */
+async function openFilter($: Engine) {
+  await (await mountPane($)).press({ key: 'filter' })
+}
 
 async function openAndSettle($: Engine, w: World) {
   await toggle($)
@@ -166,7 +204,7 @@ test('M4: the first request carries no cursors and its rows are not drawn', asyn
 
   const body = w.tails()[0]!.body as Record<string, unknown>
   expect(Object.keys(body).sort()).toEqual(['mod', 'scope', 'session_id'])
-  expect(await shown($)).toContain('No memory activity yet.')
+  expect(await shown($)).toContain('No activity yet.')
   expect((await rowsOf($)).length).toBe(0)
 })
 
@@ -231,7 +269,7 @@ test('M7: rows that reach us twice are drawn once', async ($, on) => {
 
   const rows = await rowsOf($)
   expect(rows.filter((r) => r.includes(' f11 ')).length).toBe(1)
-  expect(rows.filter((r) => r.includes('retract f3')).length).toBe(1)
+  expect(rows.filter((r) => r.includes(' retract ') && r.includes(' f3 ')).length).toBe(1)
   expect(rows.filter((r) => r.includes('"dup"')).length).toBe(1)
 })
 
@@ -278,16 +316,16 @@ test('M9: a retraction and a forget call each mark the write they name', async (
   await openAndSettle($, w)
   await w.advance(2_000)
   const before = await rowsOf($)
-  expect(before.some((r) => r.includes('(retracted)'))).toBe(false)
+  expect(before.some((r) => r.includes('✗'))).toBe(false)
 
   await w.advance(2_000)
   const afterRetraction = await rowsOf($)
-  expect(afterRetraction.find((r) => r.includes(' note f11 '))).toContain('(retracted)')
-  expect(afterRetraction.find((r) => r.includes(' note f12 '))).not.toContain('(retracted)')
+  expect(afterRetraction.find((r) => r.includes(' note f11 '))).toContain('✗')
+  expect(afterRetraction.find((r) => r.includes(' note f12 '))).not.toContain('✗')
 
   await $.tool.call({ tool: ENGRAM_TOOLS.forget, tool_use_id: 't1', fact_id: 'f12' } as never)
   const afterForget = await rowsOf($)
-  expect(afterForget.find((r) => r.includes(' note f12 '))).toContain('(retracted)')
+  expect(afterForget.find((r) => r.includes(' note f12 '))).toContain('✗')
 })
 
 test('M10: a new epoch is a marker without a replay, and a store behind the cursor says so', async ($, on) => {
@@ -335,10 +373,11 @@ test('M11: sessions and maintenance start hidden, a group toggle hides only its 
   await openAndSettle($, w)
   await w.advance(2_000)
 
-  const kinds = async () => (await rowsOf($)).map((r) => r.split(' ')[2]!)
+  const kinds = async () => (await rowViews($)).map((r) => r.label)
   expect(await kinds()).toEqual(['zzz', 'mod-call', 'remember', 'recall'])
 
   const pane = await mountPane($)
+  await openFilter($)
   await pane.press({ key: 'g-reads' })
   expect(await kinds()).toEqual(['zzz', 'mod-call', 'remember'])
 
@@ -369,13 +408,13 @@ test('M12: each kind is drawn with its own fields, and a mod-call never shows a 
   await openAndSettle($, w)
   await w.advance(2_000)
 
-  const rows = await rowsOf($)
-  const text = (kind: string, n = 0) => rows.filter((r) => r.split(' ')[2] === kind)[n]!.split(' ').slice(3).join(' ')
-  expect(text('recall')).toBe('"kestrel" · 3 facts · high')
-  expect(text('mod-call', 0)).toBe('lens · recall · "kestrel" · partial')
-  expect(text('mod-call', 1)).toBe('toasts · forget')
-  expect(text('zzz')).toBe('"q" · t · /p · p · r · rel · d · m')
-  expect(rows.some((r) => r.includes('7 facts') || r.includes('9 facts'))).toBe(false)
+  const views = await rowViews($)
+  const detail = (kind: string, n = 0) => views.filter((r) => r.label === kind)[n]!.detail
+  expect(detail('recall')).toBe('3 facts · high "kestrel"')
+  expect(detail('mod-call', 0)).toBe('lens · recall · partial "kestrel"')
+  expect(detail('mod-call', 1)).toBe('toasts · forget')
+  expect(detail('zzz')).toBe('"q" · t · /p · p · r · rel · d · m')
+  expect(views.some((r) => `${r.detail}`.includes('7 facts') || `${r.detail}`.includes('9 facts'))).toBe(false)
 })
 
 test('M12: session starts show their counts and a subagent shows its type', { options: {} }, async ($, on) => {
@@ -396,21 +435,20 @@ test('M12: session starts show their counts and a subagent shows its type', { op
   )
   await openAndSettle($, w)
   await w.advance(2_000)
-  const pane = await mountPane($)
-  await pane.press({ key: 'g-sessions' })
+  await openFilter($)
+  await (await mountPane($)).press({ key: 'g-sessions' })
 
-  const rows = await rowsOf($)
-  expect(rows[0]).toContain('subagent-start 5 facts · 60 tokens · Explore')
-  expect(rows[1]).toContain('session-start 5 facts · 80 tokens')
-  expect(rows[1]).not.toContain('Explore')
+  const views = await rowViews($)
+  expect(views[0]).toMatchObject({ label: 'subagent-start', detail: '5 facts · 60 tok Explore' })
+  expect(views[1]).toMatchObject({ label: 'session-start', detail: '5 facts · 80 tok' })
 })
 
 const FAILURES: { name: string; reply: { status: number; json?: unknown }; line: string; stops: boolean }[] = [
-  { name: 'not-initialised', reply: { status: 503, json: { error: 'not_initialised' } }, line: 'Engram home not initialised — engram init', stops: false },
-  { name: 'bad-request', reply: { status: 400, json: { error: 'bad_request', detail: 'limit must be 1 to 50' } }, line: 'memory tail request rejected: limit must be 1 to 50', stops: false },
-  { name: 'error', reply: { status: 500, json: { error: 'internal' } }, line: 'memory tail error', stops: false },
-  { name: 'not-found', reply: { status: 404, json: { error: 'not_found' } }, line: 'the running Engram server predates the memory tail — update, then /engram:restart', stops: true },
-  { name: 'unsupported', reply: { status: 404 }, line: 'the running Engram server has no mod API', stops: true },
+  { name: 'not-initialised', reply: { status: 503, json: { error: 'not_initialised' } }, line: 'Not initialised · engram init', stops: false },
+  { name: 'bad-request', reply: { status: 400, json: { error: 'bad_request', detail: 'limit must be 1 to 50' } }, line: 'Tail request rejected:', stops: false },
+  { name: 'error', reply: { status: 500, json: { error: 'internal' } }, line: 'Tail error · retrying', stops: false },
+  { name: 'not-found', reply: { status: 404, json: { error: 'not_found' } }, line: 'Server too old for the tail · update, then /engram:restart', stops: true },
+  { name: 'unsupported', reply: { status: 404 }, line: 'Server has no mod API', stops: true },
 ]
 
 for (const failure of FAILURES) {
@@ -421,6 +459,7 @@ for (const failure of FAILURES) {
     await openAndSettle($, w)
 
     expect(await shown($)).toContain(failure.line)
+    if (failure.name === 'bad-request') expect(await shown($)).toContain('limit must be 1 to 50')
     expect(w.tails().length).toBe(1)
     if (failure.stops) {
       await w.advance(120_000)
@@ -447,12 +486,12 @@ test('M13: a server that is not running says so, keeps trying, and clears the li
   })
 
   await openAndSettle($, w)
-  expect(await shown($)).toContain('Engram server not reachable — /engram:start')
+  expect(await shown($)).toContain('Server down · /engram:start')
 
   up = true
   await w.advance(90_000)
   expect(w.tails().length).toBeGreaterThan(0)
-  expect((await shown($)).some((t) => t.includes('not reachable'))).toBe(false)
+  expect((await shown($)).some((t) => t.includes('Server down'))).toBe(false)
 })
 
 test('M13: a request that outlasts its budget says the server is slow and tries again', async ($, on) => {
@@ -461,7 +500,7 @@ test('M13: a request that outlasts its budget says the server is slow and tries 
   await toggle($)
   await w.advance(1_000)
 
-  expect(await shown($)).toContain('Engram server slow to answer')
+  expect(await shown($)).toContain('Server slow · retrying')
 })
 
 test('M13: a server without the activity feed keeps the two second cadence and says writes only', async ($, on) => {
@@ -469,7 +508,7 @@ test('M13: a server without the activity feed keeps the two second cadence and s
   w.script(response({ events: null }))
 
   await openAndSettle($, w)
-  expect(await shown($)).toContain('activity feed unavailable — showing writes only')
+  expect(await shown($)).toContain('Activity feed off · writes only')
   await w.advance(2_000)
 
   expect(w.tails().length).toBe(2)
@@ -501,7 +540,7 @@ test('M14: the digest labels come from the digest mod’s own constants', async 
   expect(rows.find((r) => r.includes(' f13 '))).toContain(' note f13 ')
 })
 
-test('M15: today reads as a time and another day carries its date', async ($, on) => {
+test('M15: every row reads as a time and another day is a separator line', async ($, on) => {
   const w = world(on)
   w.script(
     response(),
@@ -511,9 +550,11 @@ test('M15: today reads as a time and another day carries its date', async ($, on
   await openAndSettle($, w)
   await w.advance(2_000)
 
+  const texts = await shown($)
   const rows = await rowsOf($)
-  expect(rows.find((r) => r.includes(' f12 '))).toMatch(/^. \d{2}:\d{2}:\d{2} note f12 /)
-  expect(rows.find((r) => r.includes(' f11 '))).toMatch(/^. \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} note f11 /)
+  expect(rows.find((r) => r.includes(' f12 '))).toMatch(/^.. \d{2}:\d{2}:\d{2} note f12 /)
+  expect(rows.find((r) => r.includes(' f11 '))).toMatch(/^.. \d{2}:\d{2}:\d{2} note f11 /)
+  expect(texts.filter((t) => /^── \d{4}-\d{2}-\d{2} ──$/.test(t)).length).toBe(1)
 })
 
 test('M16: a skipped count is one marker and the ring keeps two hundred rows', async ($, on) => {
@@ -565,7 +606,7 @@ test('M19: bodies, statements and queries are cut at 120 characters and marked, 
   expect(rows.find((r) => r.includes(' f12 '))).toContain(` ${cut('x')}`)
   expect(rows.find((r) => r.includes(' f11 '))).toContain(` ${exact}`)
   expect(rows.find((r) => r.includes(' f11 '))).not.toContain('…')
-  expect(rows.find((r) => r.includes(' retract f5 '))).toContain(cut('x'))
+  expect(rows.find((r) => r.includes(' retract ') && r.includes(' f5 '))).toContain(cut('x'))
   expect(rows.find((r) => r.includes(' remember f90 '))).toContain(cut('z'))
   expect(rows.find((r) => r.includes(' recall ') && r.includes('qqq'))).toContain(`"${cut('q')}"`)
   expect(rows.find((r) => r.includes(' recall ') && r.includes('xxx'))).toContain(`"${cut('x')}"`)
@@ -586,7 +627,7 @@ test('M17: this session’s Engram calls become rows, and their handles mark lat
 
   const rows = await rowsOf($)
   expect(rows.find((r) => r.includes(' remember f77 '))).toContain('The tail is wired.')
-  expect(rows.find((r) => r.includes(' recall '))).toContain('"kestrel" · 2 facts · partial')
+  expect(rows.find((r) => r.includes(' recall '))).toContain('2 facts · partial "kestrel"')
 
   await w.advance(2_000)
   expect((await rowsOf($)).find((r) => r.includes(' note f77 '))!.startsWith('•')).toBe(true)
@@ -626,60 +667,251 @@ test('M18: calls made while the pane was closed are not shown when it opens', as
   expect((await shown($)).some((t) => t.includes('before the pane'))).toBe(false)
 })
 
-type Drawn = { type: string; props?: Record<string, unknown>; children?: Drawn[] }
+// ---------------------------------------------------------------------------------------------
+// The small-pane presentation. The host cuts a line to a width the mod cannot read, so these hold
+// the shape of what the mod hands over; `truncateEnd` stands in for the host as the ruler.
 
-const descendants = (node: Drawn): Drawn[] => [node, ...(node.children ?? []).flatMap(descendants)]
+/** A model of the host's `truncate-end`: a line that fits is whole, otherwise width - 1 characters and a mark. */
+const truncateEnd = (line: string, width: number) => (line.length <= width ? line : `${line.slice(0, width - 1)}…`)
 
-const GROUP_TITLES = ['Writes', 'Retractions', 'Reads', 'Remember', 'Mods', 'Sessions', 'Maintenance', 'Other']
+const row = (over: Partial<TailRow> = {}): TailRow => ({
+  key: 'w12',
+  ms: NOW_MS,
+  rank: 0,
+  id: 12,
+  kind: 'write',
+  group: 'writes',
+  label: 'note',
+  handle: 'f12',
+  text: 'body',
+  mine: false,
+  retracted: false,
+  ...over,
+})
 
-for (const columns of [24, 80, 120]) {
-  test(`M20: at ${columns} columns the eight filter buttons wrap between buttons and each is reachable`, async ($, on) => {
-    const w = world(on)
-    w.script(response(), response({ head: 11, writes: { rows: [write(11, { body: 'w'.repeat(200) })], skipped: null } }))
-    await openAndSettle($, w)
-    await w.advance(2_000)
-    const pane = await $.ui.mount({
-      plugin: 'engram',
-      surface: 'terminal',
-      component: 'Pane',
-      props: { title: 'Memory Tail', isFocused: false, bodyColumns: columns } as never,
-      requestId: PANE,
-    })
+const MARKS_AND_TIME = /^[• ][✗ ] \d{2}:\d{2}:\d{2}/
 
-    const tree = (await pane.drawn()) as unknown as Drawn
-    const all = descendants(tree)
+test('W1: the marks and the time survive a 24-column cut for every kind of row', () => {
+  const rows = [
+    row({ label: 'subagent-start', kind: 'event', handle: undefined, text: '' }),
+    row({ mine: true, retracted: true, qualifier: '← f3' }),
+    row({ kind: 'retraction', label: 'retract', qualifier: 'compaction', mine: true }),
+    row({ kind: 'call', label: 'remember', mine: true }),
+    row({ kind: 'event', label: 'mod-call', handle: undefined }),
+  ]
+  for (const r of rows) expect(truncateEnd(layoutRow(r, []).head, 24)).toMatch(MARKS_AND_TIME)
+})
 
-    // The row of toggles holds each button in an item that cannot shrink, and wraps between items.
-    const row = all.find((n) => n.props?.['flexWrap'] === 'wrap')
-    expect(row).toBeDefined()
-    const items = row!.children ?? []
-    expect(items.length).toBe(GROUP_TITLES.length)
-    for (const item of items) {
-      expect(item.type).toBe('Box')
-      expect(item.props?.['flexShrink']).toBe(0)
-      expect(item.children?.length).toBe(1)
-      expect(item.children![0]!.type).toBe('Button')
+test('W2: a label of eleven characters or fewer survives a 24-column cut with a qualifier present', () => {
+  const labels = ['directive', 'invariant', 'compaction', 'digest·auto', 'revision', 'capture', 'note', 'other', 'retract', 'recall']
+  for (const label of labels) {
+    expect(label.length).toBeLessThanOrEqual(11)
+    for (const marks of [{ mine: true, retracted: true }, { mine: false, retracted: false }]) {
+      const head = layoutRow(row({ label, qualifier: '← f3', ...marks }), []).head
+      expect(truncateEnd(head, 24)).toContain(` ${label}`)
+      expect(truncateEnd(head, 24).replace('…', '')).toContain(label)
     }
+  }
+})
 
-    // Every label is one whole string on one line, and fits the pane with its brackets.
-    const labels = items.map((item) => String(item.children![0]!.props?.['label']))
-    expect(labels.map((l) => l.replace(/ [✓✗]$/, ''))).toEqual(GROUP_TITLES)
-    for (const label of labels) {
-      expect(label).not.toContain('\n')
-      expect(label.length + 4).toBeLessThanOrEqual(columns)
+test('W3: a recall at 24 columns keeps its count and coverage and loses its query', () => {
+  const query = 'where is the kestrel config'
+  const record = event('recall', { fact_count: 7, coverage: 'high', query })
+  const detail = layoutRow(row({ kind: 'event', label: 'recall', handle: undefined, text: eventText(record) }), []).detail!
+
+  expect(truncateEnd(detail, 24)).toContain('7 facts · high')
+  expect(truncateEnd(detail, 24)).not.toContain(query)
+})
+
+test('W4: a write at 24 columns keeps its handle and the start of its body', () => {
+  const detail = layoutRow(row({ text: 'The kestrel service binds loopback only.' }), []).detail!
+
+  expect(truncateEnd(detail, 24)).toMatch(/^f12 The kestrel/)
+  expect(detail.startsWith('f12 ')).toBe(true)
+})
+
+test('W5: at 120 columns nothing is lost from a row built from fields under the cap', () => {
+  const body = 'a body of an ordinary length that is well under the cap'
+  const cases: { row: TailRow; head: RegExp; detail: string | undefined }[] = [
+    {
+      row: row({ text: body, qualifier: '← f3', mine: true }),
+      head: /^•  \d{2}:\d{2}:\d{2} note ← f3$/,
+      detail: `f12 ${body}`,
+    },
+    {
+      row: row({ kind: 'retraction', label: 'retract', qualifier: 'compaction', text: 'old body — wrong' }),
+      head: /^ ✗ \d{2}:\d{2}:\d{2} retract compaction$/,
+      detail: 'f12 old body — wrong',
+    },
+    {
+      row: row({
+        kind: 'event',
+        label: 'subagent-start',
+        handle: undefined,
+        text: eventText(event('subagent-start', { long_term_fact_count: 5, tokens_returned: 60, agent_type: 'Explore' })),
+      }),
+      head: /^ {3}\d{2}:\d{2}:\d{2} subagent-start$/,
+      detail: '5 facts · 60 tok Explore',
+    },
+  ]
+  for (const { row: r, head: expectedHead, detail: expectedDetail } of cases) {
+    const { head, detail } = layoutRow(r, [])
+    expect(truncateEnd(head, 120)).toMatch(expectedHead)
+    expect(detail === undefined ? undefined : truncateEnd(detail, 120)).toBe(expectedDetail)
+  }
+})
+
+test('W6: no row line can wrap, and the only wrapping text is the status', async ($, on) => {
+  const w = world(on)
+  w.script(
+    response(),
+    response({
+      head: 12,
+      writes: { rows: [write(12, { body: 'w'.repeat(80) }), write(11, { replaces: 'f3' })], skipped: null },
+      retractions: { rows: [{ handle: 'f5', id: 5, retracted_at: NOW, reason: 'r', body: 'old', origin: 'note', this_session: false }] },
+      events: { epoch: 'ep1', head: 1, rows: [{ seq: 1, record: event('remember', { query: 'q' }) }], skipped: null },
+    }),
+    response({ head: 12, events: null }),
+  )
+  await openAndSettle($, w)
+  await w.advance(2_000)
+  await w.advance(2_000)
+
+  const nodes = descendants(await drawn($))
+  const texts = nodes.filter((n) => n.type === 'Text')
+  const wrapping = texts.filter((n) => n.props?.['wrap'] === 'wrap')
+  expect(wrapping.map(textOf)).toEqual([FEED_UNAVAILABLE])
+
+  const rowBoxes = nodes.filter((n) => n.type === 'Box' && String(n.props?.['key'] ?? '').startsWith('row-'))
+  expect(rowBoxes.length).toBeGreaterThanOrEqual(4)
+  for (const box of rowBoxes) {
+    for (const line of (box.children ?? []).filter((c): c is Drawn => typeof c !== 'string')) {
+      expect(line.type).toBe('Text')
+      expect(line.props?.['wrap']).toBe('truncate-end')
     }
+  }
+})
 
-    // A row longer than the pane is cut to one line, never left to wrap inside a token.
-    const rowText = all.filter((n) => n.type === 'Text' && String(n.children?.[0] ?? '').includes(' f11 '))
-    expect(rowText.length).toBe(1)
-    expect(rowText[0]!.props?.['wrap']).toBe('truncate-end')
+test('W7: a row with nothing to say after its head is one line, never a blank second one', async ($, on) => {
+  const w = world(on)
+  w.script(response(), response({ events: { epoch: 'ep1', head: 1, rows: [{ seq: 1, record: event('remember') }], skipped: null } }))
+  await openAndSettle($, w)
+  await w.advance(2_000)
 
-    // All eight can be pressed.
-    for (const title of GROUP_TITLES) {
-      await pane.press({ key: `g-${title.toLowerCase()}` })
-    }
-    const after = (await pane.drawn()) as unknown as Drawn
-    const flipped = descendants(after).filter((n) => n.type === 'Button').map((n) => String(n.props?.['label']))
-    expect(flipped).toEqual(['Writes ✗', 'Retractions ✗', 'Reads ✗', 'Remember ✗', 'Mods ✗', 'Sessions ✓', 'Maintenance ✓', 'Other ✗'])
-  })
-}
+  const boxes = descendants(await drawn($)).filter((n) => n.type === 'Box' && String(n.props?.['key'] ?? '').startsWith('row-'))
+  expect(boxes.length).toBe(1)
+  expect(boxes[0]!.children?.length).toBe(1)
+})
+
+test('W8: the filter starts collapsed as one short button', async ($, on) => {
+  const w = world(on)
+  await openAndSettle($, w)
+
+  const all = buttons(await drawn($))
+  expect(all.map((b) => b.props?.['label'])).toEqual(['Filter 6/8 ▾'])
+  expect(String(all[0]!.props?.['label']).length).toBeLessThanOrEqual(14)
+})
+
+test('W9: the expanded list is eight toggles, one per line, none wider than thirteen characters', async ($, on) => {
+  const w = world(on)
+  await openAndSettle($, w)
+  await openFilter($)
+
+  const tree = await drawn($)
+  const header = buttons(tree).find((b) => b.props?.['key'] === 'filter')!
+  expect(header.props?.['label']).toBe('Filter 6/8 ▴')
+
+  const list = descendants(tree).find((n) => n.type === 'Box' && (n.children ?? []).filter((c) => typeof c !== 'string' && c.type === 'Button').length === 8)!
+  expect(list.props?.['flexDirection']).toBe('column')
+  const toggles = (list.children ?? []).filter((c): c is Drawn => typeof c !== 'string')
+  expect(toggles.map((t) => t.type)).toEqual(Array(8).fill('Button'))
+  const labels = toggles.map((t) => String(t.props?.['label']))
+  expect(labels).toEqual(['✓ Writes', '✓ Retractions', '✓ Reads', '✓ Remember', '✓ Mods', '· Sessions', '· Maintenance', '✓ Other'])
+  for (const label of labels) expect(label.length).toBeLessThanOrEqual(13)
+})
+
+test('W10: a toggle flips its group, updates the count and keeps the list open', async ($, on) => {
+  const w = world(on)
+  await openAndSettle($, w)
+  await openFilter($)
+
+  await (await mountPane($)).press({ key: 'g-sessions' })
+
+  const all = buttons(await drawn($))
+  const labels = all.map((b) => String(b.props?.['label']))
+  expect(labels[0]).toBe('Filter 7/8 ▴')
+  expect(labels).toContain('✓ Sessions')
+  expect(labels.length).toBe(9)
+})
+
+test('W11: every status word fits a narrow pane, with the action first', () => {
+  const reasons: ApiFailure['reason'][] = ['server-down', 'unsupported', 'not-initialised', 'bad-request', 'not-found', 'timeout', 'error']
+  const statuses = [
+    ...reasons.map((reason) => failureOutcome({ ok: false, reason, detail: 'x'.repeat(200) }).status.split('\n')[0]!),
+    FEED_UNAVAILABLE,
+    emptyText({ rows: [] } as never),
+  ]
+  for (const status of statuses) {
+    for (const word of status.split(' ')) expect(word.length).toBeLessThanOrEqual(20)
+  }
+  expect(failureOutcome({ ok: false, reason: 'bad-request', detail: 'x'.repeat(200) }).status.split('\n')[1]).toBe('x'.repeat(60))
+  expect(failureOutcome({ ok: false, reason: 'server-down' }).status.startsWith('Server down')).toBe(true)
+})
+
+test('W12: when the filter hides every row the pane says how many', async ($, on) => {
+  const w = world(on)
+  w.script(
+    response(),
+    response({
+      events: {
+        epoch: 'ep1',
+        head: 5,
+        rows: [5, 4, 3, 2, 1].map((seq) => ({ seq, record: event('index', { phase: 'finished' }) })),
+        skipped: null,
+      },
+    }),
+  )
+  await openAndSettle($, w)
+  await w.advance(2_000)
+
+  expect(await shown($)).toContain('All 5 rows hidden by the filter.')
+  expect(await shown($)).not.toContain('No activity yet.')
+})
+
+test('W13: a date line appears where the day changes, and is never counted', async ($, on) => {
+  const w = world(on)
+  w.script(
+    response(),
+    response({
+      head: 13,
+      writes: {
+        rows: [write(13, { created_at: NOW }), write(12, { created_at: NOW - 60 }), write(11, { created_at: NOW - 30 * 3600 })],
+        skipped: null,
+      },
+    }),
+  )
+  await openAndSettle($, w)
+  await w.advance(2_000)
+
+  const lines = (await shown($)).filter((t) => /^── \d{4}-\d{2}-\d{2} ──$/.test(t))
+  expect(lines.length).toBe(1)
+  const order = descendants(await drawn($))
+    .filter((n) => n.type === 'Text' || (n.type === 'Box' && String(n.props?.['key'] ?? '').startsWith('row-')))
+    .map((n) => (n.type === 'Text' ? textOf(n) : `row ${textOf(n.children![0]!)}`))
+    .filter((t) => t.startsWith('──') || t.startsWith('row'))
+  expect(order.map((t) => (t.startsWith('──') ? 'sep' : 'row'))).toEqual(['row', 'row', 'sep', 'row'])
+
+  await openFilter($)
+  await (await mountPane($)).press({ key: 'g-writes' })
+  expect(await shown($)).toContain('All 3 rows hidden by the filter.')
+})
+
+test('W14: the cap on free text is on the payload, before layout', async ($, on) => {
+  const w = world(on)
+  w.script(response(), response({ head: 12, writes: { rows: [write(12, { body: 'z'.repeat(500) })], skipped: null } }))
+  await openAndSettle($, w)
+  await w.advance(2_000)
+
+  const [view] = await rowViews($)
+  expect(view!.detail).toBe(`f12 ${'z'.repeat(120)}…`)
+})

@@ -161,7 +161,9 @@ export type TailRow = {
   /** The exact kind, origin or tool name; empty on a marker. */
   label: string
   handle?: string
-  /** Everything after the label, without the retracted suffix. */
+  /** Follows the label on the head line: `← fN` on a revision, the retracted fact's origin on a retraction. */
+  qualifier?: string | undefined
+  /** The detail line after the handle: free text last. */
   text: string
   /** Known to be this session's. */
   mine: boolean
@@ -171,6 +173,8 @@ export type TailRow = {
 export type TailState = {
   /** Whether `/engram-tail` last left the pane open. */
   paneOpen: boolean
+  /** Whether the list of eight group toggles is shown under the Filter button. */
+  filterOpen: boolean
   /** Newest first, at most 200. */
   rows: TailRow[]
   /** Write cursor: the store's head at the last read. Absent until the first read. */

@@ -14,9 +14,11 @@ import {
   applyResponse,
   callRow,
   failureOutcome,
-  isShown,
+  displayItems,
+  emptyText,
+  filterLabel,
   requestBody,
-  rowLine,
+  toggleLabel,
 } from './model'
 
 const PANE = 'engram-tail'
@@ -100,6 +102,7 @@ async function open($: EngineInterface, scope: 'session' | 'all') {
   // none, and what happened while the pane was shut is never fetched. Rows already drawn stay.
   await update($, TAIL, (s) => ({
     paneOpen: opened.isPlaced,
+    filterOpen: s.filterOpen,
     rows: s.rows,
     callSeq: s.callSeq,
     markerSeq: s.markerSeq,
@@ -183,31 +186,56 @@ export const register: Register = (on, options) => {
       const { Box, Button, Text } = $.ui.resolve(e)
       const state = await read($, TAIL)
       const nowMs = await $.clock.now()
-      const shown = state.rows.filter((row) => isShown(row, state.groups))
+      const items = displayItems(state.rows, state.groups, state.handles, nowMs)
+      const [statusLine, statusDetail] = (state.status ?? '').split('\n')
 
       return (
         <Box flexDirection="column">
-          <Box flexWrap="wrap">
-            {GROUPS.map((group) => (
-              // A button that does not fit starts the next line whole instead of being split inside.
-              <Box key={`gb-${group.id}`} flexShrink={0}>
+          <Button
+            key="filter"
+            label={filterLabel(state)}
+            onPress={() => update($, TAIL, (s) => ({ ...s, filterOpen: !s.filterOpen }))}
+          />
+          {state.filterOpen ? (
+            <Box flexDirection="column">
+              {GROUPS.map((group) => (
                 <Button
                   key={`g-${group.id}`}
-                  label={`${group.title} ${state.groups[group.id] ? '✓' : '✗'}`}
+                  label={toggleLabel(state.groups[group.id], group.title)}
                   onPress={() => update($, TAIL, (s) => ({ ...s, groups: { ...s.groups, [group.id]: !s.groups[group.id] } }))}
                 />
-              </Box>
-            ))}
-          </Box>
-          {state.status === undefined ? null : <Text dimColor>{state.status}</Text>}
-          {shown.length === 0 ? (
-            <Text dimColor>No memory activity yet.</Text>
+              ))}
+            </Box>
+          ) : null}
+          {statusLine === undefined || statusLine === '' ? null : (
+            <Text dimColor wrap="wrap">
+              {statusLine}
+            </Text>
+          )}
+          {statusDetail === undefined ? null : (
+            <Text dimColor wrap="truncate-end">
+              {statusDetail}
+            </Text>
+          )}
+          {items.length === 0 ? (
+            <Text dimColor wrap="wrap">
+              {emptyText(state)}
+            </Text>
           ) : (
-            shown.map((row) => (
-              <Text key={row.key} dimColor={row.kind === 'marker'} wrap="truncate-end">
-                {rowLine(row, state.handles, nowMs)}
-              </Text>
-            ))
+            items.map((item) =>
+              item.kind === 'separator' ? (
+                <Text key={item.key} dimColor wrap="truncate-end">
+                  {item.text}
+                </Text>
+              ) : (
+                <Box key={`row-${item.row.key}`} flexDirection="column">
+                  <Text dimColor={item.row.kind === 'marker'} wrap="truncate-end">
+                    {item.layout.head}
+                  </Text>
+                  {item.layout.detail === undefined ? null : <Text wrap="truncate-end">{item.layout.detail}</Text>}
+                </Box>
+              ),
+            )
           )}
         </Box>
       )

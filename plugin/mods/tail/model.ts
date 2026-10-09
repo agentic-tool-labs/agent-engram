@@ -7,8 +7,11 @@ import { parseDigest } from '../lens/parser'
 export const MAX_ROWS = 200
 export const POLL_MS = 2_000
 export const RETRY_MS = 15_000
+// A cap on each free-text payload before layout, not a layout width: the host cuts a line to the
+// real pane width, which the mod cannot read.
 const CLIP = 120
 const MAX_HANDLES = 500
+const MAX_DETAIL_CHARS = 60
 
 export const GROUPS: readonly { id: TailGroup; title: string }[] = [
   { id: 'writes', title: 'Writes' },
@@ -23,6 +26,7 @@ export const GROUPS: readonly { id: TailGroup; title: string }[] = [
 
 export const TAIL_INITIAL: TailState = {
   paneOpen: false,
+  filterOpen: false,
   rows: [],
   callSeq: 0,
   markerSeq: 0,
@@ -109,25 +113,26 @@ const marker = (state: TailState, ms: number, text: string): TailRow => ({
 
 type Server = { ms: number }
 
+const present = (parts: (string | null | undefined)[]) => parts.filter((p): p is string => p !== null && p !== undefined && p !== '')
+
+/** The fields of an activity row, shortest and most fixed first, free text last. */
 export function eventText(record: TailEventRecord): string {
   const quoted = (value: string | null | undefined) => (value === null || value === undefined ? undefined : `"${clip(value)}"`)
-  const present = (parts: (string | null | undefined)[]) => parts.filter((p): p is string => p !== null && p !== undefined && p !== '')
+  const has = (value: number | null | undefined): value is number => value !== null && value !== undefined
+  const coverage = (lead: boolean) =>
+    record.coverage === undefined || record.coverage === null ? undefined : lead ? `· ${record.coverage}` : record.coverage
 
   switch (record.kind) {
     case 'recall':
-      return present([quoted(record.query), record.fact_count === null || record.fact_count === undefined ? undefined : `${record.fact_count} facts`, record.coverage]).join(' · ')
+      return present([has(record.fact_count) ? `${record.fact_count} facts` : undefined, coverage(has(record.fact_count)), quoted(record.query)]).join(' ')
     case 'mod-call':
-      return present([
-        `${record.mod ?? '?'} · ${record.tool ?? '?'}`,
-        ...(record.tool === 'recall' ? [quoted(record.query), record.coverage] : []),
-      ]).join(' · ')
+      return present([`${record.mod ?? '?'} · ${record.tool ?? '?'}`, ...(record.tool === 'recall' ? [coverage(true), quoted(record.query)] : [])]).join(' ')
     case 'session-start':
     case 'subagent-start':
       return present([
-        record.long_term_fact_count === null || record.long_term_fact_count === undefined ? undefined : `${record.long_term_fact_count} facts`,
-        record.tokens_returned === null || record.tokens_returned === undefined ? undefined : `${record.tokens_returned} tokens`,
+        present([has(record.long_term_fact_count) ? `${record.long_term_fact_count} facts` : undefined, has(record.tokens_returned) ? `${record.tokens_returned} tok` : undefined]).join(' · '),
         record.kind === 'subagent-start' ? record.agent_type : undefined,
-      ]).join(' · ')
+      ]).join(' ')
     default:
       return present([quoted(record.query), record.tool, record.path, record.phase, record.repo, record.relation, record.decision, record.mode]).join(' · ')
   }
@@ -178,7 +183,8 @@ export function applyResponse(state: TailState, res: TailResponse, sessionId: st
       group: 'writes',
       label: w.origin === 'note' && w.evidence === EVIDENCE ? 'digest' : w.origin === 'note' && w.evidence === AUTO_EVIDENCE ? 'digest·auto' : w.origin,
       handle: w.handle,
-      text: `${clip(w.body)}${w.replaces === null ? '' : ` ← ${w.replaces}`}`,
+      qualifier: w.replaces === null ? undefined : `← ${w.replaces}`,
+      text: clip(w.body),
       mine: w.this_session,
       retracted: !w.live,
     })
@@ -199,7 +205,8 @@ export function applyResponse(state: TailState, res: TailResponse, sessionId: st
       group: 'retractions',
       label: 'retract',
       handle: r.handle,
-      text: `${r.origin} ${clip(r.body)} — ${r.reason}`,
+      qualifier: r.origin,
+      text: `${clip(r.body)} — ${r.reason}`,
       mine: r.this_session,
       retracted: false,
     })
@@ -244,9 +251,8 @@ export function callRow(
   if (label === 'recall') {
     const digest = parseDigest(resultText)
     const query = text(input['query']) ?? ''
-    body = [`"${clip(query)}"`, digest.parsed ? `${digest.factCount ?? digest.facts.length} facts` : undefined, digest.parsed ? digest.coverage : undefined]
-      .filter((p): p is string => p !== undefined)
-      .join(' · ')
+    const facts = digest.parsed ? `${digest.factCount ?? digest.facts.length} facts` : undefined
+    body = present([facts, digest.parsed && digest.coverage !== undefined ? `· ${digest.coverage}` : undefined, `"${clip(query)}"`]).join(' ')
   } else if (label === 'remember' || label === 'revise') {
     handle = firstHandle
     body = clip(text(input['statement']) ?? '')
@@ -294,46 +300,60 @@ export function isShown(row: TailRow, groups: TailState['groups']): boolean {
 const sameDay = (a: Date, b: Date) =>
   a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
 
-/** Today's rows read `HH:mm:ss`; any other day carries its date. */
-export function whenText(ms: number, nowMs: number): string {
-  return sameDay(new Date(ms), new Date(nowMs)) ? clock(ms) : stamp(Math.floor(ms / 1000))
-}
+/** The local `yyyy-MM-dd` of an epoch in milliseconds: the date part of lens's `stamp`. */
+const dateOf = (ms: number) => stamp(Math.floor(ms / 1000)).slice(0, 10)
 
-/** One row as a line: `•` when it is known to be this session's. */
-export function rowLine(row: TailRow, handles: readonly string[], nowMs: number): string {
-  if (row.kind === 'marker') return `  ${row.text}`
+export type RowLayout = { head: string; detail?: string }
+
+/**
+ * A row as up to two lines, most important first, so a host that cuts a line at the pane width
+ * always removes the least important part. The head is the session mark, the state mark, the time
+ * and the label, then a qualifier where there is one; the detail is the handle then the free text.
+ */
+export function layoutRow(row: TailRow, handles: readonly string[]): RowLayout {
+  if (row.kind === 'marker') return { head: `  ${row.text}` }
+
   const known = row.mine || (row.handle !== undefined && handles.includes(row.handle))
-  const parts = [whenText(row.ms, nowMs), row.label, row.handle, row.text, row.retracted ? '(retracted)' : undefined]
-  return `${known ? '•' : ' '} ${parts.filter((p): p is string => p !== undefined && p !== '').join(' ')}`
+  const marks = `${known ? '•' : ' '}${row.kind === 'retraction' || row.retracted ? '✗' : ' '}`
+  const head = present([`${marks} ${clock(row.ms)}`, row.label, row.qualifier]).join(' ')
+  const detail = present([row.handle, row.text]).join(' ')
+  return detail === '' ? { head } : { head, detail }
 }
 
-export type Failure = { status: string; delayMs: number; stop: boolean }
+export type DisplayItem =
+  | { kind: 'separator'; key: string; text: string }
+  | { kind: 'row'; row: TailRow; layout: RowLayout }
 
-/** What a failed request leaves on the status line and how the loop carries on. */
-export function failureOutcome(failure: ApiFailure): Failure {
-  switch (failure.reason) {
-    case 'server-down':
-      return { status: 'Engram server not reachable — /engram:start', delayMs: RETRY_MS, stop: false }
-    case 'timeout':
-      return { status: 'Engram server slow to answer', delayMs: RETRY_MS, stop: false }
-    case 'not-initialised':
-      return { status: 'Engram home not initialised — engram init', delayMs: RETRY_MS, stop: false }
-    case 'not-found':
-      return {
-        status: 'the running Engram server predates the memory tail — update, then /engram:restart',
-        delayMs: RETRY_MS,
-        stop: true,
-      }
-    case 'unsupported':
-      return { status: 'the running Engram server has no mod API', delayMs: RETRY_MS, stop: true }
-    case 'bad-request':
-      return { status: `memory tail request rejected: ${failure.detail ?? 'no detail'}`, delayMs: RETRY_MS, stop: false }
-    default:
-      return { status: 'memory tail error', delayMs: RETRY_MS, stop: false }
+/**
+ * The rows the filter lets through, each laid out, with a date line above the first when it is not
+ * today and wherever the date changes between neighbours. Separators belong to the display only.
+ */
+export function displayItems(rows: readonly TailRow[], groups: TailState['groups'], handles: readonly string[], nowMs: number): DisplayItem[] {
+  const items: DisplayItem[] = []
+  let previous: Date | undefined
+  for (const row of rows) {
+    if (!isShown(row, groups)) continue
+    const when = new Date(row.ms)
+    const needsSeparator = previous === undefined ? !sameDay(when, new Date(nowMs)) : !sameDay(when, previous)
+    if (needsSeparator) items.push({ kind: 'separator', key: `sep-${row.key}`, text: `── ${dateOf(row.ms)} ──` })
+    items.push({ kind: 'row', row, layout: layoutRow(row, handles) })
+    previous = when
   }
+  return items
 }
 
-/** The request for the next poll: no cursors until the first answer has set them. */
+export const filterLabel = (state: TailState): string =>
+  `Filter ${GROUPS.filter((g) => state.groups[g.id]).length}/${GROUPS.length} ${state.filterOpen ? '▴' : '▾'}`
+
+export const toggleLabel = (on: boolean, title: string): string => `${on ? '✓' : '·'} ${title}`
+
+/** What stands in place of rows: nothing recorded yet, or everything filtered out. */
+export function emptyText(state: TailState): string {
+  const hidden = state.rows.filter((row) => row.kind !== 'marker').length
+  return hidden > 0 ? `All ${hidden} rows hidden by the filter.` : 'No activity yet.'
+}
+
+/** The next poll's request: no cursors until the first answer has set them. */
 export function requestBody(state: TailState, sessionId: string, scope: 'session' | 'all'): TailRequest {
   if (state.after === undefined) return { session_id: sessionId, scope }
   return {
@@ -346,4 +366,34 @@ export function requestBody(state: TailState, sessionId: string, scope: 'session
   }
 }
 
-export const FEED_UNAVAILABLE = 'activity feed unavailable — showing writes only'
+export type Failure = { status: string; delayMs: number; stop: boolean }
+
+/**
+ * What a failed request leaves on the status line and how the loop carries on. The action comes
+ * first and every word is short, because the status is the one line the host may wrap. A second
+ * line, after a newline, is server text and is drawn clipped.
+ */
+export function failureOutcome(failure: ApiFailure): Failure {
+  switch (failure.reason) {
+    case 'server-down':
+      return { status: 'Server down · /engram:start', delayMs: RETRY_MS, stop: false }
+    case 'timeout':
+      return { status: 'Server slow · retrying', delayMs: RETRY_MS, stop: false }
+    case 'not-initialised':
+      return { status: 'Not initialised · engram init', delayMs: RETRY_MS, stop: false }
+    case 'not-found':
+      return { status: 'Server too old for the tail · update, then /engram:restart', delayMs: RETRY_MS, stop: true }
+    case 'unsupported':
+      return { status: 'Server has no mod API', delayMs: RETRY_MS, stop: true }
+    case 'bad-request':
+      return {
+        status: failure.detail === undefined ? 'Tail request rejected:' : `Tail request rejected:\n${failure.detail.slice(0, MAX_DETAIL_CHARS)}`,
+        delayMs: RETRY_MS,
+        stop: false,
+      }
+    default:
+      return { status: 'Tail error · retrying', delayMs: RETRY_MS, stop: false }
+  }
+}
+
+export const FEED_UNAVAILABLE = 'Activity feed off · writes only'
