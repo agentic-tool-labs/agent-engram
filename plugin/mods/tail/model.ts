@@ -69,10 +69,10 @@ export function compareRows(a: TailRow, b: TailRow): number {
   return b.ms - a.ms || b.rank - a.rank || b.id - a.id
 }
 
-/** One line: whitespace collapsed, cut at `CLIP` characters. */
+/** One line: whitespace collapsed, cut at `CLIP` characters and marked. */
 export function clip(text: string): string {
   const flat = text.replace(/\s+/g, ' ').trim()
-  return flat.length <= CLIP ? flat : `${flat.slice(0, CLIP - 1)}…`
+  return flat.length <= CLIP ? flat : `${flat.slice(0, CLIP)}…`
 }
 
 /** Adds rows, replacing any with the same key, and keeps the newest `MAX_ROWS`. */
@@ -110,7 +110,7 @@ const marker = (state: TailState, ms: number, text: string): TailRow => ({
 type Server = { ms: number }
 
 export function eventText(record: TailEventRecord): string {
-  const quoted = (value: string | null | undefined) => (value === null || value === undefined ? undefined : `"${value}"`)
+  const quoted = (value: string | null | undefined) => (value === null || value === undefined ? undefined : `"${clip(value)}"`)
   const present = (parts: (string | null | undefined)[]) => parts.filter((p): p is string => p !== null && p !== undefined && p !== '')
 
   switch (record.kind) {
@@ -244,7 +244,7 @@ export function callRow(
   if (label === 'recall') {
     const digest = parseDigest(resultText)
     const query = text(input['query']) ?? ''
-    body = [`"${query}"`, digest.parsed ? `${digest.factCount ?? digest.facts.length} facts` : undefined, digest.parsed ? digest.coverage : undefined]
+    body = [`"${clip(query)}"`, digest.parsed ? `${digest.factCount ?? digest.facts.length} facts` : undefined, digest.parsed ? digest.coverage : undefined]
       .filter((p): p is string => p !== undefined)
       .join(' · ')
   } else if (label === 'remember' || label === 'revise') {
@@ -255,7 +255,10 @@ export function callRow(
     body = ''
   } else {
     const fields = [text(input['query']), text(input['relation']), text(input['fact_id']) ?? text(input['handle'])]
-    body = fields.filter((f): f is string => f !== undefined).join(' · ')
+    body = fields
+      .filter((f): f is string => f !== undefined)
+      .map(clip)
+      .join(' · ')
   }
 
   const seq = state.callSeq + 1

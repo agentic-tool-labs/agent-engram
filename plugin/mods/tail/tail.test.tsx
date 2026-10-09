@@ -541,6 +541,36 @@ test('M16: a skipped count is one marker and the ring keeps two hundred rows', a
   expect(rows.some((r) => r.includes(' f11 '))).toBe(false)
 })
 
+test('M19: bodies, statements and queries are cut at 120 characters and marked, shorter ones are not', async ($, on) => {
+  const w = world(on)
+  const long = 'x'.repeat(130)
+  const exact = 'y'.repeat(120)
+  w.script(
+    response(),
+    response({
+      head: 12,
+      writes: { rows: [write(12, { body: long }), write(11, { body: exact })], skipped: null },
+      retractions: { rows: [{ handle: 'f5', id: 5, retracted_at: NOW, reason: 'r', body: long, origin: 'note', this_session: false }] },
+      events: { epoch: 'ep1', head: 1, rows: [{ seq: 1, record: event('recall', { query: long, fact_count: 1, coverage: 'high' }) }], skipped: null },
+    }),
+  )
+  on('tool.call', () => ({ result: {}, text: '[f90] ok' }) as never)
+  await openAndSettle($, w)
+  await w.advance(2_000)
+  await $.tool.call({ tool: ENGRAM_TOOLS.remember, tool_use_id: 't1', statement: 'z'.repeat(130) } as never)
+  await $.tool.call({ tool: ENGRAM_TOOLS.recall, tool_use_id: 't2', query: 'q'.repeat(130) } as never)
+
+  const rows = await rowsOf($)
+  const cut = (c: string) => `${c.repeat(120)}…`
+  expect(rows.find((r) => r.includes(' f12 '))).toContain(` ${cut('x')}`)
+  expect(rows.find((r) => r.includes(' f11 '))).toContain(` ${exact}`)
+  expect(rows.find((r) => r.includes(' f11 '))).not.toContain('…')
+  expect(rows.find((r) => r.includes(' retract f5 '))).toContain(cut('x'))
+  expect(rows.find((r) => r.includes(' remember f90 '))).toContain(cut('z'))
+  expect(rows.find((r) => r.includes(' recall ') && r.includes('qqq'))).toContain(`"${cut('q')}"`)
+  expect(rows.find((r) => r.includes(' recall ') && r.includes('xxx'))).toContain(`"${cut('x')}"`)
+})
+
 test('M17: this session’s Engram calls become rows, and their handles mark later writes', async ($, on) => {
   const w = world(on)
   w.script(response(), response({ head: 77, writes: { rows: [write(77)], skipped: null } }))
