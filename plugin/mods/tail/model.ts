@@ -18,10 +18,7 @@ export const MISSING_RETRY_MS = 300_000
 export const TAIL_SHAPE = 'tail-3'
 export const TAIL_SESSION_SHAPE = 'tail-session-1'
 export const TAIL_SESSION_INITIAL: TailSessionState = { autoOpened: false }
-const MAX_DIAG_LINES = 10
 
-/** The stored diagnostic lines with one more, newest last, oldest dropped past the cap. */
-export const appendDiag = (lines: string[], line: string): string[] => [...lines, line].slice(-MAX_DIAG_LINES)
 // A cap on each free-text payload before layout, not a layout width: the host cuts a line to the
 // real pane width, which the mod cannot read.
 const CLIP = 120

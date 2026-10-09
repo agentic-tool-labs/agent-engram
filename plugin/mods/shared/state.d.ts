@@ -223,7 +223,6 @@ declare module 'claude-code' {
       digest: DigestState
       tail: Shaped<TailState>
       'tail-session': Shaped<TailSessionState>
-      'tail-diag': { lines: string[] }
     }
   }
 }
