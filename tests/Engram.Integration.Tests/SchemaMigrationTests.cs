@@ -1077,6 +1077,90 @@ public class SchemaMigrationTests
         Assert.Contains("USING INDEX ix_fact_object", ImplementersQueryPlan(migrated));
     }
 
+    /// <summary>
+    /// Version 17 added <c>ix_supersession_retracted</c>, which the memory tail's retraction poll
+    /// seeks. The fixture is a current store with the index dropped and the version stamped back
+    /// to 16, so a migration that does nothing leaves it absent and this fails (D60).
+    /// </summary>
+    [Fact]
+    public void Opening_AVersion16StoreLackingTheRetractionIndex_AddsItAndSnapshotsFirst()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using (var seed = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Execute(seed, "DROP INDEX ix_supersession_retracted;");
+            Execute(seed, "UPDATE schema_meta SET value = '16' WHERE key = 'schema_version';");
+            Assert.Equal(16, EngramDatabase.ReadSchemaVersion(seed));
+            Assert.Equal("(absent)", RetractedIndexShape(seed));
+        }
+
+        SqliteConnection.ClearAllPools();
+
+        using var migrated = EngramDatabase.OpenInitialized(sandbox.Home);
+
+        Assert.Equal(17, EngramDatabase.ReadSchemaVersion(migrated));
+        Assert.Equal("created_at partial=1", RetractedIndexShape(migrated));
+        Assert.Contains("USING INDEX ix_supersession_retracted", RetractionQueryPlan(migrated));
+        var snapshot = Assert.Single(BackupStore.List(sandbox.Home));
+        Assert.Contains("pre-v17", snapshot.Name, StringComparison.Ordinal);
+        Assert.Equal(16, snapshot.SchemaVersion);
+    }
+
+    /// <summary>A store already at the current version is not re-snapshotted or altered.</summary>
+    [Fact]
+    public void Opening_ACurrentStore_KeepsTheRetractionIndexAndTakesNoSnapshot()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using (var seed = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Assert.Equal("created_at partial=1", RetractedIndexShape(seed));
+        }
+
+        SqliteConnection.ClearAllPools();
+        using var reopened = EngramDatabase.OpenInitialized(sandbox.Home);
+
+        Assert.Equal("created_at partial=1", RetractedIndexShape(reopened));
+        Assert.Empty(BackupStore.List(sandbox.Home));
+    }
+
+    private static string RetractedIndexShape(SqliteConnection connection)
+    {
+        using var list = connection.CreateCommand();
+        list.CommandText = "SELECT partial FROM pragma_index_list('supersession') WHERE name = 'ix_supersession_retracted';";
+        if (list.ExecuteScalar() is not long partial)
+        {
+            return "(absent)";
+        }
+
+        using var info = connection.CreateCommand();
+        info.CommandText = "SELECT group_concat(name) FROM (SELECT name FROM pragma_index_info('ix_supersession_retracted'));";
+        return $"{info.ExecuteScalar()} partial={partial}";
+    }
+
+    /// <summary>
+    /// The retraction lookup names its index. Measured on SQLite 3.54 with 20,000 rows, 400 of them
+    /// retractions, and <c>ANALYZE</c> run: without <c>INDEXED BY</c> the planner takes
+    /// <c>ix_supersession_new (new_fact_id=?)</c> plus a temp b-tree sort, which reads every
+    /// retraction ever made; with it, a <c>created_at&gt;?</c> seek.
+    /// </summary>
+    private static string RetractionQueryPlan(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "EXPLAIN QUERY PLAN SELECT old_fact_id FROM supersession INDEXED BY ix_supersession_retracted "
+                + "WHERE new_fact_id IS NULL AND created_at >= $since ORDER BY created_at DESC LIMIT 20;";
+        command.Parameters.AddWithValue("$since", 0L);
+
+        var lines = new List<string>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            lines.Add(reader.GetString(reader.GetOrdinal("detail")));
+        }
+
+        return string.Join(" | ", lines);
+    }
+
     private static string ObjectIndexShape(SqliteConnection connection)
     {
         using var list = connection.CreateCommand();

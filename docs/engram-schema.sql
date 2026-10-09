@@ -218,6 +218,7 @@ CREATE TABLE supersession (
   created_at  INTEGER NOT NULL
 );
 CREATE INDEX ix_supersession_new ON supersession(new_fact_id);
+CREATE INDEX ix_supersession_retracted ON supersession(created_at) WHERE new_fact_id IS NULL;
 
 
 -- ---------------------------------------------------------------------------
@@ -490,7 +491,7 @@ CREATE TABLE fact_review (
 
 
 CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT);
-INSERT INTO schema_meta(key, value) VALUES ('schema_version', '16');
+INSERT INTO schema_meta(key, value) VALUES ('schema_version', '17');
 
 -- Built by a fresh CREATE, and pre-stamped ready: an empty table matches whatever
 -- FactTokenIndex.Rebuild would produce over zero facts, so a new store needs no rebuild pass.

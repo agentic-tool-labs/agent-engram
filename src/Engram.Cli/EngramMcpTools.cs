@@ -249,7 +249,24 @@ public sealed class EngramMcpTools
         // declines to write back anything this store has held before, so a retraction
         // survives a corpus revision.
         using var connection = EngramDatabase.OpenInitialized(home);
-        var closed = FactStore.Forget(connection, factId, "retracted by the user", DateTimeOffset.UtcNow);
+        // The session row is resolved inside the write transaction, so a concurrent first forget from
+        // this session cannot lose the select-then-insert race, and a forget that closes nothing
+        // leaves no session row behind.
+        var now = DateTimeOffset.UtcNow;
+        bool closed;
+        using (var transaction = EngramDatabase.BeginWrite(connection))
+        {
+            var sessionRow = SessionStore.EnsureSession(connection, transaction, session.Value, now);
+            closed = FactStore.Forget(connection, transaction, factId, "retracted by the user", now, sessionRow);
+            if (closed)
+            {
+                transaction.Commit();
+            }
+            else
+            {
+                transaction.Rollback();
+            }
+        }
 
         // Reporting success for something that was never live would leave the user believing
         // a fact is gone while recall keeps returning it.
@@ -435,7 +452,6 @@ public sealed class EngramMcpTools
         }
 
         var now = DateTimeOffset.UtcNow;
-        var sessionId = SessionStore.EnsureSession(connection, null, session.Value, now);
 
         // Read before Remember closes the incumbent: FactSyncRequests keys on fact_id, and the
         // old row stays exactly what it was (the flag never moves to a closed fact).
@@ -444,6 +460,10 @@ public sealed class EngramMcpTools
         RememberResult result;
         using (var transaction = EngramDatabase.BeginWrite(connection))
         {
+            // Resolved on the write, as SessionFacts.Append does: in autocommit a first revise from
+            // a session races any other first write of that session on the UNIQUE external_id.
+            var sessionId = SessionStore.EnsureSession(connection, transaction, session.Value, now);
+
             // The store's own collision rule does the revision: one live fact per
             // (subject, predicate), so remembering the correction closes the incumbent and
             // records the reason on the supersession row.

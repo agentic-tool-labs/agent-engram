@@ -4,6 +4,7 @@ import type { On } from 'claude-code'
 import { installFakeEngine } from '../shared/testing'
 import type { FetchHandler, ProcessResult } from '../shared/testing'
 import type { PathFact } from '../shared/types'
+import { SENTINEL_SHAPE } from './index'
 
 const BIN = '/fake/bin/engram'
 const FILE = '/repo/src/a.ts'
@@ -65,6 +66,9 @@ function rig(
     failToast?: boolean
     failGet?: (key: string) => boolean
     failSet?: (key: string) => boolean
+    /** Holds the next tool call until it resolves; that call alone takes `deny` and `fail`. */
+    gate?: Promise<void>
+    reached?: boolean
   } = { deny: opts.toolDeny }
   const digestWrites: string[] = []
   const injected: string[] = []
@@ -85,10 +89,20 @@ function rig(
   })
   const panes: { id: string; title?: string }[] = []
   if (opts.noCwd !== true) on('session.cwd', () => ({ value: '/repo' }))
-  on('tool.call', (_$, e) => {
-    if (control.fail === true) throw new Error('tool failed')
+  on('tool.call', async (_$, e) => {
+    const { gate, deny, fail } = control
+    if (gate !== undefined) {
+      control.gate = undefined
+      control.deny = undefined
+      control.fail = false
+      control.reached = true
+      await gate
+    }
+    const failNow = gate !== undefined ? fail : control.fail
+    const denyNow = gate !== undefined ? deny : control.deny
+    if (failNow === true) throw new Error('tool failed')
     ran.push({ ...e })
-    if (control.deny !== undefined) return { deny: control.deny }
+    if (denyNow !== undefined) return { deny: denyNow }
     return { ref: 1, result: {}, text: 'ok', ...(opts.toolContext === undefined ? {} : { context: opts.toolContext }) }
   })
   on('ui.toast', (_$, e) => {
@@ -134,20 +148,20 @@ test('inform: the edit runs untouched and the invariants are appended once, with
   expect(call!.headers['X-Engram-Mod']).toBe('sentinel')
 })
 
-test('a second edit of the same file makes no API call and adds nothing', async ($, on) => {
+test('a second edit of the same file looks up again and adds nothing', async ($, on) => {
   const r = rig(on, { path: answer(TWO) })
   await $.tool.call(edit(FILE))
   const out = await $.tool.call(edit(FILE))
   expect(contextOf(out)).toBeUndefined()
-  expect(pathFactsCalls(r).length).toBe(1)
+  expect(pathFactsCalls(r).length).toBe(2)
   expect(r.toasts.length).toBe(1)
 })
 
-test('a file with no invariants costs one call, then is silent all session', async ($, on) => {
+test('a file with no invariants is looked up on each edit and never announced', async ($, on) => {
   const r = rig(on, { path: answer([]) })
   expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
   expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
-  expect(pathFactsCalls(r).length).toBe(1)
+  expect(pathFactsCalls(r).length).toBe(2)
   expect(r.toasts.length).toBe(0)
 })
 
@@ -210,7 +224,7 @@ test('deny-once: a refusal from below after the sentinel let the retry through d
   expect(denyOf(await $.tool.call(edit(FILE)))).toContain('Invariants recorded for src/a.ts')
   expect(denyOf(await $.tool.call(edit(FILE)))).toBe('no')
   expect(denyOf(await $.tool.call(edit(FILE)))).toBe('no')
-  expect(pathFactsCalls(r).length).toBe(1)
+  expect(pathFactsCalls(r).length).toBe(3)
 })
 
 test('an engine failure inside the hook fails open: the edit still runs, nothing is added', async ($, on) => {
@@ -221,12 +235,12 @@ test('an engine failure inside the hook fails open: the edit still runs, nothing
   expect(r.ran.length).toBe(1)
 })
 
-test('session start registers /invariant and /why', async ($, on) => {
+test('session start registers /engram-invariant and /engram-why', async ($, on) => {
   const r = rig(on)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
-  expect(r.registered).toContain('invariant')
-  expect(r.registered).toContain('why')
+  expect(r.registered).toContain('engram-invariant')
+  expect(r.registered).toContain('engram-why')
 })
 
 test('Write is matched too', async ($, on) => {
@@ -258,7 +272,7 @@ test('deny-once: the first edit is denied with the block, the next proceeds, the
   expect(denyOf(second)).toBeUndefined()
   expect(contextOf(second)).toBeUndefined()
   expect(r.ran.length).toBe(1)
-  expect(pathFactsCalls(r).length).toBe(1)
+  expect(pathFactsCalls(r).length).toBe(2)
   expect(r.toasts.length).toBe(0)
 })
 
@@ -295,13 +309,13 @@ test('a missing file_path: untouched, no API call', async ($, on) => {
   expect(r.router.fetchCalls.length).toBe(0)
 })
 
-test('a subagent has its own once per file', async ($, on) => {
+test('S6: a subagent has its own announcements: it is told what the main agent was told', async ($, on) => {
   const r = rig(on, { path: answer(TWO) })
   await $.tool.call(edit(FILE))
   const sub = await $.tool.call(edit(FILE, { agentId: 'agent-1' }))
   expect(contextOf(sub)).toEqual([BLOCK])
   expect(contextOf(await $.tool.call(edit(FILE, { agentId: 'agent-1' })))).toBeUndefined()
-  expect(pathFactsCalls(r).length).toBe(2)
+  expect(pathFactsCalls(r).length).toBe(3)
 })
 
 test('two concurrent edits of one file announce exactly once', async ($, on) => {
@@ -370,47 +384,47 @@ test('three quick edits of one slow file share one request, none waits past 300 
   expect(r.ran.length).toBe(3)
 })
 
-test('/invariant forwards file and statement to the CLI and toasts its line', async ($, on) => {
+test('/engram-invariant forwards file and statement to the CLI and toasts its line', async ($, on) => {
   const r = rig(on, {
     cli: { 'invariant add src/a.ts keep the list sorted': { exitCode: 0, stdout: '[f9] added: "keep the list sorted"\nmore\n' } },
   })
-  const out = await run($, 'invariant', 'src/a.ts keep the list sorted')
+  const out = await run($, 'engram-invariant', 'src/a.ts keep the list sorted')
   expect(out.text).toBe('[f9] added: "keep the list sorted"')
   expect(r.toasts).toEqual(['[f9] added: "keep the list sorted"'])
 })
 
-test('/invariant: a failing CLI toasts its first stderr line', async ($, on) => {
+test('/engram-invariant: a failing CLI toasts its first stderr line', async ($, on) => {
   const r = rig(on, {
     cli: { 'invariant add src/a.ts x': { exitCode: 1, stdout: '', stderr: '\nerror: not enrolled\nsecond\n' } },
   })
-  const out = await run($, 'invariant', 'src/a.ts x')
+  const out = await run($, 'engram-invariant', 'src/a.ts x')
   expect(out.text).toBe('error: not enrolled')
   expect(r.toasts).toEqual(['error: not enrolled'])
 })
 
-test('/invariant: a failing CLI that printed nothing still says it failed', async ($, on) => {
+test('/engram-invariant: a failing CLI that printed nothing still says it failed', async ($, on) => {
   const r = rig(on, { cli: { 'invariant add src/a.ts x': { exitCode: 2, stdout: 'noise', stderr: '  \n' } } })
-  const out = await run($, 'invariant', 'src/a.ts x')
+  const out = await run($, 'engram-invariant', 'src/a.ts x')
   expect(out.text).toBe('engram invariant add failed (exit 2).')
   expect(r.toasts.length).toBe(1)
 })
 
-test('/invariant: exit 0 with no stdout says Recorded, whatever stderr holds', async ($, on) => {
+test('/engram-invariant: exit 0 with no stdout says Recorded, whatever stderr holds', async ($, on) => {
   rig(on, { cli: { 'invariant add src/a.ts x': { exitCode: 0, stdout: '', stderr: 'warning: slow' } } })
-  expect((await run($, 'invariant', 'src/a.ts x')).text).toBe('Recorded.')
+  expect((await run($, 'engram-invariant', 'src/a.ts x')).text).toBe('Recorded.')
 })
 
-test('/invariant: no binary installed', async ($, on) => {
+test('/engram-invariant: no binary installed', async ($, on) => {
   const r = rig(on, { binary: '' })
-  const out = await run($, 'invariant', 'src/a.ts x')
+  const out = await run($, 'engram-invariant', 'src/a.ts x')
   expect(out.text).toBe('Engram binary not found.')
   expect(r.toasts).toEqual(['Engram binary not found.'])
 })
 
-test('/invariant: a file with no statement runs nothing', async ($, on) => {
+test('/engram-invariant: a file with no statement runs nothing', async ($, on) => {
   const r = rig(on)
-  const out = await run($, 'invariant', 'src/a.ts')
-  expect(out.text).toBe('Usage: /invariant <file> <statement>')
+  const out = await run($, 'engram-invariant', 'src/a.ts')
+  expect(out.text).toBe('Usage: /engram-invariant <file> <statement>')
   expect(r.router.processCalls.length).toBe(0)
   expect(r.toasts.length).toBe(0)
 })
@@ -426,9 +440,9 @@ async function paneText($: Parameters<TestBody>[0]) {
   return JSON.stringify(await ui.drawn())
 }
 
-test('/why opens the pane: invariants first, then other authored facts, then code facts', async ($, on) => {
+test('/engram-why opens the pane: invariants first, then other authored facts, then code facts', async ($, on) => {
   const r = rig(on, { path: answer(WHY_FACTS) })
-  const out = await run($, 'why', 'src/a.ts')
+  const out = await run($, 'engram-why', 'src/a.ts')
   expect(out.text).toBe('Opened engram-why for src/a.ts.')
   expect(r.panes[0]).toMatchObject({ id: 'engram-why' })
   const body = (r.router.fetchCalls[0]!.body as { path: string; predicate?: string })
@@ -442,22 +456,22 @@ test('/why opens the pane: invariants first, then other authored facts, then cod
   expect(at('[f2] a decision about a.ts')).toBeLessThan(at('[f1] code gist of a.ts'))
 })
 
-test('/why on a file outside an enrolled repo says so', async ($, on) => {
+test('/engram-why on a file outside an enrolled repo says so', async ($, on) => {
   rig(on, { path: answer([], null) })
-  await run($, 'why', 'src/a.ts')
+  await run($, 'engram-why', 'src/a.ts')
   expect(await paneText($)).toMatch('Not inside an enrolled repo')
 })
 
-test('/why against a server without the mod API says it needs a newer Engram', async ($, on) => {
+test('/engram-why against a server without the mod API says it needs a newer Engram', async ($, on) => {
   rig(on)
-  await run($, 'why', 'src/a.ts')
+  await run($, 'engram-why', 'src/a.ts')
   expect(await paneText($)).toMatch('needs a newer Engram')
 })
 
-test('/why with no path opens nothing', async ($, on) => {
+test('/engram-why with no path opens nothing', async ($, on) => {
   const r = rig(on, { path: answer(WHY_FACTS) })
-  const out = await run($, 'why', '  ')
-  expect(out.text).toBe('Usage: /why <path>')
+  const out = await run($, 'engram-why', '  ')
+  expect(out.text).toBe('Usage: /engram-why <path>')
   expect(r.panes.length).toBe(0)
   expect(r.router.fetchCalls.length).toBe(0)
 })
@@ -523,3 +537,198 @@ test('a failing release after a refusal from below: the refusal still comes back
   expect(r.toasts.length).toBe(0)
   expect(digestSawEdit(r)).toBe(true)
 })
+
+// ---------------------------------------------------------------------------------------------
+// Announced handles per (session, agent, path)
+
+const F1 = fact(1, 'first rule')
+const F2 = fact(2, 'second rule')
+const blockOf = (...facts: PathFact[]) => 'Invariants recorded for src/a.ts:\n' + facts.map((f) => `- [${f.handle}] ${f.body}`).join('\n')
+
+/** A rig whose path-facts answer the test changes between edits. */
+function changing(on: On, opts: Parameters<typeof rig>[1] = {}) {
+  const now: { facts: PathFact[] } = { facts: [] }
+  const r = rig(on, { ...opts, path: () => ({ status: 200, json: { entity_path: 'src/a.ts', repo: '/repo', facts: now.facts } }) })
+  return { r, now }
+}
+
+test('S1: a touch while the file has no invariants announces nothing; one added later is announced', async ($, on) => {
+  const { r, now } = changing(on)
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+  now.facts = [F1]
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
+  expect(r.toasts).toEqual(['1 invariant(s) recorded for src/a.ts'])
+})
+
+test('S2: an invariant that was announced is not announced again on the next touch', async ($, on) => {
+  const { now } = changing(on)
+  now.facts = [F1]
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+})
+
+test('S3: a replacement announces only the new invariant, and so does an addition', async ($, on) => {
+  const { now } = changing(on)
+  now.facts = [F1]
+  await $.tool.call(edit(FILE))
+
+  now.facts = [F2]
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F2)])
+
+  now.facts = [F1, F2, fact(3, 'third rule')]
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(fact(3, 'third rule'))])
+})
+
+test('S4: deny-once denies the first attempt naming its handles, and the re-issued edit goes through', { options: { sentinel_mode: 'deny-once' } }, async ($, on) => {
+  const { r, now } = changing(on)
+  now.facts = [F1]
+
+  const first = await $.tool.call(edit(FILE))
+  expect(denyOf(first)).toBe(blockOf(F1) + '\nRe-issue the edit if it respects these.')
+  expect(r.ran.length).toBe(0)
+
+  const again = await $.tool.call(edit(FILE))
+  expect(denyOf(again)).toBeUndefined()
+  expect(r.ran.length).toBe(1)
+
+  now.facts = [F1, F2]
+  expect(denyOf(await $.tool.call(edit(FILE)))).toBe(blockOf(F2) + '\nRe-issue the edit if it respects these.')
+})
+
+test('S5: a call refused from below takes back exactly the handles it announced', async ($, on) => {
+  const { r, now } = changing(on)
+  now.facts = [F1]
+  await $.tool.call(edit(FILE))
+
+  now.facts = [F1, F2]
+  r.control.deny = 'no'
+  expect(denyOf(await $.tool.call(edit(FILE)))).toBe('no')
+  r.control.deny = undefined
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F2)])
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+})
+
+test('S5: a call that throws takes its handles back too', async ($, on) => {
+  const { r, now } = changing(on)
+  now.facts = [F1]
+  r.control.fail = true
+  await expect($.tool.call(edit(FILE))).rejects.toThrow()
+  r.control.fail = false
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
+})
+
+test('S7: after a lookup failure the key is skipped for 60 s, then retried', async ($, on) => {
+  let broken = true
+  const r = rig(on, {
+    path: () => (broken ? { status: 500, json: { error: 'down' } } : { status: 200, json: { entity_path: 'src/a.ts', repo: '/repo', facts: [F1] } }),
+  })
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+  expect(pathFactsCalls(r).length).toBe(1)
+  broken = false
+
+  await r.clock.advance(59_999)
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+  expect(pathFactsCalls(r).length).toBe(1)
+
+  await r.clock.advance(1)
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
+  expect(pathFactsCalls(r).length).toBe(2)
+})
+
+test('S8: after the session id changes, an invariant is announced to the main agent again', async ($, on) => {
+  const { r, now } = changing(on)
+  now.facts = [F1]
+  await $.tool.call(edit(FILE))
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+
+  r.router.sessionId = () => 'session-B'
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+})
+
+test('S8: a reload keeps the session, so nothing is announced again', async ($, on) => {
+  const r = rig(on, { path: answer([F1]) })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.tool.call(edit(FILE))
+
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+  expect(r.toasts.length).toBe(1)
+})
+
+const KEY = `\0${FILE}`
+
+/** Seeds the sentinel atom with a raw stored value, as the host keeps it. */
+function seedSentinel(on: On, raw: unknown) {
+  on('state.get', { plugin: 'engram', key: 'sentinel' } as never, () => ({ value: { value: raw, version: 1 } }) as never)
+  on('state.set', { plugin: 'engram', key: 'sentinel' } as never, () => ({ value: { isSet: true, version: 2 } }) as never)
+}
+
+test('S9: a stored current-shape atom that already holds f1 is read: f1 is not announced', async ($, on) => {
+  const r = rig(on, { path: answer([F1]) })
+  seedSentinel(on, { shape: SENTINEL_SHAPE, value: { session: 'claude-session-1', seen: { [KEY]: ['f1'] }, failedAt: {} } })
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+  expect(r.ran.length).toBe(1)
+})
+
+test('S9: an atom written with no shape tag is declined even when it looks current', async ($, on) => {
+  const r = rig(on, { path: answer([F1]) })
+  seedSentinel(on, { session: 'claude-session-1', seen: { [KEY]: ['f1'] }, failedAt: {} })
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
+  expect(r.ran.length).toBe(1)
+})
+
+test('S9: an atom under an older shape tag is declined', async ($, on) => {
+  const r = rig(on, { path: answer([F1]) })
+  seedSentinel(on, { shape: 'sentinel-1', value: { session: 'claude-session-1', seen: { [KEY]: ['f1'] }, failedAt: {} } })
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
+})
+
+test('S9: the 1.3.11 atom, a string[] seen with no session, gives fresh state and does not throw', async ($, on) => {
+  const r = rig(on, { path: answer([F1]) })
+  seedSentinel(on, { seen: [KEY], failedAt: {} })
+
+  expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
+  expect(r.ran.length).toBe(1)
+})
+
+for (const how of ['refused', 'throws'] as const) {
+  test(`S10: a call that ${how} after the session id changed leaves the new session's announced handles alone`, async ($, on) => {
+    const { r, now } = changing(on)
+    now.facts = [F1]
+    let open!: () => void
+    r.control.gate = new Promise<void>((resolve) => (open = resolve))
+    if (how === 'refused') r.control.deny = 'no'
+    else r.control.fail = true
+
+    const inFlight = $.tool.call(edit(FILE))
+    const outcome = inFlight.then(
+      (v) => v,
+      (err) => err,
+    )
+    for (let i = 0; i < 100 && r.control.reached !== true; i++) await r.clock.advance(0)
+    expect(r.control.reached).toBe(true)
+
+    r.router.sessionId = () => 'session-B'
+    expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
+
+    open()
+    const done = await outcome
+    if (how === 'refused') expect(denyOf(done)).toBe('no')
+    else expect(done).toBeInstanceOf(Error)
+
+    expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+    expect(pathFactsCalls(r).length).toBe(3)
+  })
+}

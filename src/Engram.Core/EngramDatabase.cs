@@ -20,7 +20,7 @@ namespace Engram.Core;
 /// </remarks>
 public static class EngramDatabase
 {
-    public const int SchemaVersion = 16;
+    public const int SchemaVersion = 17;
 
     public const int BusyTimeoutMilliseconds = 5000;
 
@@ -524,6 +524,23 @@ public static class EngramDatabase
                 """);
 
             WriteMeta(connection, null, "schema_version", "16");
+        }
+
+        if (from < 17)
+        {
+            // Creates no state, but unlike ix_fact_thread at v5 it is load-bearing: the tail's
+            // retraction lookup names it with INDEXED BY, so a store without it fails that query
+            // rather than scanning. Partial on new_fact_id IS NULL so supersessions that have a
+            // successor, the bulk of the table, cost no write and are never matched.
+            Execute(
+                connection,
+                null,
+                """
+                CREATE INDEX IF NOT EXISTS ix_supersession_retracted ON supersession(created_at)
+                  WHERE new_fact_id IS NULL;
+                """);
+
+            WriteMeta(connection, null, "schema_version", "17");
         }
     }
 

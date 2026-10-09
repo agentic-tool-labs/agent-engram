@@ -20,7 +20,13 @@ public sealed record ModRequest(
     [property: JsonPropertyName("evidence")] string? Evidence = null,
     [property: JsonPropertyName("since")] long? Since = null,
     [property: JsonPropertyName("path")] string? Path = null,
-    [property: JsonPropertyName("predicate")] string? Predicate = null);
+    [property: JsonPropertyName("predicate")] string? Predicate = null,
+    [property: JsonPropertyName("after")] long? After = null,
+    [property: JsonPropertyName("closed_after")] long? ClosedAfter = null,
+    [property: JsonPropertyName("event_epoch")] string? EventEpoch = null,
+    [property: JsonPropertyName("event_after")] long? EventAfter = null,
+    [property: JsonPropertyName("scope")] string? Scope = null,
+    [property: JsonPropertyName("limit")] int? Limit = null);
 
 public sealed record ModError(
     [property: JsonPropertyName("error")] string Error,
@@ -110,6 +116,50 @@ public sealed record ModPathFactsResponse(
     [property: JsonPropertyName("repo")] string? Repo,
     [property: JsonPropertyName("facts")] ModPathFact[] Facts);
 
+public sealed record ModTailWrite(
+    [property: JsonPropertyName("handle")] string Handle,
+    [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("created_at")] long CreatedAt,
+    [property: JsonPropertyName("origin")] string Origin,
+    [property: JsonPropertyName("body")] string Body,
+    [property: JsonPropertyName("evidence")] string? Evidence,
+    [property: JsonPropertyName("replaces")] string? Replaces,
+    [property: JsonPropertyName("live")] bool Live,
+    [property: JsonPropertyName("this_session")] bool ThisSession);
+
+public sealed record ModTailWrites(
+    [property: JsonPropertyName("rows")] ModTailWrite[] Rows,
+    [property: JsonPropertyName("skipped")] long? Skipped);
+
+public sealed record ModTailRetraction(
+    [property: JsonPropertyName("handle")] string Handle,
+    [property: JsonPropertyName("id")] long Id,
+    [property: JsonPropertyName("retracted_at")] long RetractedAt,
+    [property: JsonPropertyName("reason")] string Reason,
+    [property: JsonPropertyName("body")] string Body,
+    [property: JsonPropertyName("origin")] string Origin,
+    [property: JsonPropertyName("this_session")] bool ThisSession);
+
+public sealed record ModTailRetractions(
+    [property: JsonPropertyName("rows")] ModTailRetraction[] Rows);
+
+public sealed record ModTailEvent(
+    [property: JsonPropertyName("seq")] long Seq,
+    [property: JsonPropertyName("record")] TelemetryRecord Record);
+
+public sealed record ModTailEvents(
+    [property: JsonPropertyName("epoch")] string Epoch,
+    [property: JsonPropertyName("head")] long Head,
+    [property: JsonPropertyName("rows")] ModTailEvent[] Rows,
+    [property: JsonPropertyName("skipped")] long? Skipped);
+
+public sealed record ModTailResponse(
+    [property: JsonPropertyName("head")] long Head,
+    [property: JsonPropertyName("now")] long Now,
+    [property: JsonPropertyName("writes")] ModTailWrites Writes,
+    [property: JsonPropertyName("retractions")] ModTailRetractions Retractions,
+    [property: JsonPropertyName("events")] ModTailEvents? Events);
+
 [JsonSerializable(typeof(ModRequest))]
 [JsonSerializable(typeof(ModError))]
 [JsonSerializable(typeof(ModRecallResponse))]
@@ -119,4 +169,5 @@ public sealed record ModPathFactsResponse(
 [JsonSerializable(typeof(ModRememberResponse))]
 [JsonSerializable(typeof(ModCapturesResponse))]
 [JsonSerializable(typeof(ModPathFactsResponse))]
+[JsonSerializable(typeof(ModTailResponse))]
 public sealed partial class ModApiJsonContext : JsonSerializerContext;

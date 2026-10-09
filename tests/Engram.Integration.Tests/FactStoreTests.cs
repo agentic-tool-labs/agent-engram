@@ -186,6 +186,49 @@ public class FactStoreTests
     }
 
     [Fact]
+    public void Forget_WithNoSession_WritesARowWithANullSession()
+    {
+        using var fixture = new StoreFixture();
+        var written = fixture.Remember("prefers", "Tabs.");
+
+        FactStore.Forget(fixture.Connection, written.FactId, "asked to forget", T0.AddHours(1));
+
+        Assert.Equal(1L, fixture.Scalar("SELECT COUNT(*) FROM supersession WHERE session_id IS NULL;"));
+    }
+
+    [Fact]
+    public void Forget_WithASession_StampsThatSessionRowOnTheSupersession()
+    {
+        using var fixture = new StoreFixture();
+        var written = fixture.Remember("prefers", "Tabs.");
+        var sessionRow = SessionStore.EnsureSession(fixture.Connection, null, "asker", T0);
+
+        FactStore.Forget(fixture.Connection, written.FactId, "asked to forget", T0.AddHours(1), sessionRow);
+
+        Assert.Equal(
+            sessionRow,
+            fixture.Scalar($"SELECT session_id FROM supersession WHERE old_fact_id = {written.FactId};"));
+    }
+
+    [Fact]
+    public void Forget_InACallersTransaction_StampsTheSessionToo()
+    {
+        using var fixture = new StoreFixture();
+        var written = fixture.Remember("prefers", "Tabs.");
+        var sessionRow = SessionStore.EnsureSession(fixture.Connection, null, "asker", T0);
+
+        using (var transaction = EngramDatabase.BeginWrite(fixture.Connection))
+        {
+            Assert.True(FactStore.Forget(fixture.Connection, transaction, written.FactId, "r", T0.AddHours(1), sessionRow));
+            transaction.Commit();
+        }
+
+        Assert.Equal(
+            sessionRow,
+            fixture.Scalar($"SELECT session_id FROM supersession WHERE old_fact_id = {written.FactId};"));
+    }
+
+    [Fact]
     public void Forget_OnAnAlreadyClosedFact_ChangesNothing()
     {
         using var fixture = new StoreFixture();

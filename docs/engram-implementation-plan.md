@@ -3902,6 +3902,11 @@ would stop delivering the kinds that were spelled correctly, the same trap a ret
 vector lane (D33). `doctor` reports configuration only; reaching the subscriber to check would make
 the check emit an event of its own.
 
+**Amended by D79.** The one reader of `telemetry.jsonl` now also runs while a memory tail is polling,
+not only while a webhook is configured, and its parsed records feed a ring as well as the
+subscribers. It is still one reader; the rule that a second one needs the starvation measurement
+above revisited is unchanged.
+
 ## D56 — The kinds that were declared and never emitted
 
 **Problem.** D55 gave the log a live subscriber, which made a gap visible that had been harmless
@@ -5467,8 +5472,8 @@ evidence or path the indexer writes, the recall line, budget and markers (D30, D
 Claude Code mods (TS function-hook plugins) need to read and write Engram in a way that is
 distinguishable from the model's own use of memory, uses the running server's warm ranker and
 embedder, and returns structured JSON. `POST /mod/v1/<op>` on the existing `engram serve` loopback
-port carries seven operations: `recall`, `fact`, `history`, `forget`, `remember`, `captures` and
-`path-facts`. The logic is `ModApi` in Core, so tier 2 drives it against a real store without HTTP;
+port carries eight operations: `recall`, `fact`, `history`, `forget`, `remember`, `captures`,
+`path-facts` and `tail` (D79). The logic is `ModApi` in Core, so tier 2 drives it against a real store without HTTP;
 the route in `ServeCommand` only enforces what is about HTTP itself.
 
 **Rejected, and why.** *Mods calling MCP tools* rides the engine's MCP connection, so the server
@@ -5483,9 +5488,9 @@ would see and could set it.
 **Its own telemetry kind.** `mod-call` carries Claude Code's session id (the hook id space, D43/D73),
 the mod name and the recall mode the caller stated, so mod activity joins `session-start` and
 `tool-observed` for free. It is written for `recall`, `remember` and `forget` only, after the
-operation succeeded; a `forget` that closed nothing writes nothing. The four lookups write nothing —
-`captures` runs once per prompt and `path-facts` once per edit, and logging them would change what
-`telemetry.jsonl` is. It never carries `fact_count`, which on a `recall` record means facts returned
+operation succeeded; a `forget` that closed nothing writes nothing. The five lookups write nothing —
+`captures` runs once per prompt, `path-facts` once per edit and `tail` every two seconds while a pane
+is open, and logging them would change what `telemetry.jsonl` is. It never carries `fact_count`, which on a `recall` record means facts returned
 to the model (D46). No `recall`, `remember` or `session-open` record is ever written by this API.
 
 **Security: same trust class as MCP, not quite the same surface.** The routes inherit the 127.0.0.1
@@ -5600,3 +5605,126 @@ yet measured (E13, E14).
 **Not changed.** `UserStatementClassifier`, what a capture writes, the D56 `user-prompt` record and its
 placement after the "stored" guard, the restatement no-op, the 262,144-byte first read, the database-open count on the
 path, and the rule that `-p` prompts are never captured.
+
+
+## D79 — The live memory tail reads three sources and one in-process hook, and logs none of itself
+
+**Question.** Jim wants to watch memory activity as it happens, and toasts replace each other. What
+feeds a pane that shows fact writes from every writer, retractions, and every recorded activity kind,
+without changing what a hook costs or what the telemetry log is?
+
+**Decision.** `POST /mod/v1/tail` returns three independently cursored lists, and the `tail` mod
+(`/engram-tail`, the Memory Tail pane) merges them with this session's own Engram MCP calls.
+
+| List | Source | Cursor |
+|---|---|---|
+| writes | `fact`, `regenerable = 0` | rowid, exact |
+| retractions | `supersession` with `new_fact_id IS NULL` | `created_at`, 10 s slack |
+| events | the server's ring of parsed telemetry records | `(epoch, seq)` |
+
+**Why these sources.** *Writes from `fact`, not telemetry:* no record carries a fact id or body, and the
+CLI writers (`directive`, `invariant`, `import`, `backup replay`, sync) emit none. Writes are
+`BEGIN IMMEDIATE` (D4), so rowids are assigned in commit order inside the writer lock and a reader at
+N never later finds an unseen id ≤ N; a `created_at` cursor would be unindexed, tie at the second and
+move when the clock steps. The cursor advances to the store's max rowid, never the last row returned,
+because a burst returns the newest N and the rest are counted in `skipped`. *Retractions from
+`supersession`:* `FactStore.Forget` is the one retraction write and there is no `forget` telemetry
+kind. *Activity from a ring, not a file read in the op:* a second reader of the log is what D55
+forbids without revisiting starvation.
+
+**Two session id spaces, and why scope splits on them.** MCP tools identify a session by the
+transport `Mcp-Session-Id` (`ServeCommand.ResolveSessionId`), not Claude Code's id, so the two never
+meet (D43). Measured on the real log when the spec was written: 0 of 28 `recall` and 0 of 45
+`remember` records share a `session_id` with any of 48 `session-start` ids, while 41 of 41 `mod-call`
+records do. A server-side `scope=session` therefore hides the model's own recalls, remembers,
+revisions and forgets — most of what there is to watch. So under `scope=session` the mod observes
+this session's Engram tool calls in-process through `tool.call`, as the Lens already does for recall,
+and records them as `c<n>` rows only while the pane is open (no backlog). The server's session filter
+covers everything keyed by the Claude Code id: captures, digest saves, mod `remember` and `forget`,
+the compaction harvester, and the hook kinds. Under `all` the telemetry events already carry the
+calls, so the hook records nothing. Mapping transport ids to Claude Code ids by time and query
+proximity was rejected: it is a guess, ambiguous when two sessions act in the same second, and a wrong
+attribution is worse than none. A transport id is never matched against a Claude Code id anywhere.
+
+**`Forget` stamps its caller.** Both overloads take an optional session row id, written to
+`supersession.session_id`. MCP `engram_forget` stamps the transport id's row (the id space every other
+MCP write uses); the mod `forget` stamps the request's Claude Code id; the CLI, `SessionFacts` and
+`CodeIndexer` pass none, so their rows are unchanged. Both resolve the row through
+`SessionStore.EnsureSession`, the call `SessionFacts.Append` makes.
+
+**`tail` writes no telemetry.** It is a lookup (D76). A two-second poll that recorded itself would add
+about 1,800 records an hour to the file D18, D43 and the webhook read. There is no remember-to-fact
+join (Q5, refused): the `remember`, `revise` and `user-prompt` records stay `{timestamp, session_id,
+kind}`, and under `scope=session` the call rows carry the handle anyway, from the tool result.
+
+**Retractions and the slack.** A writer stamps `now` before taking the lock and can then wait up to
+`busy_timeout` (5000 ms), so a retraction may commit after a later-stamped one was already read.
+Reading from `closed_after - 10` covers that wait plus rounding to whole seconds; the dedupe key is
+`old_fact_id`, the primary key, so a fact retracts at most once. `CodeIndexer`'s forgets
+(`regenerable = 1`) are excluded, and a close with a successor is the successor's `revision` write,
+not a retraction. One additive partial index, `ix_supersession_retracted ON supersession(created_at)
+WHERE new_fact_id IS NULL` (schema 17), because without it every poll scans every retraction ever
+made, a set that grows with each reindex. **Measured, and the obvious query was wrong twice**, on
+SQLite 3.54 with 20,000 rows of which 400 were retractions, `ANALYZE` run: (1) the planner still
+prefers `ix_supersession_new (new_fact_id=?)` plus a temp b-tree sort for `new_fact_id IS NULL`,
+reading exactly the set the new index exists to avoid, so the query names its index with `INDEXED BY`;
+(2) scoped to a session, it starts at `session.external_id` and walks every fact of the session
+through `ix_fact_session` instead of seeking the rowid range, so the session filter is written
+`+s.external_id = $session`. The plan test runs the real SQL constants, so it cannot drift from the
+query. The earlier version of a thread (`replaces`) resolves through `ix_supersession_new`, never
+through `fact.superseded_by`, which has no index.
+
+**The reader runs only on demand.** `TelemetryFeed` in Core owns exactly one `TelemetryTail`, a
+1024-record ring and an epoch. The reader exists while a webhook is configured (for the life of the
+process, as before) or while a `tail` request arrived in the last 10 s; the first request starts it at
+end-of-file, and a lapse stops it. Each start begins a new epoch: records written while it was stopped
+are gone, and a consumer comparing sequence numbers across the gap would read the hole as continuity.
+`Poll` fills the ring before it returns the batch, so a hanging subscriber never delays records
+already read. It *can* delay the next read, because the one loop both reads and delivers: by at most
+the delivery timeout times the number of unmuted URLs that hang. Each failing URL gets one attempt per
+poll and is then muted (2 s doubling to 30 s), so a persistently hanging URL costs about one timeout
+per mute expiry. A pump independent of delivery was rejected: it would change webhook semantics
+(today a slow subscriber delays the others' delivery; the alternative would drop their batches), and
+the stall only exists when a webhook URL is configured and hangs. `WebhookService` keeps its two-argument
+constructor, so `WebhookServiceTests` are unedited; its loop now runs without a subscriber too,
+because it is the only thing that pumps the feed. With no webhook and no open tail no reader exists,
+as today; with a tail open the starvation exposure equals today's webhook-configured exposure.
+
+**Q6 defaults.** The pane's filter starts with Sessions and Maintenance off, everything else on. The
+filter is client-side and groups exist only for toggling: a row's label is always its own kind,
+origin or tool name.
+
+**Deferred: push.** `$.http.fetch` has no streaming body, no timeout option and no cancellation, the
+host aborts it at 30 s, and the shared client clamps every call to 2 s, so the mod can neither hold a
+stream nor long-poll. No SSE endpoint is built. Every future push design is a wake-up only, with data
+still coming from one `tail` read and a 30 s poll heartbeat. Ranked: a mod-visible file watch on
+`engram.db-wal` and `telemetry.jsonl` (E10), the existing webhook as the sender (E8), a long-lived
+`$.process.run` child (E9). A `PRAGMA data_version` fast path on a held connection is built only if E1
+shows an idle poll above 1 ms of server time.
+
+**Ceilings.** `Sync.ApplyClose` with an unsynced successor writes no `supersession` row, so a remote
+forget is not shown. There is no pane-closed event, so a pane closed by hand keeps polling until
+`/engram-tail` runs again or the session ends. `events.skipped` counts ring overflow across all
+sessions, because an evicted record's session id is no longer known, so under `scope=session` it can
+exceed what the session lost.
+
+**Command names.** The host does not add the plugin prefix to mod commands. This was observed live: a mod command registered as `lens` was reached as a bare `/lens`. It is the citable source for the claim in `plugin/mods/lens/index.tsx`'s comment and in README.md.
+
+**Post-build checks.** E1, E5, E6 and E7 were measured on the published binary built from `325beaa`
+(Native AOT, osx-arm64, 25,452,440 bytes), against disposable homes seeded with synthetic facts and a
+server on its own port, never the live instance. Stores of 5,308 and 50,097 live facts (the exact sizes
+the bounds were written for) carry 1,345 authored facts across 40 sessions, the rest regenerable code
+facts, plus 600 supersessions of which 150 are retractions; a history-heavy variant carries 12,000 and
+3,000. Caveats that change how to read them: the seeded corpus is synthetic, not a copy of the real
+store; the client is a Python loopback harness, so figures include its own overhead; bursts used
+`engram index --apply` over eight local repositories, which add 17,740 facts in 24.7 s (5,308 base)
+and 52.7 s (50,097 base) rather than the ~45k the spec names, because tier 1 had no tree-sitter
+grammars and most files took tier 0; E2, E3 and E4 are live-session checks and are still pending.
+
+| ID | Measure | Decision rule |
+|---|---|---|
+| E1 | **Measured, idle and first read pass; burst has isolated outliers over 50 ms.** Idle poll, back to back, alternating arms: p50 0.19 ms / p95 0.21 at 5,308 and p50 0.19 / p95 0.23 at 50,097, against a 1 ms bound (the `data_version` fast path stays unbuilt). Same binary against itself: p50 differs by 0.013 ms at both sizes, so differences below ~0.02 ms are noise. First read: p50 0.20 ms (5,308), 0.19 ms (50,097); `scope=all` 0.15 ms. At the mod's 2 s cadence, 30 polls: p50 0.75 ms at 5,308 and 1.01 ms at 50,097 (cold connection each), server CPU 0.04 s and 0.06 s per 60 s polled against 0.02 s unpolled, which is the ps resolution (10 ms) and so an upper bound on about 0.03% of a core. A cursor reset to `after=0` on 50,097 facts, whose newest 48k rows are regenerable, costs 3.7 ms p50 (4.6 max): the descending rowid scan skips regenerable rows and is O(rows above the newest authored one), harmless at this size. During `index --apply`, polling every 100 ms: at 5,308 + 17,740 facts, session-scope p50 0.75 / p95 5.3 / p99 12.6 / max 27.7 ms and `scope=all` p50 0.44 / p95 4.8 / p99 27.0 / max **100.5 ms**; at 50,097 + 17,740 facts, session p50 0.69 / p95 2.2 / p99 2.9 / max **74.7 ms** and all p50 0.39 / p95 1.9 / max 10.2 ms. A single 5,496-fact index added max 69.5 ms (session 49.5). The p50, p95 and p99 are inside the 50 ms bound but the maxima, one poll in 223 to 483, are not. A control with 18 CPU-bound processes and no database writes reached p50 2.4 / p95 10.2 / max 14.5 ms, so CPU contention explains the p95 but not the 70 to 100 ms outliers; their cause (checkpoint, writer lock, scheduling) is **not established**. No poll returned non-200 in any run | Idle p50 > 5 ms: cadence 5 s (Architect). > 1 ms: consider the `data_version` fast path. Burst > 50 ms: Architect |
+| E5 | **Measured on seeded stores (no copy of the real store was taken), sqlite3 3.54.0, 30 warm runs each.** Without `INDEXED BY` the planner picks `ix_supersession_new` even with `ix_supersession_retracted` present, and picks the same plan when the index is absent, which confirms the reason for the hint on the SQL the server runs. With 600 supersessions (150 retractions) at both 5,308 and 50,097 live facts the shipped query is 0.013 ms p50 against 0.039 ms unhinted: both negligible. With 12,000 supersessions (3,000 retractions) at 50,097 live facts: all-history window 0.013 ms hinted against 0.462 ms unhinted (35x); session scope 0.207 against 0.274 ms; last-10-minutes window 0.009 against 0.105 ms (12x). So the hint's value scales with retraction history, not corpus size, and the unhinted form is still sub-millisecond at 15,000 rows. Not measured: the hinted statement against a store lacking the index, which errors rather than scans | Record here |
+| E6 | **Measured: retrying-kind loss 0 of 3,057, so the bound holds; spool loss 0 of 25,200 and torn lines 0.** Twelve arms of 60 rounds each, 20 or 50 concurrent `hook file-touched` per round plus one `hook subagent-start` (500 ms budget) in a loop, order ON, off, off, ON then two off/off pairs, a fresh 5,308-fact home each. Reader ON was a server held in demand by a `scope=all` poll every 100 ms. `file-touched` records lost, of 1,200 per arm at 20 editors: ON 11 and 5 (0.67% together), off 10, 3, 1, 1 (0.31%); of 3,000 per arm at 50 editors: ON 15 and 15 (0.50%), off 10, 10, 14, 17 (0.43%). The off/off pairs differ by 7 and 0 records at 20 and by 0 and 3 at 50, which is the harness noise, and it is as large as the ON-versus-off gap, so **no reader effect on `file-touched` loss is measurable here**; the loss is 0.1 to 1% in every arm, consistent with D56's 1.6 to 2.0%. Nothing was added to CLAUDE.md because the number does not change its text | Retrying-kind loss > 0: Architect. Otherwise record here and in CLAUDE.md |
+| E7 | **Measured: no sustained lag above 5 s up to the cap; above the cap lag grows past 5 s.** Event rate: 0 records in 60 s idle (ring head stayed 0 on a polled server); during `index --apply` the only kind that appeared was `index` (`started` and `finished`), 16 records over 24.7 s and over 52.7 s, i.e. under 1 record/s, so neither the burst nor the freshness loop comes near the cap. Reader lag was measured with a synthetic appender writing real `file-touched` records straight to `telemetry.jsonl` at a fixed rate for 20 s, with a `scope=all` poll, lag being poll time minus write time of the newest row returned (so it includes up to one poll interval): 1/s p50 1.0 s; 20/s p50 0.16 s, max 0.25 s; 64/s p50 0.32, p95 1.27, max 2.10 s; 100/s p50 0.43, p95 1.29, max 2.08 s; 128/s at a 2 s poll p50 0.21, p95 1.43, max 2.11 s with at most 83 lines behind; 128/s at a 0.5 s poll p50 0.28, max 0.62 s. At **200/s** (above the cap) p50 4.87 s, p95 8.48 s, max 8.87 s and 1,466 lines behind and still growing at the end of the run, so the 5 s bound is crossed there, as the arithmetic of a 128/s cap requires. Pane rows under `all`: the pane is handed at most `limit` rows per poll, 50 in these runs, so 25 rows/s at the 2 s cadence whatever the input rate; `skipped` carries the rest (771 skipped over the 64/s run, 2,445 over the 200/s run). Caveat: the appender does not take `FileShare.None` as `DurableAppend` does, so this measures the reader, not writer contention | Sustained lag > 5 s: Architect |
+| E2, E3, E4 | Whether a closed pane stops being listed, whether `$.state` atoms survive reload, `/clear` and resume, whether a pane follows its bottom edge | Amend or document, per the spec |

@@ -123,7 +123,7 @@ test('the pane keeps the newest twenty of twenty-five recalls', async ($, on) =>
   expect(headers[19]!.startsWith('"q5" · ')).toBe(true)
 })
 
-test('session.start registers /lens and still reaches the engine', async ($, on) => {
+test('session.start registers /engram-lens and still reaches the engine', async ($, on) => {
   const registered: string[] = []
   on('command.register', (_$, e) => (registered.push((e as { name: string }).name), { value: undefined }) as never)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -131,7 +131,7 @@ test('session.start registers /lens and still reaches the engine', async ($, on)
   await $.session.start({ cwd: '/anywhere', surface: 'terminal', isInteractive: true } as never)
 
   // Other mods register their own commands on the same event; the lens registers exactly one.
-  expect(registered.filter((name) => name === 'lens')).toEqual(['lens'])
+  expect(registered.filter((name) => name === 'engram-lens')).toEqual(['engram-lens'])
 })
 
 test('turn.start passes through', async ($, on) => {
@@ -225,13 +225,13 @@ test('History for a handle the server does not know says unavailable', async ($,
   expect(await pane.find({ text: /history unavailable/ })).toBeDefined()
 })
 
-test('/lens opens the pane, then closes it', async ($, on) => {
+test('/engram-lens opens the pane, then closes it', async ($, on) => {
   const seen: string[] = []
   on('ui.open', (_$, e) => (seen.push(`open:${(e as { id: string }).id}`), { value: { isPlaced: true } }) as never)
   on('ui.close', (_$, e) => (seen.push(`close:${(e as { id: string }).id}`), { value: undefined }) as never)
 
-  await $.command.run({ command: 'lens' } as never)
-  await $.command.run({ command: 'lens' } as never)
+  await $.command.run({ command: 'engram-lens' } as never)
+  await $.command.run({ command: 'engram-lens' } as never)
 
   expect(seen).toEqual(['open:engram-lens', 'close:engram-lens'])
 })
@@ -239,9 +239,43 @@ test('/lens opens the pane, then closes it', async ($, on) => {
 test('lens_auto_open opens the pane once, on the first recall only', { options: { lens_auto_open: true } }, async ($, on) => {
   const opened: string[] = []
   on('ui.open', (_$, e) => (opened.push((e as { id: string }).id), { value: { isPlaced: true } }) as never)
+  on('session.id', () => ({ value: 'session-A' }))
   answerRecall(on, DIGEST)
 
   await $.tool.call(recallCall('t1'))
+  await $.tool.call(recallCall('t2'))
+
+  expect(opened).toEqual(['engram-lens'])
+})
+
+test('L1: lens_auto_open opens again for the first recall of a new session', { options: { lens_auto_open: true } }, async ($, on) => {
+  const opened: string[] = []
+  let session = 'session-A'
+  on('ui.open', (_$, e) => (opened.push((e as { id: string }).id), { value: { isPlaced: true } }) as never)
+  on('session.id', () => ({ value: session }))
+  answerRecall(on, DIGEST)
+
+  await $.tool.call(recallCall('t1'))
+  await $.tool.call(recallCall('t2'))
+  expect(opened).toEqual(['engram-lens'])
+
+  session = 'session-B'
+  await $.tool.call(recallCall('t3'))
+  await $.tool.call(recallCall('t4'))
+
+  expect(opened).toEqual(['engram-lens', 'engram-lens'])
+})
+
+test('L2: a reload keeps the session, so the next recall does not open the pane again', { options: { lens_auto_open: true } }, async ($, on) => {
+  const opened: string[] = []
+  on('ui.open', (_$, e) => (opened.push((e as { id: string }).id), { value: { isPlaced: true } }) as never)
+  on('session.id', () => ({ value: 'session-A' }))
+  on('command.register', (_$, e) => ({ value: { command: (e as { name: string }).name } }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  answerRecall(on, DIGEST)
+
+  await $.tool.call(recallCall('t1'))
+  await $.session.start({ cwd: '/anywhere', surface: 'terminal', isInteractive: true } as never)
   await $.tool.call(recallCall('t2'))
 
   expect(opened).toEqual(['engram-lens'])

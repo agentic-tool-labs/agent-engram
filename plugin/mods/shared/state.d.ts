@@ -9,8 +9,11 @@ export type SharedState = {
   port: number | null
   /** When the last lookup or connection failed to yield a port (`io.now()`), `null` if none yet. */
   noPortAt: number | null
-  /** The server answered 404 to the mod API: no further calls this session. */
-  unsupported: boolean
+  /**
+   * When the server last answered 404 to the mod API (`io.now()`), `null` if never. Calls short-circuit
+   * as unsupported for a while after it; a 404 describes the server instance that answered, so it expires.
+   */
+  unsupportedAt: number | null
 }
 
 export type HistoryVersion = {
@@ -58,6 +61,8 @@ export type LensRecall = {
 }
 
 export type LensState = {
+  /** The session id `autoOpened` belongs to; a different current id resets it. */
+  session?: string
   /** Newest first, at most 20. */
   recalls: LensRecall[]
   currentTurnId?: string
@@ -65,9 +70,9 @@ export type LensState = {
   history: Record<string, HistoryView | 'loading' | 'unavailable' | 'failed'>
   /** Index into a loaded history's versions, keyed by fact handle; absent means the newest. Optional so readers of the recalls (the band) can build a LensState without it. */
   selected?: Record<string, number>
-  /** Whether `/lens` last left the pane open. */
+  /** Whether `/engram-lens` last left the pane open. */
   paneOpen?: boolean
-  /** The pane has already been opened by `lens_auto_open` this session. */
+  /** The pane has already been opened by `lens_auto_open` in the session named by `session`. */
   autoOpened?: boolean
 }
 
@@ -99,16 +104,20 @@ export type BandState = {
 }
 
 export type ToastsState = {
-  /** Fact handles already announced. */
+  /** The session id `shown` belongs to; a different current id resets it. */
+  session?: string
+  /** Fact handles toasted in the session named by `session`. */
   shown: string[]
 }
 
 export type SentinelState = {
-  /** Paths already announced, keyed by agentId + path for subagents. */
-  seen: string[]
+  /** The session id `seen` and `failedAt` belong to; a different current id resets them. */
+  session?: string
+  /** Invariant handles already announced, keyed by agentId + path so a subagent has its own set. */
+  seen: Record<string, string[]>
   /** Last API failure time per path (`io.now()`), for the 60 s skip. */
   failedAt: Record<string, number>
-  /** What the `engram-why` pane shows; absent until `/why` ran. */
+  /** What the `engram-why` pane shows; absent until `/engram-why` ran. */
   why?: {
     path: string
     state: 'loading' | 'ready' | 'unsupported' | 'unavailable'
@@ -136,6 +145,72 @@ export type DigestState = {
   candidates: DigestCandidate[]
 }
 
+/** The pane's toggles; a row belongs to exactly one, and a marker to none. */
+export type TailGroup =
+  | 'writes'
+  | 'retractions'
+  | 'reads'
+  | 'remember'
+  | 'mods'
+  | 'sessions'
+  | 'maintenance'
+  | 'other'
+
+export type TailRow = {
+  /** `w<id>`, `r<id>`, `e<epoch>:<seq>`, `c<n>` or `m<n>`; a row with an existing key replaces it. */
+  key: string
+  /** Epoch milliseconds the row sorts by. */
+  ms: number
+  /** Breaks a tie in `ms`: writes 0, retractions 1, activity 2, markers 3. */
+  rank: number
+  /** Breaks a tie in `ms` and `rank`. */
+  id: number
+  kind: 'write' | 'retraction' | 'event' | 'call' | 'marker'
+  group: TailGroup | null
+  /** The exact kind, origin or tool name; empty on a marker. */
+  label: string
+  handle?: string
+  /** Follows the label on the head line: `← fN` on a revision, the retracted fact's origin on a retraction. */
+  qualifier?: string | undefined
+  /** The detail line after the handle: free text last. */
+  text: string
+  /** Known to be this session's. */
+  mine: boolean
+  retracted: boolean
+}
+
+export type TailState = {
+  /** Whether `/engram-tail` last left the pane open. */
+  paneOpen: boolean
+  /** Whether the list of eight group toggles is shown under the Filter button. */
+  filterOpen: boolean
+  /** Newest first, at most 200. */
+  rows: TailRow[]
+  /** Write cursor: the store's head at the last read. Absent until the first read. */
+  after?: number
+  /** Retraction cursor, in the server's unix seconds. */
+  closedAfter?: number
+  /** Activity feed epoch and the last sequence number seen in it. */
+  epoch?: string
+  eventAfter?: number
+  callSeq: number
+  markerSeq: number
+  /** Handles known to be this session's, from its own Engram calls and the rows the server marked. */
+  handles: string[]
+  groups: Record<TailGroup, boolean>
+  /** The line shown above the rows; absent when the last request succeeded. */
+  status?: string | undefined
+  /** When the last poll succeeded (`io.now()`, ms); set on success only, so it stops advancing when polls fail. */
+  lastOkAt?: number | undefined
+}
+
+export type TailSessionState = {
+  /** The session id `autoOpened` belongs to; a different current id resets it. */
+  session?: string
+  /** The first prompt of the session named by `session` has already been through the auto-open. */
+  autoOpened: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
     engram: {
@@ -143,9 +218,11 @@ declare module 'claude-code' {
       lens: LensState
       band: BandState
       toasts: ToastsState
-      sentinel: SentinelState
+      sentinel: Shaped<SentinelState>
       beliefDiff: BeliefDiffState
       digest: DigestState
+      tail: Shaped<TailState>
+      'tail-session': Shaped<TailSessionState>
     }
   }
 }

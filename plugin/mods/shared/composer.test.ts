@@ -20,7 +20,8 @@ test('every mod that takes session.start runs when the plugin loads', async (eng
   await eng.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
   await clock.advance(0)
 
-  expect(registered).toContain('digest-review')
-  expect(registered).toContain('remember-selection')
+  expect(registered).toContain('engram-digest-review')
+  expect(registered).toContain('engram-remember-selection')
+  expect(registered).toContain('engram-tail')
   expect(router.processCalls.some((c) => c.argv.includes('--status'))).toBe(true)
 })

@@ -1,6 +1,6 @@
 {
   "name": "engram",
-  "version": "1.3.0",
+  "version": "1.3.15",
   "description": "Local-only temporal memory for Claude Code sessions. Adds an MCP server, ten /engram: slash commands, and SessionStart, SubagentStart, UserPromptSubmit, PreCompact, PreToolUse, and file-touched hooks backed by a single-binary, append-only SQLite store at ~/.engram — no account, and nothing that leaves your machine: the server listens on 127.0.0.1 only. Facts are never mutated or deleted, only superseded, with the reason for every revision recorded.",
   "author": {
     "name": "Jim Cline"
@@ -20,7 +20,7 @@
     "lens_auto_open": {
       "type": "boolean",
       "title": "Open the memory lens automatically",
-      "description": "Open the memory lens pane at session start instead of waiting for the lens command.",
+      "description": "Open the memory lens pane the first time the model recalls from Engram in a session, instead of waiting for the lens command.",
       "default": false
     },
     "status_entry": {
@@ -38,42 +38,61 @@
     "chime": {
       "type": "string",
       "title": "Chime on memory activity",
-      "description": "Play a sound when Engram captures a fact, answers a recall, or both.",
+      "description": "Play a sound on memory activity. captures: when a fact stated in a prompt is stored; this needs 'Toast when Engram captures a fact' on, and does nothing while it is off. recalls: when the model makes a new recall that comes back with high coverage, not on every recall. both: either.",
       "default": "off",
       "options": ["off", "captures", "recalls", "both"]
     },
     "jit_mode": {
       "type": "string",
       "title": "Just-in-time primer mode",
-      "description": "off does nothing; shadow records what a per-prompt recall would have injected without injecting it; inject adds it to the prompt.",
+      "description": "off does nothing. shadow runs the same recall for each typed prompt of 12 or more characters (not a slash command) and leaves a record in the server's telemetry, without adding anything to the prompt. inject adds the recalled digest to the prompt as context, only when its coverage is high.",
       "default": "off",
       "options": ["off", "shadow", "inject"]
     },
     "jit_budget_tokens": {
       "type": "number",
       "title": "Just-in-time primer budget (tokens)",
-      "description": "Token budget for the per-prompt recall the just-in-time primer runs.",
+      "description": "Token budget for the per-prompt recall the just-in-time primer runs: a whole number from 50 to 4000; anything else uses 400.",
       "default": 400
     },
     "sentinel_mode": {
       "type": "string",
       "title": "Invariant sentinel mode",
-      "description": "What happens when an edit touches a file that has invariant facts: off, inform the model, or deny the first attempt once.",
+      "description": "What happens the first time an edit touches a file that has invariant facts (once per file per session): off does nothing; inform attaches the invariants to the edit for the model and shows a notice; deny-once refuses that first attempt with the invariants, so the model re-issues it.",
       "default": "inform",
       "options": ["off", "inform", "deny-once"]
     },
     "belief_diff_scope": {
       "type": "string",
       "title": "Belief diff scope",
-      "description": "Which revised facts the belief diff shows: off, only the user's own, or all.",
+      "description": "Which revisions the model proposes through engram_revise are put to you for approval (Approve or Keep old) before they apply: off asks about none; personal asks only about your own statements, directives and invariants; all asks about every revision.",
       "default": "personal",
       "options": ["off", "personal", "all"]
     },
     "digest_every_n_turns": {
       "type": "number",
       "title": "Automatic digest interval (turns)",
-      "description": "Run a memory digest every N turns; 0 disables it.",
+      "description": "Run a memory digest after every N completed turns of the main conversation, or sooner (from the second turn on) after a turn that edited files; 0 disables it.",
       "default": 0
+    },
+    "tail_auto_open": {
+      "type": "boolean",
+      "title": "Open the memory tail automatically",
+      "description": "Open the live memory tail pane when you send the first prompt of a session (including after /clear), instead of waiting for the tail command.",
+      "default": false
+    },
+    "tail_scope": {
+      "type": "string",
+      "title": "Memory tail scope",
+      "description": "session shows this session's writes, retractions and activity, including its own Engram calls; all shows everything from every session, the command line and the server.",
+      "default": "session",
+      "options": ["session", "all"]
+    },
+    "digest_auto_save": {
+      "type": "boolean",
+      "title": "Save digest memories without review",
+      "description": "Save what the automatic digest proposes straight away and show it in a toast, instead of waiting for you to tick and press Save. Saved facts are marked as unreviewed.",
+      "default": false
     }
   }
 }

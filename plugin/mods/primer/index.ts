@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, PromptSubmitInput, PromptSubmitResult, Register } from 'claude-code'
 import { SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
-import { ANY_PROMPT_SUBMIT } from '../shared/events'
+import { ANY_PROMPT_SUBMIT, isOwnPrompt } from '../shared/events'
 import { once } from '../shared/guard'
 
 // The scanner reads an atom's reference only from a const of the file that uses it.
@@ -61,8 +61,7 @@ export async function primePrompt(
   next: SubmitNext,
 ): Promise<PromptSubmitResult> {
   if (config.mode === 'off') return next(e)
-  if (e.origin?.kind !== 'composer') return next(e)
-  if (e.text.startsWith('/') || e.text.trim().length < MIN_PROMPT_CHARS) return next(e)
+  if (!isOwnPrompt(e) || e.text.trim().length < MIN_PROMPT_CHARS) return next(e)
 
   const mode = config.mode
   const ask = async (signal?: AbortSignal) =>

@@ -36,14 +36,15 @@ namespace Engram.Cli;
 /// </remarks>
 internal sealed class WebhookService(
     EngramHome home,
-    ILogger<WebhookService> logger) : BackgroundService
+    ILogger<WebhookService> logger,
+    TelemetryFeed? sharedFeed = null) : BackgroundService
 {
     internal static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(500);
 
     /// <summary>
     /// Records delivered per poll, so a burst drains steadily rather than in one blocking pass.
     /// </summary>
-    internal const int MaxEventsPerPoll = 64;
+    internal const int MaxEventsPerPoll = TelemetryFeed.MaxLinesPerPoll;
 
     private static readonly TimeSpan FirstMute = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan MaxMute = TimeSpan.FromSeconds(30);
@@ -57,26 +58,52 @@ internal sealed class WebhookService(
             logger.LogWarning("{Problem}", problem);
         }
 
-        if (!settings.IsEnabled)
+        // The feed owns the one reader of the log. A service built without one gets its own, which
+        // is the whole of what this class did before the feed was shared.
+        var feed = sharedFeed ?? new TelemetryFeed(home);
+
+        // With no subscriber this still loops: the feed is pumped here whether or not anything is
+        // delivered, because a memory tail may ask for it at any time and the loop is the only
+        // thing that polls it. Polling a feed nobody has asked to run is a lock and a null check.
+        IReadOnlyList<Subscriber> subscribers = [];
+        HttpClient? client = null;
+        if (settings.IsEnabled)
         {
-            return;
+            feed.HoldForWebhook();
+            subscribers = settings.Urls.Select(url => new Subscriber(url)).ToList();
         }
 
-        var path = Telemetry.ResolvePath(home);
-        var tail = new TelemetryTail(path, TelemetryTail.EndOf(path));
-        var subscribers = settings.Urls.Select(url => new Subscriber(url)).ToList();
+        if (settings.IsEnabled)
+        {
+            // One client for the life of the server. The timeout is the whole request, which is the
+            // bound that matters here — a subscriber that accepts the connection and then hangs is
+            // the failure this has to survive, not a refused one.
+            client = new HttpClient { Timeout = settings.Timeout };
 
-        // One client for the life of the server. The timeout is the whole request, which is the
-        // bound that matters here — a subscriber that accepts the connection and then hangs is
-        // the failure this has to survive, not a refused one.
-        using var client = new HttpClient { Timeout = settings.Timeout };
+            logger.LogInformation(
+                "Webhook delivering {Kinds} to {Count} subscriber(s): {Urls}",
+                settings.Kinds.Contains(WebhookSettings.EveryKind) ? "every event" : string.Join(", ", settings.Kinds),
+                subscribers.Count,
+                string.Join(", ", settings.Urls));
+        }
 
-        logger.LogInformation(
-            "Webhook delivering {Kinds} to {Count} subscriber(s): {Urls}",
-            settings.Kinds.Contains(WebhookSettings.EveryKind) ? "every event" : string.Join(", ", settings.Kinds),
-            subscribers.Count,
-            string.Join(", ", settings.Urls));
+        try
+        {
+            await RunAsync(feed, subscribers, client, settings, stoppingToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            client?.Dispose();
+        }
+    }
 
+    private async Task RunAsync(
+        TelemetryFeed feed,
+        IReadOnlyList<Subscriber> subscribers,
+        HttpClient? client,
+        WebhookSettings settings,
+        CancellationToken stoppingToken)
+    {
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -90,7 +117,13 @@ internal sealed class WebhookService(
 
             try
             {
-                await DrainAsync(tail, subscribers, client, settings, stoppingToken).ConfigureAwait(false);
+                // The batch is in the feed's ring before it comes back, so a subscriber that hangs
+                // below delays the next poll and nothing already read.
+                var batch = feed.Poll();
+                if (client is not null && batch.Count > 0)
+                {
+                    await DrainAsync(batch, subscribers, client, settings, stoppingToken).ConfigureAwait(false);
+                }
             }
             catch (Exception failure) when (failure is not OperationCanceledException)
             {
@@ -104,7 +137,7 @@ internal sealed class WebhookService(
     }
 
     private async Task DrainAsync(
-        TelemetryTail tail,
+        IReadOnlyList<FeedItem> batch,
         IReadOnlyList<Subscriber> subscribers,
         HttpClient client,
         WebhookSettings settings,
@@ -116,9 +149,9 @@ internal sealed class WebhookService(
         // all of it.
         var spent = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var line in tail.Read(MaxEventsPerPoll))
+        foreach (var (line, record) in batch)
         {
-            if (Telemetry.TryParse(line) is not { } record || !settings.Wants(record.Kind))
+            if (!settings.Wants(record.Kind))
             {
                 continue;
             }

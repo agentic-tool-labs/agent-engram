@@ -16,7 +16,7 @@ public class ModApiE2ETests
     private const string UniqueWord = "zorblax";
 
     [Fact]
-    public async Task AllSevenOps_ReturnTheirJsonShapes_AndWriteOnlyModCallRecords()
+    public async Task AllEightOps_ReturnTheirJsonShapes_AndWriteOnlyModCallRecords()
     {
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
 
@@ -72,6 +72,16 @@ public class ModApiE2ETests
         Assert.Equal(HttpStatusCode.OK, forget.Status);
         Assert.True((bool)forget.Body["retracted"]!);
 
+        var tail = await Post(http, server.Port, "tail", new JsonObject { ["session_id"] = Session });
+        Assert.Equal(HttpStatusCode.OK, tail.Status);
+        Assert.True((long)tail.Body["head"]! > 0);
+        Assert.True((long)tail.Body["now"]! > 0);
+        Assert.Empty(tail.Body["writes"]!["rows"]!.AsArray());
+        Assert.Null(tail.Body["writes"]!["skipped"]);
+        Assert.Empty(tail.Body["retractions"]!["rows"]!.AsArray());
+        Assert.False(string.IsNullOrEmpty((string)tail.Body["events"]!["epoch"]!));
+        Assert.Empty(tail.Body["events"]!["rows"]!.AsArray());
+
         var modCalls = File.ReadAllLines(Path.Combine(home.Root, "telemetry.jsonl"))
             .Select(line => JsonDocument.Parse(line).RootElement)
             .Where(record => record.GetProperty("kind").GetString() == "mod-call")
@@ -86,6 +96,85 @@ public class ModApiE2ETests
         Assert.Equal(0, KindCount(home, "recall"));
         Assert.Equal(0, KindCount(home, "remember"));
         Assert.Equal(0, KindCount(home, "session-open"));
+    }
+
+    [Fact]
+    public async Task Tail_SeesACliWritersEventUnderAll_AndNeverRecordsItself()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        using var server = StartedServer.Begin(home);
+        using var http = new HttpClient();
+        var remember = await Post(http, server.Port, "remember", new JsonObject
+        {
+            ["session_id"] = Session,
+            ["statement"] = $"The {UniqueWord} queue drains at night.",
+            ["evidence"] = "an e2e test",
+        });
+        var handle = (string)remember.Body["handle"]!;
+
+        var first = await Post(http, server.Port, "tail", new JsonObject { ["session_id"] = Session, ["scope"] = "all" });
+        var epoch = (string)first.Body["events"]!["epoch"]!;
+
+        var (exit, _, stderr) = EngramProcess.Run(home.Root, "timeline", handle);
+        Assert.True(exit == 0, stderr);
+
+        var seen = false;
+        for (var attempt = 0; attempt < 40 && !seen; attempt++)
+        {
+            var second = await Post(http, server.Port, "tail", new JsonObject
+            {
+                ["session_id"] = Session,
+                ["scope"] = "all",
+                ["event_epoch"] = epoch,
+                ["event_after"] = 0,
+            });
+            Assert.Equal(epoch, (string)second.Body["events"]!["epoch"]!);
+            seen = second.Body["events"]!["rows"]!.AsArray().Any(r => (string)r!["record"]!["kind"]! == "timeline");
+            if (!seen)
+            {
+                await Task.Delay(250, TestContext.Current.CancellationToken);
+            }
+        }
+
+        Assert.True(seen, "the timeline event never reached the tail");
+        Assert.Equal(1, KindCount(home, "mod-call"));
+    }
+
+    [Fact]
+    public async Task Tail_IsBehindTheHostOriginContentTypeAndModHeaderGuards()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        using var server = StartedServer.Begin(home);
+        using var http = new HttpClient();
+        const string Body = """{"mod":"lens","session_id":"s"}""";
+
+        using (var wrongHost = JsonRequest(server.Port, HttpMethod.Post, "/mod/v1/tail", Body))
+        {
+            wrongHost.Headers.Host = "evil.example";
+            wrongHost.Headers.Add("X-Engram-Mod", "lens");
+            Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(wrongHost, TestContext.Current.CancellationToken)).StatusCode);
+        }
+
+        using (var origin = JsonRequest(server.Port, HttpMethod.Post, "/mod/v1/tail", Body))
+        {
+            origin.Headers.Add("Origin", "http://evil.example.com");
+            origin.Headers.Add("X-Engram-Mod", "lens");
+            Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(origin, TestContext.Current.CancellationToken)).StatusCode);
+        }
+
+        var noHeader = await Post(http, server.Port, "tail", new JsonObject { ["session_id"] = "s" }, mod: null, bodyMod: "lens");
+        Assert.Equal(HttpStatusCode.BadRequest, noHeader.Status);
+
+        var wrongType = await Post(http, server.Port, "tail", new JsonObject { ["session_id"] = "s" }, contentType: "text/plain");
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, wrongType.Status);
+
+        var allowed = await Post(http, server.Port, "tail", new JsonObject { ["session_id"] = "s" });
+        Assert.Equal(HttpStatusCode.OK, allowed.Status);
+        Assert.Equal(0, KindCount(home, "mod-call"));
     }
 
     [Fact]

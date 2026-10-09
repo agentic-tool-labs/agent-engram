@@ -7,6 +7,7 @@ import { register as primer } from '../mods/primer/index'
 import { register as sentinel } from '../mods/sentinel/index'
 import { register as beliefDiff } from '../mods/belief-diff/index'
 import { register as digest } from '../mods/digest/index'
+import { register as tail } from '../mods/tail/index'
 
 // A plugin has one hooks module, so every mod registers through this list.
 export const register: Register = (on, options) => {
@@ -18,4 +19,5 @@ export const register: Register = (on, options) => {
   sentinel(on, options)
   beliefDiff(on, options)
   digest(on, options)
+  tail(on, options)
 }

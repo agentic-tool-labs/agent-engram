@@ -43,14 +43,14 @@ function rig(on: On, ops: RoutingTable['ops'] = {}, table: RoutingTable = {}): R
 const submit = ($: Engine, prompt: string) => $.classic.UserPromptSubmit({ prompt })
 const undo = ($: Engine) =>
   $.command.run({
-    command: 'undo-capture',
+    command: 'engram-undo-capture',
     args: '',
     origin: { kind: 'user' },
     presentation: { isFullscreen: false, columns: 80 },
   } as never)
 const calls = (r: Rig, op: string) => r.router.fetchCalls.filter((c) => c.op === op)
 const CHIME = { asset: 'mods/toasts/chime.wav' }
-const HINT = ' · /undo-capture to forget'
+const HINT = ' · /engram-undo-capture to forget'
 
 test('a prompt with no capture: no toast, one captures call', async ($, on) => {
   const r = rig(on, { captures: reply() })
@@ -211,6 +211,46 @@ test('a play that is refused is silent and the toasts still show', { options: { 
   expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT])
 })
 
+test('T1: the undo hint is on the first toast of each session, not of the saved state', async ($, on) => {
+  let current = [capture('f1', 'one')]
+  const r = rig(on, { captures: () => ({ status: 200, json: { captures: current } }) })
+
+  await submit($, 'I live in Lyon')
+  current = [capture('f1', 'one'), capture('f2', 'two')]
+  await submit($, 'I like tea')
+  expect(r.toasts).toEqual(['Remembered [f1]: one' + HINT, 'Remembered [f2]: two'])
+
+  r.router.sessionId = () => 'session-B'
+  current = [capture('f3', 'three')]
+  await submit($, 'I like rain')
+
+  expect(r.toasts[2]).toBe('Remembered [f3]: three' + HINT)
+})
+
+test('T2: a reload keeps the session, so the next toast has no new hint', async ($, on) => {
+  let current = [capture('f1', 'one')]
+  const r = rig(on, { captures: () => ({ status: 200, json: { captures: current } }) })
+
+  await submit($, 'I live in Lyon')
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+  current = [capture('f1', 'one'), capture('f2', 'two')]
+  await submit($, 'I like tea')
+
+  expect(r.toasts).toEqual(['Remembered [f1]: one' + HINT, 'Remembered [f2]: two'])
+})
+
+test('T3: in a new session with nothing toasted, undo forgets nothing, even though the last session toasted handles', async ($, on) => {
+  const r = rig(on, { captures: reply(capture('f1', 'one')), forget: forgot(true) })
+
+  await submit($, 'I live in Lyon')
+  r.router.sessionId = () => 'session-B'
+  r.toasts.length = 0
+  await undo($)
+
+  expect(r.toasts).toEqual(['No captured memory to forget'])
+  expect(calls(r, 'forget').length).toBe(0)
+})
+
 test('the first capture toast of a session carries the undo hint; the second does not', async ($, on) => {
   let n = 0
   const r = rig(on, { captures: () => ({ status: 200, json: { captures: [capture(`f${++n}`, `s${n}`)] } }) })
@@ -225,15 +265,15 @@ test('only the first toast of the first batch carries the hint', async ($, on) =
   expect(r.toasts).toEqual(['Remembered [f1]: a' + HINT, 'Remembered [f2]: b'])
 })
 
-const undoRegs = (r: Rig) => r.commands.filter((n) => n === 'undo-capture')
+const undoRegs = (r: Rig) => r.commands.filter((n) => n === 'engram-undo-capture')
 const start = ($: Engine) => $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true } as never)
 
-test('session start registers /undo-capture before any capture, and a capture does not register it again', async ($, on) => {
+test('session start registers /engram-undo-capture before any capture, and a capture does not register it again', async ($, on) => {
   const r = rig(on, { captures: reply(capture('f1', 'a')) })
   await start($)
-  expect(undoRegs(r)).toEqual(['undo-capture'])
+  expect(undoRegs(r)).toEqual(['engram-undo-capture'])
   await submit($, 'I like tea')
-  expect(undoRegs(r)).toEqual(['undo-capture'])
+  expect(undoRegs(r)).toEqual(['engram-undo-capture'])
 })
 
 test('no registration happens without a session start', async ($, on) => {

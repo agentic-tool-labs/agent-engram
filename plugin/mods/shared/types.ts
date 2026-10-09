@@ -91,6 +91,67 @@ export type PathFact = {
 }
 export type PathFactsResponse = { entity_path: string | null; repo: string | null; facts: PathFact[] }
 
+export type TailRequest = {
+  session_id: string
+  after?: number
+  closed_after?: number
+  event_epoch?: string
+  event_after?: number
+  scope?: 'session' | 'all'
+  limit?: number
+}
+
+export type TailWrite = {
+  handle: string
+  id: number
+  created_at: number
+  origin: string
+  body: string
+  evidence: string | null
+  replaces: string | null
+  live: boolean
+  this_session: boolean
+}
+
+export type TailRetraction = {
+  handle: string
+  id: number
+  retracted_at: number
+  reason: string
+  body: string
+  origin: string
+  this_session: boolean
+}
+
+/** A telemetry log line as the server serialises it; every field but the first three is optional. */
+export type TailEventRecord = {
+  timestamp: string
+  session_id: string
+  kind: string
+  query?: string | null
+  fact_count?: number | null
+  tokens_returned?: number | null
+  coverage?: string | null
+  long_term_fact_count?: number | null
+  agent_type?: string | null
+  phase?: string | null
+  path?: string | null
+  repo?: string | null
+  tool?: string | null
+  decision?: string | null
+  relation?: string | null
+  mod?: string | null
+  mode?: string | null
+}
+
+export type TailResponse = {
+  head: number
+  now: number
+  writes: { rows: TailWrite[]; skipped: number | null }
+  retractions: { rows: TailRetraction[] }
+  events: { epoch: string; head: number; rows: { seq: number; record: TailEventRecord }[]; skipped: number | null } | null
+}
+
 /** Request and response of every mod API op, keyed by op name. */
 export type ModOps = {
   recall: { request: RecallRequest; response: RecallResponse }
@@ -100,5 +161,6 @@ export type ModOps = {
   remember: { request: RememberRequest; response: RememberResponse }
   captures: { request: CapturesRequest; response: CapturesResponse }
   'path-facts': { request: PathFactsRequest; response: PathFactsResponse }
+  tail: { request: TailRequest; response: TailResponse }
 }
 export type ModOp = keyof ModOps

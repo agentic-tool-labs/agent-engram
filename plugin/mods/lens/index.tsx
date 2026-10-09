@@ -8,6 +8,10 @@ import type { LensRecall } from '../shared/state'
 import { LENS_INITIAL, addRecall, headerLine, selectedIndex, versionLine } from './model'
 import { parseDigest } from './parser'
 import { once } from '../shared/guard'
+import { forSession } from '../shared/session'
+
+// What a new session starts the Lens's per-session fields at.
+const LENS_SESSION = { autoOpened: false }
 
 const PANE = 'engram-lens'
 const TITLE = 'Memory Lens'
@@ -27,12 +31,15 @@ const bindIo = ($: EngineInterface): ModIo => ({
   updateShared: (fn) => update($, SHARED, fn),
 })
 
+// The host does not namespace a mod's commands and the plugin test kit rejects a colon in the name, so the plugin name is joined with a hyphen.
+const LENS_COMMAND = 'engram-lens'
+
 export const register: Register = (on, options) => {
   on('session.start', ANY_SESSION_START, async ($, e, next) => {
     const go = once(next)
     try {
       try {
-        await $.command.register({ name: 'lens', description: 'Show or hide the Memory Lens pane' })
+        await $.command.register({ name: LENS_COMMAND, description: 'Show or hide the Memory Lens pane' })
       } catch {
         // another mod's session.start must still run
       }
@@ -83,8 +90,10 @@ export const register: Register = (on, options) => {
 
         await update($, LENS, (s) => addRecall(s, recall))
 
-        if (options.lens_auto_open === true && !state.autoOpened) {
-          await update($, LENS, (s) => ({ ...s, autoOpened: true }))
+        if (options.lens_auto_open === true) {
+          const sessionId = await $.session.id()
+          if (forSession(state, sessionId, LENS_SESSION).autoOpened) return ran
+          await update($, LENS, (s) => ({ ...forSession(s, sessionId, LENS_SESSION), autoOpened: true }))
           const opened = await $.ui.open({ id: PANE, title: TITLE })
           await update($, LENS, (s) => ({ ...s, paneOpen: opened.isPlaced }))
         }
@@ -98,7 +107,7 @@ export const register: Register = (on, options) => {
     }
   })
 
-  on('command.run', { command: 'lens' }, async ($, e, next) => {
+  on('command.run', { command: LENS_COMMAND }, async ($, e, next) => {
     const go = once(next)
     try {
       const state = await read($, LENS)
