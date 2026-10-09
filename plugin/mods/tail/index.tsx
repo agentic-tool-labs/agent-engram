@@ -6,18 +6,23 @@ import { ANY_SESSION_START } from '../shared/events'
 import { once } from '../shared/guard'
 import type { ModIo } from '../shared/client'
 import {
+  CONNECTING,
   FEED_UNAVAILABLE,
   GROUPS,
   POLL_MS,
   RETRY_MS,
   TAIL_INITIAL,
+  TAIL_SHAPE,
   applyResponse,
   callRow,
-  failureOutcome,
+  decide,
   displayItems,
   emptyText,
+  failureOutcome,
   filterLabel,
+  heartbeatText,
   requestBody,
+  resumeState,
   toggleLabel,
 } from './model'
 
@@ -25,7 +30,7 @@ const PANE = 'engram-tail'
 const TITLE = 'Memory Tail'
 const TAIL_COMMAND = 'engram-tail'
 
-const TAIL = atom({ plugin: 'engram', key: 'tail' } as const, TAIL_INITIAL)
+const TAIL = atom({ plugin: 'engram', key: 'tail' } as const, TAIL_INITIAL, { shape: TAIL_SHAPE })
 const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, SHARED_INITIAL)
 
 // Every Engram MCP tool shares the prefix the existing constants carry, so the pattern is built
@@ -57,6 +62,7 @@ async function poll($: EngineInterface, scope: 'session' | 'all', current: () =>
   const nowMs = await io.now()
   if (result.ok) {
     const response = result.value
+    connected = true
     await update($, TAIL, (s) => {
       const applied = applyResponse(s, response, sessionId, { ms: nowMs })
       return response.events === null ? { ...applied, status: FEED_UNAVAILABLE } : applied
@@ -69,19 +75,27 @@ async function poll($: EngineInterface, scope: 'session' | 'all', current: () =>
   return { delayMs: outcome.delayMs, stop: outcome.stop }
 }
 
+// Module state, on purpose: a plugin reload resets it while the atom survives, which is what lets
+// `running` say whether a poll chain is alive in this instance. `connected` is whether this chain
+// has had an answer yet.
 let timer: Timer | undefined
 let generation = 0
+let running = false
+let connected = false
 
 function stop() {
   generation++
   timer?.cancel()
   timer = undefined
+  running = false
 }
 
 // There is no pane-closed event, so a pane the person closes by hand keeps polling until
 // /engram-tail runs again or the session ends; the cost is one cheap request every two seconds.
 function start($: EngineInterface, scope: 'session' | 'all') {
   stop()
+  running = true
+  connected = false
   const mine = generation
   const tick = async () => {
     if (mine !== generation) return
@@ -108,9 +122,26 @@ async function open($: EngineInterface, scope: 'session' | 'all') {
     markerSeq: s.markerSeq,
     handles: s.handles,
     groups: s.groups,
+    lastOkAt: s.lastOkAt,
   }))
   if (opened.isPlaced) start($, scope)
   return opened
+}
+
+/** Whether the pane is on screen, by the host's record; the atom is the fallback when it cannot be asked. */
+async function isShown($: EngineInterface, atomSaysOpen: boolean): Promise<boolean> {
+  try {
+    return (await $.ui.panes()).some((pane) => pane.id === PANE && pane.isPlaced)
+  } catch {
+    return atomSaysOpen
+  }
+}
+
+/** Carries on polling from the saved cursors after the timers were lost. */
+async function resume($: EngineInterface, scope: 'session' | 'all') {
+  const nowMs = await $.clock.now()
+  await update($, TAIL, (s) => resumeState(s, nowMs))
+  start($, scope)
 }
 
 export const register: Register = (on, options) => {
@@ -121,7 +152,14 @@ export const register: Register = (on, options) => {
     try {
       try {
         await $.command.register({ name: TAIL_COMMAND, description: 'Show or hide the Memory Tail pane' })
-        if (options.tail_auto_open === true) $.clock.after(0, () => void open($, scope).catch(() => undefined))
+        const state = await read($, TAIL)
+        const action = decide('session.start', await isShown($, state.paneOpen), running)
+        if (action === 'resume') {
+          await resume($, scope)
+        } else if (action === 'clear') {
+          await update($, TAIL, (s) => ({ ...s, paneOpen: false }))
+          if (options.tail_auto_open === true) $.clock.after(0, () => void open($, scope).catch(() => undefined))
+        }
       } catch {
         // another mod's session.start must still run
       }
@@ -163,13 +201,20 @@ export const register: Register = (on, options) => {
     const go = once(next)
     try {
       const state = await read($, TAIL)
+      const action = decide('toggle', await isShown($, state.paneOpen), running)
 
-      if (state.paneOpen) {
+      if (action === 'close') {
         stop()
         await $.ui.close({ id: PANE })
         await update($, TAIL, (s) => ({ ...s, paneOpen: false }))
 
         return { text: 'Memory Tail closed.' }
+      }
+
+      if (action === 'resume') {
+        await resume($, scope)
+
+        return { text: 'Memory Tail resumed.' }
       }
 
       const opened = await open($, scope)
@@ -207,6 +252,11 @@ export const register: Register = (on, options) => {
               ))}
             </Box>
           ) : null}
+          {state.lastOkAt === undefined ? null : (
+            <Text dimColor wrap="truncate-end">
+              {heartbeatText(state.lastOkAt)}
+            </Text>
+          )}
           {statusLine === undefined || statusLine === '' ? null : (
             <Text dimColor wrap="wrap">
               {statusLine}
@@ -217,9 +267,14 @@ export const register: Register = (on, options) => {
               {statusDetail}
             </Text>
           )}
+          {!connected && items.length > 0 ? (
+            <Text dimColor wrap="wrap">
+              {CONNECTING}
+            </Text>
+          ) : null}
           {items.length === 0 ? (
             <Text dimColor wrap="wrap">
-              {emptyText(state)}
+              {emptyText(state, connected)}
             </Text>
           ) : (
             items.map((item) =>

@@ -88,6 +88,34 @@ test('server older than the API: first call unsupported, the second makes no req
   expect(rig.router.fetchCalls.length).toBe(1)
 })
 
+test('C1: an unsupported answer short-circuits for 300 s, then the next call reaches the server again and a recurring 404 re-arms it', async () => {
+  const rig = fakeModIo(RUNNING)
+  expect(await recall(rig)).toEqual({ ok: false, reason: 'unsupported' })
+  expect(rig.router.fetchCalls.length).toBe(1)
+
+  await rig.clock.advance(299_999)
+  expect(await recall(rig, {}, { session_id: 's1', query: 'again' })).toEqual({ ok: false, reason: 'unsupported' })
+  expect(rig.router.fetchCalls.length).toBe(1)
+
+  await rig.clock.advance(1)
+  expect(await recall(rig, {}, { session_id: 's1', query: 'later' })).toEqual({ ok: false, reason: 'unsupported' })
+  expect(rig.router.fetchCalls.length).toBe(2)
+
+  expect(await recall(rig, {}, { session_id: 's1', query: 'and later' })).toEqual({ ok: false, reason: 'unsupported' })
+  expect(rig.router.fetchCalls.length).toBe(2)
+})
+
+test('C1: after the back-off a server that now answers is used', async () => {
+  let upgraded = false
+  const rig = fakeModIo({ ...RUNNING, ops: { recall: () => (upgraded ? { status: 200, json: { coverage: 'high' } } : { status: 404 }) } })
+  expect(await recall(rig)).toEqual({ ok: false, reason: 'unsupported' })
+
+  upgraded = true
+  await rig.clock.advance(300_000)
+
+  expect(await recall(rig, {}, { session_id: 's1', query: 'after the upgrade' })).toEqual({ ok: true, value: { coverage: 'high' } })
+})
+
 test('404 with a not_found body is not-found and the API stays supported', async () => {
   const rig = fakeModIo({ ...RUNNING, ops: { fact: () => ({ status: 404, json: { error: 'not_found', detail: 'no such fact' } }) } })
   const ask = () => modApi(rig.io, 'fact', { fact_id: 'f999999' }, { mod: 'lens' })
@@ -140,7 +168,7 @@ test('timeout: the late answer changes nothing, even a 404 that would mark the A
 
   const second = await recall(rig, {}, { session_id: 's1', query: 'other' })
   expect(second).toEqual({ ok: true, value: { coverage: 'high' } })
-  expect(rig.shared().unsupported).toBe(false)
+  expect(rig.shared().unsupportedAt).toBeNull()
 })
 
 test('a caller arriving after the first timed out joins the pending fetch and gets an answer inside its own window', async () => {

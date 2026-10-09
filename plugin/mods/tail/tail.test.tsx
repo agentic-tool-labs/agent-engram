@@ -10,7 +10,7 @@ import { AUTO_EVIDENCE, EVIDENCE } from '../digest/digest'
 import type { TailRow } from '../shared/state'
 import { stamp } from '../lens/model'
 import type { ApiFailure } from '../shared/types'
-import { FEED_UNAVAILABLE, emptyText, eventText, failureOutcome, layoutRow } from './model'
+import { FEED_UNAVAILABLE, TAIL_INITIAL, decide, emptyText, eventText, failureOutcome, heartbeatText, layoutRow } from './model'
 
 const NOW_MS = Date.UTC(2026, 9, 8, 12, 0, 0)
 const NOW = NOW_MS / 1000
@@ -460,7 +460,7 @@ const FAILURES: { name: string; reply: { status: number; json?: unknown }; line:
 ]
 
 for (const failure of FAILURES) {
-  test(`M13: ${failure.name} shows its line and ${failure.stops ? 'stops the loop' : 'retries in fifteen seconds'}`, async ($, on) => {
+  test(`M13: ${failure.name} shows its line and retries in ${failure.stops ? 'five minutes' : 'fifteen seconds'}`, async ($, on) => {
     const w = world(on)
     w.script(failure.reply)
 
@@ -470,8 +470,10 @@ for (const failure of FAILURES) {
     if (failure.name === 'bad-request') expect(await shown($)).toContain('limit must be 1 to 50')
     expect(w.tails().length).toBe(1)
     if (failure.stops) {
-      await w.advance(120_000)
+      await w.advance(299_999)
       expect(w.tails().length).toBe(1)
+      await w.advance(1)
+      expect(w.tails().length).toBe(2)
     } else {
       await w.advance(14_999)
       expect(w.tails().length).toBe(1)
@@ -857,7 +859,9 @@ test('W11: every status word fits a narrow pane, with the action first', () => {
   const statuses = [
     ...reasons.map((reason) => failureOutcome({ ok: false, reason, detail: 'x'.repeat(200) }).status.split('\n')[0]!),
     FEED_UNAVAILABLE,
-    emptyText({ rows: [] } as never),
+    emptyText({ rows: [] } as never, false),
+    emptyText({ rows: [] } as never, true),
+    heartbeatText(NOW_MS),
   ]
   for (const status of statuses) {
     for (const word of status.split(' ')) expect(word.length).toBeLessThanOrEqual(20)
@@ -922,4 +926,256 @@ test('W14: the cap on free text is on the payload, before layout', async ($, on)
 
   const [view] = await rowViews($)
   expect(view!.detail).toBe(`f12 ${'z'.repeat(120)}…`)
+})
+
+// ---------------------------------------------------------------------------------------------
+// Surviving a plugin reload. A reload keeps the atom and loses the timers and module variables; a
+// fresh engine with a seeded atom and a module that never started its chain is that end state.
+
+const PLACED = [{ id: PANE, title: 'Memory Tail', isShown: true, isFocused: false, isPlaced: true }]
+
+/** Answers `$.ui.panes()` as the host would: the tail's pane on screen (or not). */
+function hostPanes(on: On, list: object[] | 'reject') {
+  on('ui.panes', () => {
+    if (list === 'reject') throw new Error('the host could not be asked')
+    return { value: list } as never
+  })
+}
+
+/**
+ * Holds the tail atom as an earlier life of the plugin left it (or an older version). The store
+ * answers reads and takes writes, so the module reads, updates and re-reads as it would live.
+ */
+function seed(on: On, initial: unknown) {
+  let store = { value: initial, version: 1 }
+  on('state.get', { plugin: 'engram', key: 'tail' }, () => ({ value: { value: store.value, version: store.version } }) as never)
+  on('state.set', { plugin: 'engram', key: 'tail' }, (_$, e) => {
+    const write = e as unknown as { value: unknown; ifVersion?: number }
+    if (write.ifVersion !== undefined && write.ifVersion !== store.version) return { value: { isSet: false, version: store.version } } as never
+    store = { value: write.value, version: store.version + 1 }
+    return { value: { isSet: true, version: store.version } } as never
+  })
+}
+
+const saved = (over: object = {}) => ({
+  ...TAIL_INITIAL,
+  paneOpen: true,
+  after: 10,
+  closedAfter: NOW,
+  epoch: 'ep1',
+  eventAfter: 5,
+  lastOkAt: NOW_MS - 60_000,
+  rows: [
+    { key: 'w9', ms: NOW_MS - 90_000, rank: 0, id: 9, kind: 'write', group: 'writes', label: 'note', handle: 'f9', text: 'written before the reload', mine: false, retracted: false },
+  ],
+  ...over,
+})
+
+const survived = (value: unknown) => ({ shape: 'tail-3', value })
+
+async function reloaded($: Engine, on: On, atom: unknown, shownPanes: object[] | 'reject' = PLACED) {
+  const w = world(on)
+  hostPanes(on, shownPanes)
+  seed(on, atom)
+  return w
+}
+
+const startSession = ($: Engine) => $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true } as never)
+
+test('R1: the lifecycle table, all six rows, as a pure function', () => {
+  expect(decide('session.start', true, false)).toBe('resume')
+  expect(decide('session.start', false, false)).toBe('clear')
+  expect(decide('session.start', false, true)).toBe('clear')
+  expect(decide('session.start', true, true)).toBe('nothing')
+  expect(decide('toggle', true, true)).toBe('close')
+  expect(decide('toggle', true, false)).toBe('resume')
+  expect(decide('toggle', false, false)).toBe('open')
+  expect(decide('toggle', false, true)).toBe('open')
+})
+
+test('R2: a session.start after a reload resumes polling at two seconds from the saved cursors', async ($, on) => {
+  const w = await reloaded($, on, survived(saved()))
+  w.script(response({ head: 12 }))
+
+  await startSession($)
+  await w.advance(0)
+
+  expect(w.tails().length).toBe(1)
+  expect(w.tails()[0]!.body).toMatchObject({ after: 10, closed_after: NOW, event_epoch: 'ep1', event_after: 5, scope: 'session' })
+  await w.advance(2_000)
+  expect(w.tails().length).toBe(2)
+  expect(w.opened).toEqual([])
+})
+
+test('R2: a session.start with the pane not on screen forgets the saved open flag, and opens only when asked to', async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+
+  on('tool.call', () => ({ result: {}, text: '[f5] ok' }) as never)
+
+  await startSession($)
+  await w.advance(60_000)
+
+  // The saved open flag is gone, so a call made now is not recorded as pane activity.
+  await $.tool.call({ tool: ENGRAM_TOOLS.remember, tool_use_id: 't1', statement: 'while no pane is up' } as never)
+  expect((await rowViews($)).some((r) => r.label === 'remember')).toBe(false)
+  expect(w.tails().length).toBe(0)
+  expect(w.opened).toEqual([])
+  const reply = await toggle($)
+  expect((reply as { text: string }).text).toBe('Memory Tail opened.')
+  expect(w.opened).toEqual([PANE])
+})
+
+test('R2: tail_auto_open opens a pane that is not on screen', { options: { tail_auto_open: true } }, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+
+  await startSession($)
+  await w.advance(0)
+
+  expect(w.opened).toEqual([PANE])
+  expect(w.tails().length).toBe(1)
+  expect(Object.keys(w.tails()[0]!.body as Record<string, unknown>).sort()).toEqual(['mod', 'scope', 'session_id'])
+})
+
+test('R3: /engram-tail on a pane that is on screen with nothing polling resumes it, and does not close it', async ($, on) => {
+  const w = await reloaded($, on, survived(saved()))
+  w.script(response({ head: 12 }))
+
+  const reply = await toggle($)
+  await w.advance(0)
+
+  expect((reply as { text: string }).text).toBe('Memory Tail resumed.')
+  expect(w.closed).toEqual([])
+  expect(w.tails().length).toBe(1)
+  expect(w.tails()[0]!.body).toMatchObject({ after: 10, event_epoch: 'ep1' })
+
+  const again = await toggle($)
+  expect((again as { text: string }).text).toBe('Memory Tail closed.')
+  expect(w.closed).toEqual([PANE])
+})
+
+test('R4: a resume keeps the rows already drawn and adds exactly one marker', async ($, on) => {
+  const w = await reloaded($, on, survived(saved()))
+  w.script(response({ head: 10 }))
+
+  await toggle($)
+  await w.advance(0)
+  await w.advance(2_000)
+  await w.advance(2_000)
+
+  expect((await rowViews($)).map((r) => r.detail)).toEqual(['f9 written before the reload'])
+  expect((await shown($)).filter((t) => t === '  resumed').length).toBe(1)
+})
+
+test('R5: the heartbeat shows the last successful poll, and stops advancing when polls fail', async ($, on) => {
+  const w = world(on)
+  w.script(response(), response(), { status: 500, json: { error: 'internal' } }, response())
+  const heartbeat = async () => (await shown($)).find((t) => t.startsWith('Updated '))
+  expect(await heartbeat()).toBeUndefined()
+
+  await openAndSettle($, w)
+  const first = await heartbeat()
+  expect(first).toMatch(/^Updated \d{2}:\d{2}:\d{2}$/)
+  expect(first!.length).toBeLessThanOrEqual(16)
+
+  await w.advance(2_000)
+  const second = await heartbeat()
+  expect(second).not.toBe(first)
+
+  await w.advance(2_000)
+  expect(await shown($)).toContain('Tail error · retrying')
+  expect(await heartbeat()).toBe(second)
+
+  await w.advance(15_000)
+  expect(await heartbeat()).not.toBe(second)
+  expect(await shown($)).not.toContain('Tail error · retrying')
+
+  const node = descendants(await drawn($)).find((n) => n.type === 'Text' && textOf(n).startsWith('Updated '))!
+  expect(node.props).toMatchObject({ dimColor: true, wrap: 'truncate-end' })
+})
+
+test('R6: before the first answer the pane says it is connecting, afterwards that nothing happened yet', async ($, on) => {
+  const w = world(on)
+  w.script('hang', response())
+  await openAndSettle($, w)
+  expect(await shown($)).toContain('Connecting to Engram…')
+  expect(await shown($)).not.toContain('No activity yet.')
+})
+
+test('R6: a resumed pane says connecting until its first answer, and still draws its rows', async ($, on) => {
+  const w = await reloaded($, on, survived(saved()))
+  w.script('hang')
+
+  await toggle($)
+  await w.advance(0)
+
+  expect((await rowViews($)).length).toBe(1)
+  expect(await shown($)).toContain('Connecting to Engram…')
+})
+
+test('R6: after one answer with nothing new the empty text is the quiet one', async ($, on) => {
+  const w = world(on)
+  await openAndSettle($, w)
+
+  expect(await shown($)).toContain('No activity yet.')
+  expect(await shown($)).not.toContain('Connecting to Engram…')
+})
+
+for (const [name, atom] of [
+  ['an older shape', { shape: 'tail-2', value: saved() }],
+  ['no shape at all', saved()],
+] as const) {
+  test(`R7: an atom with ${name} is declined: its rows are not drawn and its cursors are not sent`, async ($, on) => {
+    const w = await reloaded($, on, atom)
+
+    await startSession($)
+    await w.advance(0)
+
+    expect(w.tails().length).toBe(1)
+    expect(Object.keys(w.tails()[0]!.body as Record<string, unknown>).sort()).toEqual(['mod', 'scope', 'session_id'])
+    expect((await rowViews($)).length).toBe(0)
+    expect((await shown($)).some((t) => t.includes('written before the reload'))).toBe(false)
+  })
+}
+
+for (const [name, reply, line] of [
+  ['not-found', { status: 404, json: { error: 'not_found' } }, 'Server too old for the tail · update, then /engram:restart'],
+  ['unsupported', { status: 404 }, 'Server has no mod API'],
+] as const) {
+  test(`R8: ${name} keeps the loop: the next request is at 300 s, the line stays, a later success clears it`, async ($, on) => {
+    const w = world(on)
+    w.script(reply, response())
+
+    await openAndSettle($, w)
+    expect(await shown($)).toContain(line)
+
+    await w.advance(299_999)
+    expect(w.tails().length).toBe(1)
+    expect(await shown($)).toContain(line)
+
+    await w.advance(1)
+    expect(w.tails().length).toBe(2)
+    expect(await shown($)).not.toContain(line)
+    await w.advance(2_000)
+    expect(w.tails().length).toBe(3)
+  })
+}
+
+test('R9: when the host cannot be asked which panes are up, the saved open flag decides', async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), 'reject')
+  w.script(response({ head: 12 }))
+
+  await startSession($)
+  await w.advance(0)
+
+  expect(w.tails().length).toBe(1)
+  expect(w.tails()[0]!.body).toMatchObject({ after: 10 })
+})
+
+test('R9: and a saved flag that says closed does not resume', async ($, on) => {
+  const w = await reloaded($, on, survived(saved({ paneOpen: false })), 'reject')
+
+  await startSession($)
+  await w.advance(60_000)
+
+  expect(w.tails().length).toBe(0)
 })

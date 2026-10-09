@@ -9,8 +9,11 @@ export type SharedState = {
   port: number | null
   /** When the last lookup or connection failed to yield a port (`io.now()`), `null` if none yet. */
   noPortAt: number | null
-  /** The server answered 404 to the mod API: no further calls this session. */
-  unsupported: boolean
+  /**
+   * When the server last answered 404 to the mod API (`io.now()`), `null` if never. Calls short-circuit
+   * as unsupported for a while after it; a 404 describes the server instance that answered, so it expires.
+   */
+  unsupportedAt: number | null
 }
 
 export type HistoryVersion = {
@@ -191,6 +194,8 @@ export type TailState = {
   groups: Record<TailGroup, boolean>
   /** The line shown above the rows; absent when the last request succeeded. */
   status?: string | undefined
+  /** When the last poll succeeded (`io.now()`, ms); set on success only, so it stops advancing when polls fail. */
+  lastOkAt?: number | undefined
 }
 
 declare module 'claude-code' {
@@ -203,7 +208,7 @@ declare module 'claude-code' {
       sentinel: SentinelState
       beliefDiff: BeliefDiffState
       digest: DigestState
-      tail: TailState
+      tail: Shaped<TailState>
     }
   }
 }

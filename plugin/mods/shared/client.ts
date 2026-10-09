@@ -20,7 +20,7 @@ export type ModIo = {
   updateShared(fn: (s: SharedState) => SharedState): Promise<unknown>
 }
 
-export const SHARED_INITIAL: SharedState = { binary: null, port: null, noPortAt: null, unsupported: false }
+export const SHARED_INITIAL: SharedState = { binary: null, port: null, noPortAt: null, unsupportedAt: null }
 
 export const ENGRAM_TOOLS = {
   recall: 'mcp__plugin_engram_engram__engram_recall',
@@ -33,6 +33,7 @@ export const ENGRAM_TOOLS = {
 export const EDIT_TOOLS = ['Edit', 'Write'] as const
 
 const NO_PORT_BACKOFF_MS = 60_000
+const UNSUPPORTED_BACKOFF_MS = 300_000
 const DEFAULT_CLI_TIMEOUT_MS = 5_000
 const DEFAULT_API_TIMEOUT_MS = 1_000
 // A hook's own budget is 10 s and the sleep is spent from it.
@@ -122,9 +123,9 @@ function resolveBase(io: ModIo): Promise<{ base: string } | ApiFailure> {
 
 async function lookUpBase(io: ModIo): Promise<{ base: string } | ApiFailure> {
   const state = await io.readShared()
-  if (state.unsupported) return fail('unsupported')
-  if (state.port !== null) return { base: `http://127.0.0.1:${state.port}` }
   const now = await io.now()
+  if (state.unsupportedAt !== null && now - state.unsupportedAt < UNSUPPORTED_BACKOFF_MS) return fail('unsupported')
+  if (state.port !== null) return { base: `http://127.0.0.1:${state.port}` }
   if (state.noPortAt !== null && now - state.noPortAt < NO_PORT_BACKOFF_MS) return fail('server-down')
 
   // The exit code is 1 unless the server is Running, so stdout is parsed regardless of it.
@@ -206,7 +207,8 @@ export async function modApi(io: ModIo, op: string, body: object, opts: ModApiOp
       return fail('server-down', outcome.detail)
     }
     if (!outcome.result.ok && outcome.result.reason === 'unsupported') {
-      await io.updateShared((s) => ({ ...s, unsupported: true }))
+      const at = await io.now()
+      await io.updateShared((s) => ({ ...s, unsupportedAt: at }))
     }
     return outcome.result
   } catch (err) {

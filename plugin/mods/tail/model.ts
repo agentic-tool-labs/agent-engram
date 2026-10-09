@@ -7,6 +7,12 @@ import { parseDigest } from '../lens/parser'
 export const MAX_ROWS = 200
 export const POLL_MS = 2_000
 export const RETRY_MS = 15_000
+// A server without the tail, or without the mod API, may be upgraded while the pane stays up.
+export const MISSING_RETRY_MS = 300_000
+
+// Bump when TailState changes incompatibly. An atom written under another shape is read as absent
+// by the host, so an older module's state is replaced, never read field by field or migrated.
+export const TAIL_SHAPE = 'tail-3'
 // A cap on each free-text payload before layout, not a layout width: the host cuts a line to the
 // real pane width, which the mod cannot read.
 const CLIP = 120
@@ -163,7 +169,7 @@ export function applyResponse(state: TailState, res: TailResponse, sessionId: st
   const notes: string[] = []
 
   if (first) {
-    next = { ...next, after: res.head, closedAfter: res.now }
+    next = { ...next, after: res.head, closedAfter: res.now, lastOkAt: local.ms }
     if (res.events !== null) next = { ...next, epoch: res.events.epoch, eventAfter: res.events.head }
     return next
   }
@@ -171,7 +177,7 @@ export function applyResponse(state: TailState, res: TailResponse, sessionId: st
   if (res.head < (state.after ?? 0)) {
     notes.push(`store rewound — showing writes from f${res.head}`)
   }
-  next = { ...next, after: res.head }
+  next = { ...next, after: res.head, lastOkAt: local.ms }
 
   for (const w of res.writes.rows) {
     added.push({
@@ -342,15 +348,52 @@ export function displayItems(rows: readonly TailRow[], groups: TailState['groups
   return items
 }
 
+export type Trigger = 'session.start' | 'toggle'
+export type Action = 'resume' | 'nothing' | 'clear' | 'close' | 'open'
+
+/**
+ * What a trigger does, from two facts that never come from the atom's `paneOpen` alone: whether the
+ * pane is on screen (the host's record) and whether a poll chain is alive in this module instance
+ * (reset by a reload, which keeps the atom and kills the timers).
+ */
+export function decide(trigger: Trigger, shown: boolean, running: boolean): Action {
+  if (trigger === 'session.start') return !shown ? 'clear' : running ? 'nothing' : 'resume'
+  return !shown ? 'open' : running ? 'close' : 'resume'
+}
+
+/**
+ * The saved state with the pane taken as open and one marker that polling resumed. The cursors stay:
+ * they are the no-replay, no-gap position, so what landed while the timers were dead arrives on the
+ * first poll. With no cursors saved (a declined atom) there is nothing to resume from, and this is a
+ * plain open.
+ */
+export function resumeState(state: TailState, nowMs: number): TailState {
+  if (state.after === undefined) return { ...state, paneOpen: true }
+  const seq = state.markerSeq + 1
+  return {
+    ...state,
+    paneOpen: true,
+    markerSeq: seq,
+    rows: insertRows(state.rows, [marker({ ...state, markerSeq: seq }, nowMs, 'resumed')]),
+  }
+}
+
+/** The freshness line: the time of the last successful poll. */
+export const heartbeatText = (lastOkAt: number): string => `Updated ${clock(lastOkAt)}`
+
 export const filterLabel = (state: TailState): string =>
   `Filter ${GROUPS.filter((g) => state.groups[g.id]).length}/${GROUPS.length} ${state.filterOpen ? '▴' : '▾'}`
 
 export const toggleLabel = (on: boolean, title: string): string => `${on ? '✓' : '·'} ${title}`
 
-/** What stands in place of rows: nothing recorded yet, or everything filtered out. */
-export function emptyText(state: TailState): string {
+/**
+ * What stands in place of rows: everything filtered out, no answer yet from this chain, or an
+ * answer with nothing new.
+ */
+export function emptyText(state: TailState, connected: boolean): string {
   const hidden = state.rows.filter((row) => row.kind !== 'marker').length
-  return hidden > 0 ? `All ${hidden} rows hidden by the filter.` : 'No activity yet.'
+  if (hidden > 0) return `All ${hidden} rows hidden by the filter.`
+  return connected ? 'No activity yet.' : CONNECTING
 }
 
 /** The next poll's request: no cursors until the first answer has set them. */
@@ -382,9 +425,9 @@ export function failureOutcome(failure: ApiFailure): Failure {
     case 'not-initialised':
       return { status: 'Not initialised · engram init', delayMs: RETRY_MS, stop: false }
     case 'not-found':
-      return { status: 'Server too old for the tail · update, then /engram:restart', delayMs: RETRY_MS, stop: true }
+      return { status: 'Server too old for the tail · update, then /engram:restart', delayMs: MISSING_RETRY_MS, stop: false }
     case 'unsupported':
-      return { status: 'Server has no mod API', delayMs: RETRY_MS, stop: true }
+      return { status: 'Server has no mod API', delayMs: MISSING_RETRY_MS, stop: false }
     case 'bad-request':
       return {
         status: failure.detail === undefined ? 'Tail request rejected:' : `Tail request rejected:\n${failure.detail.slice(0, MAX_DETAIL_CHARS)}`,
@@ -397,3 +440,4 @@ export function failureOutcome(failure: ApiFailure): Failure {
 }
 
 export const FEED_UNAVAILABLE = 'Activity feed off · writes only'
+export const CONNECTING = 'Connecting to Engram…'

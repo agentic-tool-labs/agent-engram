@@ -16,7 +16,7 @@ const SHARED = atom({ plugin: 'engram', key: 'shared' } as const, {
   binary: null,
   port: null,
   noPortAt: null,
-  unsupported: false,
+  unsupportedAt: null,
 })
 
 const bindIo = ($: EngineInterface): ModIo => ({
