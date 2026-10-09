@@ -3,7 +3,7 @@
 Implementer: implementor
 Reviewer: reviewer
 
-Status: r2. Spec only; nothing here has been run. Plugin 1.3.13 → 1.3.14. Branch `mods/live-memory-tail`.
+Status: r4. Spec only; nothing here has been run. The diagnostic is gated on `tail_auto_open === true` (§4, r3). Plugin 1.3.13 → 1.3.14. Branch `mods/live-memory-tail`.
 
 r2 closes two gaps the Implementor reported:
 
@@ -13,6 +13,12 @@ r2 closes two gaps the Implementor reported:
 The changes are in §3.1 item 2, §4 D2, §5 and §6 (T9, T10).
 
 r3 resolves a conflict between the diagnostic and the unchanged-tests rule. The whole diagnostic is now gated on `tail_auto_open === true` (§4). D2 is raised only before the session is marked, and has no `option off` form. The raw panes call is separate (§4). T11 is added.
+
+r4 applies three Reviewer nits:
+
+1. T8 loses its toast arm. That arm could not go red, because the engine swallows a throwing `ui.toast` handler itself; the Reviewer measured it at 479 passing, 0 failing. The guard stays, as defence in depth.
+2. The status line and §8 now state the r3 gate.
+3. T6b is added.
 
 ## TL;DR
 
@@ -238,7 +244,12 @@ Tests go in `plugin/mods/tail/tail.test.tsx`, using its existing `world()` and `
 | T5 | Option false → no `ui.open` over three prompts. Slash-command prompt first, then a real one → exactly one `ui.open`, on the real one. | Drop the option check → red. Drop the slash skip → red. |
 | T6 | Pane shown and polling at the first prompt → no `ui.open`, no `ui.close`, and polling continues at two seconds | Route through `decide('toggle', …)` → red (pane closed) |
 | T7 (diag) | A stubbed undrawn open (`{ isPlaced: false, reason: 'R' }`) yields a toast containing `undrawn: R`, and the next `/engram-tail` output contains that line | Delete the atom append → red on the output half |
-| T8 (diag/fail-open) | `ui.open` throwing, and separately `ui.toast` throwing → `next` is called exactly once with the original event | Remove the guard around either → red |
+| T6b (r4) | Pane already shown at the first prompt, so the session is marked with no open. The person then closes it with `/engram-tail`. The next composer prompt in the same session → no `ui.open`. | Make the "already shown" path return without marking the session → red |
+| T8 (diag/fail-open) | `ui.open` throwing → `next` is called exactly once with the original event | Remove the guard around the open → red |
+
+**T8 no longer tests a throwing `ui.toast` (r4).**
+- The engine swallows a throwing `ui.toast` handler itself, so removing the guard leaves that arm green (the Reviewer's arm A: 479 passing, 0 failing). An assertion that cannot fail is dropped.
+- The guard around the toast stays. It is defence in depth against the host's documented `void` toast, and the Reviewer has already ruled to keep it.
 
 | T9 (r2) | A plugin-origin prompt, then a prompt with no origin, then a composer prompt, all in one session → exactly one `ui.open`, on the composer prompt | Drop the origin half of the shared predicate → red. Restore it and confirm green before trusting the arm. |
 | T10 (r2) | The tail and the primer route through the one predicate | Break the origin half *inside the shared predicate*. Both T9 and the primer's existing origin test (`primer.test.ts:171-175`) must go red. If only one reddens, the other mod still has a private copy. |
@@ -278,7 +289,7 @@ Run it on a real terminal; this needs no Engram store work. Before starting, rea
   - Auto-open moves from launch to the first real prompt, so on a wide terminal it now appears one prompt later than the option's old description promised.
   - Single path, no session-start attempt kept. Two opening paths would mean two states to reason about for one option.
   - Separate atom, not a `TailState` field.
-  - Diagnostic on for everyone in 1.3.14, with no option, as the brief asked.
+  - The diagnostic in 1.3.14 adds no new option. It is gated on the existing `tail_auto_open === true` (r3; §4), so users with the option off see nothing.
 - **Left to the user:**
   - whether "opens when the first prompt is sent" is acceptable as the option's behaviour;
   - if step 1 shows `undrawn`, which fallback to take.

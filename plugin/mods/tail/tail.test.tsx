@@ -977,7 +977,7 @@ function hostPanes(on: On, list: object[] | 'reject') {
  * Holds the tail atom as an earlier life of the plugin left it (or an older version). The store
  * answers reads and takes writes, so the module reads, updates and re-reads as it would live.
  */
-function seed(on: On, initial: unknown, key: 'tail' | 'shared' = 'tail') {
+function seed(on: On, initial: unknown, key: 'tail' | 'shared' | 'tail-diag' = 'tail') {
   let store = { value: initial, version: 1 }
   let writes = 0
   on('state.get', { plugin: 'engram', key } as never, () => ({ value: { value: store.value, version: store.version } }) as never)
@@ -1394,8 +1394,9 @@ test('T5: a slash command first, then a real prompt, opens exactly once and on t
   expect(w.submitted.length).toBe(2)
 })
 
-test('T6: a pane on screen and polling at the first prompt is left alone', OPTION_ON, async ($, on) => {
-  const w = await reloaded($, on, survived(saved()))
+test('T6/T6b: a pane on screen and polling at the first prompt is left alone (T6), and the session is marked, so closing it is not undone by the next prompt (T6b)', OPTION_ON, async ($, on) => {
+  const list = [...PLACED]
+  const w = await reloaded($, on, survived(saved()), list)
   w.script(response({ head: 12 }))
   await startSession($)
   await w.advance(0)
@@ -1407,6 +1408,13 @@ test('T6: a pane on screen and polling at the first prompt is left alone', OPTIO
   expect(w.opened).toEqual([])
   expect(w.closed).toEqual([])
   expect(w.tails().length).toBe(2)
+
+  // The first prompt marked the session, so a pane the person then closes is not reopened by the next one.
+  await toggle($)
+  expect(w.closed).toEqual([PANE])
+  list.length = 0
+  await $.prompt.submit(prompt('and another thing to say'))
+  expect(w.opened).toEqual([])
 })
 
 test('T7 (diag): an undrawn open is toasted and printed by the next /engram-tail; session.start is reported too', OPTION_ON, async ($, on) => {
@@ -1438,7 +1446,7 @@ test('T8 (diag, fail-open): ui.open throwing still lets the prompt through once 
   expect(w.opened).toEqual([PANE])
 })
 
-test('T8 (diag, fail-open): a throwing toast costs the toast, not the stored line or the prompt', OPTION_ON, async ($, on) => {
+test('T8 (diag): a throwing host toast handler does not block the prompt or the stored line', OPTION_ON, async ($, on) => {
   const w = await reloaded($, on, survived(saved()), [])
   w.control.toastThrows = true
   const e = prompt()
@@ -1479,21 +1487,23 @@ test('T9: a plugin-origin prompt and one with no origin neither open nor mark; t
   expect(lines[2]).toContain('open=placed')
 })
 
-test('T10: the tail takes its notion of a person\'s own prompt from the shared predicate', async () => {
+test('isOwnPrompt: composer non-slash only', async () => {
   expect(isOwnPrompt(prompt())).toBe(true)
   expect(isOwnPrompt(prompt('/clear'))).toBe(false)
   expect(isOwnPrompt(prompt('hi', { origin: { kind: 'plugin', name: 'x' } as never }))).toBe(false)
   expect(isOwnPrompt({ text: 'hi', wait: false } as PromptSubmitInput)).toBe(false)
 })
 
-test('T11: with the option off the diagnostic does not exist: no toast, no stored line, no suffix', async ($, on) => {
+test('T11: with the option off the diagnostic does not exist: no toast, no atom write, no suffix', async ($, on) => {
   const w = await reloaded($, on, survived(saved()), [])
+  const diagStore = seed(on, { lines: [] }, 'tail-diag')
 
   await startSession($)
   await $.prompt.submit(prompt())
   const reply = (await toggle($)) as { text: string }
 
   expect(diagLines(w.toasts)).toEqual([])
+  expect(diagStore.writes()).toBe(0)
   expect(reply.text).toBe('Memory Tail opened.')
   expect(w.opened).toEqual([PANE])
 })
