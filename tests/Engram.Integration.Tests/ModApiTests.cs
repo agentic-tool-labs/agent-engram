@@ -16,11 +16,11 @@ public class ModApiTests
     private const string Session = "cc-session-1";
 
     private static (int Status, JsonNode Body) Call(
-        SandboxHome sandbox, string op, JsonObject body, string? headerMod = null)
+        SandboxHome sandbox, string op, JsonObject body, string? headerMod = null, TelemetryFeed? feed = null)
     {
         body["mod"] ??= Mod;
         var result = ModApi.Execute(
-            sandbox.Home, new LocalRuntime(sandbox.Home), op, headerMod ?? Mod, Encoding.UTF8.GetBytes(body.ToJsonString()));
+            sandbox.Home, new LocalRuntime(sandbox.Home), op, headerMod ?? Mod, Encoding.UTF8.GetBytes(body.ToJsonString()), feed);
         return (result.Status, JsonNode.Parse(result.Json)!);
     }
 
@@ -180,6 +180,7 @@ public class ModApiTests
     [InlineData("remember")]
     [InlineData("forget")]
     [InlineData("captures")]
+    [InlineData("tail")]
     public void WritingAndSessionOps_WithoutSessionId_Are400WithNoWriteAndNoTelemetry(string op)
     {
         using var sandbox = new SandboxHome();
@@ -301,6 +302,7 @@ public class ModApiTests
     [InlineData("remember")]
     [InlineData("captures")]
     [InlineData("path-facts")]
+    [InlineData("tail")]
     public void HomeWithoutConfig_Is503NotInitialisedOnEveryOp(string op)
     {
         using var sandbox = new SandboxHome(initialize: false);
@@ -862,5 +864,451 @@ public class ModApiTests
         }
 
         return (repo, file);
+    }
+
+    private static JsonNode Tail(
+        SandboxHome sandbox, JsonObject? body = null, TelemetryFeed? feed = null, string session = Session)
+    {
+        body ??= new JsonObject();
+        body["session_id"] ??= session;
+        var (status, json) = Call(sandbox, "tail", body, feed: feed);
+        Assert.Equal(200, status);
+        return json;
+    }
+
+    private static long Head(SandboxHome sandbox) => (long)Tail(sandbox)["head"]!;
+
+    private static long Now() => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+    private static IEnumerable<JsonNode> Rows(JsonNode part) => part["rows"]!.AsArray().Select(r => r!);
+
+    private static JsonNode WriteWithBody(JsonNode response, string body) =>
+        Assert.Single(Rows(response["writes"]!), r => (string)r["body"]! == body);
+
+    [Fact]
+    public void Tail_ClassifiesEveryWriterOrigin_AndCountsButNeverShowsACodeFact()
+    {
+        using var sandbox = new SandboxHome();
+        var before = Head(sandbox);
+        var now = DateTimeOffset.UtcNow;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            DirectiveFacts.Add(connection, "Always run the tests before committing.", now);
+            InvariantFacts.Add(connection, "/repo/Store.cs", "Never opens a second connection.", now);
+            SessionFacts.Append(connection, Session, "The compaction summary kept this.", null, null, CompactionDigest.HarvesterAgent, now);
+            var capture = UserFacts.Capture(connection, UserFactTopic.AboutYou, "I prefer tea.", Session, now)!.Value;
+            UserFacts.Restate(connection, capture, "Jim prefers tea.", Session, now);
+            FactStore.Remember(
+                connection,
+                new FactWrite("/knowledge/misc/thing", "note", "states", "An unclassified fact.", "project", "stated", SessionId: null),
+                now);
+            FactStore.Remember(
+                connection,
+                new FactWrite("/code/repo/File.cs", "file", "declares", "class Derived.", "code", "observed", Regenerable: true),
+                now);
+        }
+
+        Remember(sandbox, "A plain session note.", Session);
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            FactStore.Remember(
+                connection,
+                new FactWrite("/code/repo/Other.cs", "file", "declares", "class Last.", "code", "observed", Regenerable: true),
+                now);
+        }
+
+        var response = Tail(sandbox, new JsonObject { ["after"] = before, ["scope"] = "all", ["limit"] = 50 });
+        string OriginOf(string body) => (string)WriteWithBody(response, body)["origin"]!;
+
+        Assert.Equal("directive", OriginOf("Always run the tests before committing."));
+        Assert.Equal("invariant", OriginOf("Never opens a second connection."));
+        Assert.Equal("compaction", OriginOf("The compaction summary kept this."));
+        Assert.Equal("revision", OriginOf("Jim prefers tea."));
+        Assert.Equal("other", OriginOf("An unclassified fact."));
+        Assert.Equal("note", OriginOf("A plain session note."));
+        Assert.DoesNotContain(Rows(response["writes"]!), r => ((string)r["body"]!).StartsWith("class ", StringComparison.Ordinal));
+        Assert.Equal(0L, (long)response["writes"]!["skipped"]!);
+        using var check = EngramDatabase.OpenInitialized(sandbox.Home);
+        using var maxId = check.CreateCommand();
+        maxId.CommandText = "SELECT MAX(id) FROM fact;";
+        Assert.Equal((long)maxId.ExecuteScalar()!, (long)response["head"]!);
+    }
+
+    [Fact]
+    public void Tail_AForgottenCaptureRestatedVerbatim_ReadsCapture_AndARestateReadsRevisionWithReplaces()
+    {
+        using var sandbox = new SandboxHome();
+        var before = Head(sandbox);
+        var now = DateTimeOffset.UtcNow;
+        long original;
+        long revised;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            original = UserFacts.Capture(connection, UserFactTopic.AboutYou, "I drink coffee.", Session, now)!.Value;
+            FactStore.Forget(connection, original, "wrong", now);
+            UserFacts.Capture(connection, UserFactTopic.AboutYou, "I drink coffee.", Session, now);
+            var other = UserFacts.Capture(connection, UserFactTopic.AboutYou, "I drink water.", Session, now)!.Value;
+            revised = UserFacts.Restate(connection, other, "Jim drinks water.", Session, now)!.Value;
+        }
+
+        var response = Tail(sandbox, new JsonObject { ["after"] = before });
+        var rows = Rows(response["writes"]!).ToList();
+
+        var coffee = rows.Where(r => (string)r["body"]! == "I drink coffee.").ToList();
+        Assert.Equal(2, coffee.Count);
+        Assert.All(coffee, r => Assert.Equal("capture", (string)r["origin"]!));
+        Assert.All(coffee, r => Assert.Null(r["replaces"]));
+        Assert.Single(coffee, r => (bool)r["live"]!);
+        var revision = Assert.Single(rows, r => (string)r["body"]! == "Jim drinks water.");
+        Assert.Equal("revision", (string)revision["origin"]!);
+        Assert.Equal(FactCatalog.HandleFor(revised - 1), (string)revision["replaces"]!);
+        Assert.True((bool)revision["live"]!);
+        var superseded = Assert.Single(rows, r => (string)r["body"]! == "I drink water.");
+        Assert.False((bool)superseded["live"]!);
+    }
+
+    [Theory]
+    [InlineData("/directives/a-1234", "directs", "stated", false, "directive")]
+    [InlineData("/directivesx/a", "directs", "stated", false, "other")]
+    [InlineData("/knowledge/x", "invariant", "stated", false, "invariant")]
+    [InlineData("/sessions/1/compaction-digest/abc", "notes", "inferred", false, "compaction")]
+    [InlineData("/sessions/1/compaction-digest", "notes", "inferred", false, "note")]
+    [InlineData("/sessions/1/another-agent/abc", "notes", "inferred", false, "note")]
+    [InlineData("/user/about/x", "states", "stated", true, "revision")]
+    [InlineData("/user/about/x", "states", "stated", false, "capture")]
+    [InlineData("/user/about/x", "states", "inferred", false, "other")]
+    [InlineData("/userx/about/x", "states", "stated", false, "other")]
+    [InlineData("/sessions/1/abc", "notes", "inferred", false, "note")]
+    public void OriginOf_FirstMatchWins_AndNearbyPathsDoNotMatch(
+        string path, string predicate, string learnedVia, bool replaces, string expected) =>
+        Assert.Equal(expected, ModApi.OriginOf(path, predicate, learnedVia, replaces));
+
+    [Fact]
+    public void Tail_FirstReadReturnsNoRowsInAnyList_OnlyTheCursors()
+    {
+        using var sandbox = new SandboxHome();
+        Remember(sandbox, "Already there.", Session);
+        var feed = new TelemetryFeed(sandbox.Home);
+
+        var response = Tail(sandbox, feed: feed);
+
+        Assert.Empty(Rows(response["writes"]!));
+        Assert.Null(response["writes"]!["skipped"]);
+        Assert.Empty(Rows(response["retractions"]!));
+        Assert.True((long)response["head"]! > 0);
+        Assert.True((long)response["now"]! > 0);
+        Assert.False(string.IsNullOrEmpty((string)response["events"]!["epoch"]!));
+        Assert.Equal(0L, (long)response["events"]!["head"]!);
+        Assert.Empty(Rows(response["events"]!));
+        Assert.Null(response["events"]!["skipped"]);
+    }
+
+    [Fact]
+    public void Tail_AFirstReadOnAnEmptyStore_HasHeadZero()
+    {
+        using var sandbox = new SandboxHome();
+
+        Assert.True((long)Tail(sandbox)["head"]! >= 0);
+    }
+
+    [Fact]
+    public void Tail_AfterABurst_ReturnsTheNewestRowsFirst_AndCountsTheRestExactly()
+    {
+        using var sandbox = new SandboxHome();
+        var before = Head(sandbox);
+        for (var i = 0; i < 60; i++)
+        {
+            Remember(sandbox, $"Burst note number {i} about subject {i}.", Session);
+        }
+
+        var response = Tail(sandbox, new JsonObject { ["after"] = before, ["limit"] = 50 });
+        var ids = Rows(response["writes"]!).Select(r => (long)r["id"]!).ToList();
+
+        Assert.Equal(50, ids.Count);
+        Assert.Equal(ids.OrderByDescending(id => id), ids);
+        Assert.Equal((long)response["head"]!, ids[0]);
+        Assert.Equal(10L, (long)response["writes"]!["skipped"]!);
+    }
+
+    [Fact]
+    public void Tail_ScopeDefaultsToSession_AndAllAddsOtherSessionsRowsMarkedNotThisSession()
+    {
+        using var sandbox = new SandboxHome();
+        var before = Head(sandbox);
+        Remember(sandbox, "Mine to see.", Session);
+        Remember(sandbox, "Someone else's note.", "cc-session-2");
+
+        var defaulted = Tail(sandbox, new JsonObject { ["after"] = before });
+        var explicitSession = Tail(sandbox, new JsonObject { ["after"] = before, ["scope"] = "session" });
+        var all = Tail(sandbox, new JsonObject { ["after"] = before, ["scope"] = "all" });
+
+        Assert.Equal(["Mine to see."], Rows(defaulted["writes"]!).Select(r => (string)r["body"]!));
+        Assert.Equal(defaulted["writes"]!.ToJsonString(), explicitSession["writes"]!.ToJsonString());
+        Assert.True((bool)WriteWithBody(all, "Mine to see.")["this_session"]!);
+        Assert.False((bool)WriteWithBody(all, "Someone else's note.")["this_session"]!);
+    }
+
+    [Fact]
+    public void Tail_AModForgetIsARetractionUnderSession_ButANullSessionForgetOnlyUnderAll()
+    {
+        using var sandbox = new SandboxHome();
+        var mine = Remember(sandbox, "Retracted by this session.", Session);
+        var orphan = Remember(sandbox, "Retracted by the command line.", Session);
+        var since = Now();
+        Call(sandbox, "forget", new JsonObject { ["session_id"] = Session, ["fact_id"] = mine });
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            FactStore.Forget(connection, long.Parse(orphan[1..]), "cli", DateTimeOffset.UtcNow);
+        }
+
+        var session = Tail(sandbox, new JsonObject { ["closed_after"] = since });
+        var all = Tail(sandbox, new JsonObject { ["closed_after"] = since, ["scope"] = "all" });
+
+        var onlyMine = Assert.Single(Rows(session["retractions"]!));
+        Assert.Equal(mine, (string)onlyMine["handle"]!);
+        Assert.True((bool)onlyMine["this_session"]!);
+        Assert.Equal("Retracted by this session.", (string)onlyMine["body"]!);
+        Assert.Equal("retracted by the user", (string)onlyMine["reason"]!);
+        Assert.Equal("note", (string)onlyMine["origin"]!);
+        Assert.Equal(2, Rows(all["retractions"]!).Count());
+        Assert.False((bool)Assert.Single(Rows(all["retractions"]!), r => (string)r["handle"]! == orphan)["this_session"]!);
+    }
+
+    [Fact]
+    public void Tail_ACodeFactForgetAndASupersedeAreNotRetractions()
+    {
+        using var sandbox = new SandboxHome();
+        var since = Now();
+        var now = DateTimeOffset.UtcNow;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            var code = FactStore.Remember(
+                connection,
+                new FactWrite("/code/repo/File.cs", "file", "declares", "class Gone.", "code", "observed", Regenerable: true),
+                now).FactId;
+            FactStore.Forget(connection, code, "file removed", now);
+            var capture = UserFacts.Capture(connection, UserFactTopic.AboutYou, "I like rain.", Session, now)!.Value;
+            UserFacts.Restate(connection, capture, "Jim likes rain.", Session, now);
+        }
+
+        var all = Tail(sandbox, new JsonObject { ["closed_after"] = since, ["scope"] = "all" });
+
+        Assert.Empty(Rows(all["retractions"]!));
+    }
+
+    [Fact]
+    public void Tail_ALateCommittingRetractionInsideTheSlackIsReturned_AndOneJustOutsideIsNot()
+    {
+        using var sandbox = new SandboxHome();
+        var late = Remember(sandbox, "Stamped before the cursor, committed after.", Session);
+        var tooOld = Remember(sandbox, "Stamped well before the cursor.", Session);
+        var cursor = Now();
+        Assert.Empty(Rows(Tail(sandbox, new JsonObject { ["closed_after"] = cursor, ["scope"] = "all" })["retractions"]!));
+
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            FactStore.Forget(connection, long.Parse(late[1..]), "r", DateTimeOffset.FromUnixTimeSeconds(cursor - 7));
+            FactStore.Forget(connection, long.Parse(tooOld[1..]), "r", DateTimeOffset.FromUnixTimeSeconds(cursor - 11));
+        }
+
+        var second = Tail(sandbox, new JsonObject { ["closed_after"] = cursor, ["scope"] = "all" });
+
+        Assert.Equal([late], Rows(second["retractions"]!).Select(r => (string)r["handle"]!));
+    }
+
+    private static string PlanOf(SandboxHome sandbox, string sql, params (string Name, object Value)[] parameters)
+    {
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        using var command = connection.CreateCommand();
+        command.CommandText = "EXPLAIN QUERY PLAN " + sql;
+        foreach (var (name, value) in parameters)
+        {
+            command.Parameters.AddWithValue(name, value);
+        }
+
+        var lines = new List<string>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            lines.Add(reader.GetString(reader.GetOrdinal("detail")));
+        }
+
+        return string.Join(" | ", lines);
+    }
+
+    [Fact]
+    public void Tail_QueryPlans_SeekAndNeverScanFactOrSupersession()
+    {
+        using var sandbox = new SandboxHome();
+        (string, object)[] write = [("$after", 0L), ("$head", 10L), ("$limit", 5), ("$session", "s")];
+        (string, object)[] retraction = [("$since", 0L), ("$limit", 5), ("$session", "s")];
+
+        var writes = PlanOf(sandbox, ModApi.TailWritesSql + ModApi.TailSessionFilter + ModApi.TailWritesOrder, write);
+        var writesAll = PlanOf(sandbox, ModApi.TailWritesSql + ModApi.TailWritesOrder, write[..3]);
+        (string, object)[] counted = [("$after", 0L), ("$head", 10L), ("$session", "s")];
+        var count = PlanOf(sandbox, ModApi.TailWritesCountSql + ModApi.TailSessionFilter + ";", counted);
+        var retractions = PlanOf(sandbox, ModApi.TailRetractionsSql + ModApi.TailSessionFilter + ModApi.TailRetractionsOrder, retraction);
+        var head = PlanOf(sandbox, ModApi.TailHeadSql);
+
+        Assert.Contains("SEARCH f USING INTEGER PRIMARY KEY", writes);
+        Assert.Contains("SEARCH f USING INTEGER PRIMARY KEY", writesAll);
+        Assert.Contains("SEARCH f USING INTEGER PRIMARY KEY", count);
+        Assert.Contains("INDEX ix_supersession_new", writes);
+        Assert.Contains("USING INDEX ix_supersession_retracted", retractions);
+        Assert.Contains("INDEX ix_supersession_new", retractions);
+        Assert.DoesNotContain("SCAN", head, StringComparison.Ordinal);
+        foreach (var plan in new[] { writes, writesAll, count, retractions, head })
+        {
+            Assert.DoesNotContain("SCAN f", plan, StringComparison.Ordinal);
+            Assert.DoesNotContain("SCAN x", plan, StringComparison.Ordinal);
+            Assert.DoesNotContain("SCAN y", plan, StringComparison.Ordinal);
+            Assert.DoesNotContain("SCAN supersession", plan, StringComparison.Ordinal);
+            Assert.DoesNotContain("SCAN fact", plan, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Tail_WritesNoTelemetry_OnSuccessFailureOrFirstRead()
+    {
+        using var sandbox = new SandboxHome();
+        Remember(sandbox, "Seeds the telemetry file.", Session);
+        var path = Engram.Core.Telemetry.ResolvePath(sandbox.Home);
+        var size = new FileInfo(path).Length;
+
+        Tail(sandbox);
+        Tail(sandbox, new JsonObject { ["after"] = 0, ["closed_after"] = 0 });
+        var (status, _) = Call(sandbox, "tail", new JsonObject { ["session_id"] = Session, ["limit"] = 999 });
+
+        Assert.Equal(400, status);
+        Assert.Equal(size, new FileInfo(path).Length);
+    }
+
+    [Theory]
+    [InlineData("after", -1)]
+    [InlineData("closed_after", -1)]
+    [InlineData("event_after", -1)]
+    [InlineData("limit", 0)]
+    [InlineData("limit", 51)]
+    [InlineData("scope", "everything")]
+    [InlineData("scope", "")]
+    public void Tail_RejectsEachInvalidField(string field, object value)
+    {
+        using var sandbox = new SandboxHome();
+        var body = new JsonObject { ["session_id"] = Session };
+        body[field] = value is int number ? JsonValue.Create(number) : JsonValue.Create((string)value);
+
+        Assert.Equal(400, Call(sandbox, "tail", body).Status);
+    }
+
+    [Fact]
+    public void Tail_RejectsAnOverlongEpoch_AndAcceptsOneAtTheLimit()
+    {
+        using var sandbox = new SandboxHome();
+
+        Assert.Equal(400, Call(sandbox, "tail", new JsonObject { ["session_id"] = Session, ["event_epoch"] = new string('e', 65) }).Status);
+        Assert.Equal(200, Call(sandbox, "tail", new JsonObject { ["session_id"] = Session, ["event_epoch"] = new string('e', 64) }).Status);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(50)]
+    public void Tail_AcceptsTheLimitBounds(int limit)
+    {
+        using var sandbox = new SandboxHome();
+
+        Assert.Equal(200, Call(sandbox, "tail", new JsonObject { ["session_id"] = Session, ["limit"] = limit }).Status);
+    }
+
+    [Fact]
+    public void Tail_WithAnAfterAheadOfTheHead_ReturnsNoRowsAndAHeadBehindIt()
+    {
+        using var sandbox = new SandboxHome();
+        Remember(sandbox, "Present.", Session);
+        var head = Head(sandbox);
+
+        var response = Tail(sandbox, new JsonObject { ["after"] = head + 100 });
+
+        Assert.Equal(head, (long)response["head"]!);
+        Assert.Empty(Rows(response["writes"]!));
+        Assert.Equal(0L, (long)response["writes"]!["skipped"]!);
+    }
+
+    private static TelemetryRecord Event(string session, string kind, string? query = null) =>
+        new(DateTimeOffset.UtcNow.ToString("O"), session, kind, query);
+
+    [Fact]
+    public void Tail_Events_ReadFromTheCursorOnlyWithinTheSameEpoch()
+    {
+        using var sandbox = new SandboxHome();
+        var feed = new TelemetryFeed(sandbox.Home);
+        var epoch = (string)Tail(sandbox, feed: feed)["events"]!["epoch"]!;
+        for (var i = 1; i <= 3; i++)
+        {
+            Engram.Core.Telemetry.Append(sandbox.Home, Event(Session, TelemetryEventKind.Remember, $"q{i}"));
+        }
+
+        feed.Poll();
+
+        var fromOne = Tail(sandbox, new JsonObject { ["event_epoch"] = epoch, ["event_after"] = 1 }, feed)["events"]!;
+        var otherEpoch = Tail(sandbox, new JsonObject { ["event_epoch"] = "not-the-epoch", ["event_after"] = 0 }, feed)["events"]!;
+        var noEpoch = Tail(sandbox, new JsonObject { ["event_after"] = 0 }, feed)["events"]!;
+
+        Assert.Equal([3L, 2L], Rows(fromOne).Select(r => (long)r["seq"]!));
+        Assert.Equal("q3", (string)Rows(fromOne).First()["record"]!["query"]!);
+        Assert.Equal(3L, (long)fromOne["head"]!);
+        Assert.Equal(0L, (long)fromOne["skipped"]!);
+        Assert.Empty(Rows(otherEpoch));
+        Assert.Null(otherEpoch["skipped"]);
+        Assert.Empty(Rows(noEpoch));
+    }
+
+    [Fact]
+    public void Tail_Events_PastTheRingCountTheLostAndTheUnreturnedExactly()
+    {
+        using var sandbox = new SandboxHome();
+        var feed = new TelemetryFeed(sandbox.Home);
+        var epoch = (string)Tail(sandbox, feed: feed)["events"]!["epoch"]!;
+        const int Written = TelemetryFeed.RingCapacity + 76;
+        for (var i = 0; i < Written; i++)
+        {
+            Engram.Core.Telemetry.Append(sandbox.Home, Event(Session, TelemetryEventKind.Remember, $"q{i}"));
+        }
+
+        while (feed.Poll().Count > 0)
+        {
+        }
+
+        var events = Tail(sandbox, new JsonObject { ["event_epoch"] = epoch, ["event_after"] = 0, ["limit"] = 50 }, feed)["events"]!;
+
+        Assert.Equal(Written, (long)events["head"]!);
+        Assert.Equal(50, Rows(events).Count());
+        Assert.Equal(76L + (TelemetryFeed.RingCapacity - 50), (long)events["skipped"]!);
+    }
+
+    [Fact]
+    public void Tail_Events_SessionScopeFiltersOnTheRecordsSessionId_AllDoesNot()
+    {
+        using var sandbox = new SandboxHome();
+        var feed = new TelemetryFeed(sandbox.Home);
+        var epoch = (string)Tail(sandbox, feed: feed)["events"]!["epoch"]!;
+        Engram.Core.Telemetry.Append(sandbox.Home, Event(Session, TelemetryEventKind.ModCall, "mine"));
+        Engram.Core.Telemetry.Append(sandbox.Home, Event("another-session", TelemetryEventKind.ModCall, "theirs"));
+        Engram.Core.Telemetry.Append(sandbox.Home, Event(Session + "x", TelemetryEventKind.ModCall, "prefix-neighbour"));
+        feed.Poll();
+
+        var cursor = new JsonObject { ["event_epoch"] = epoch, ["event_after"] = 0 };
+        var scoped = Tail(sandbox, (JsonObject)cursor.DeepClone(), feed)["events"]!;
+        var all = Tail(sandbox, new JsonObject { ["event_epoch"] = epoch, ["event_after"] = 0, ["scope"] = "all" }, feed)["events"]!;
+
+        Assert.Equal(["mine"], Rows(scoped).Select(r => (string)r["record"]!["query"]!));
+        Assert.Equal(3, Rows(all).Count());
+    }
+
+    [Fact]
+    public void Tail_WithNoFeed_ReportsEventsNull()
+    {
+        using var sandbox = new SandboxHome();
+
+        Assert.Null(Tail(sandbox)["events"]);
     }
 }
