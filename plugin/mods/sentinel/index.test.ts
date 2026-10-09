@@ -66,6 +66,9 @@ function rig(
     failToast?: boolean
     failGet?: (key: string) => boolean
     failSet?: (key: string) => boolean
+    /** Holds the next tool call until it resolves; that call alone takes `deny` and `fail`. */
+    gate?: Promise<void>
+    reached?: boolean
   } = { deny: opts.toolDeny }
   const digestWrites: string[] = []
   const injected: string[] = []
@@ -86,10 +89,20 @@ function rig(
   })
   const panes: { id: string; title?: string }[] = []
   if (opts.noCwd !== true) on('session.cwd', () => ({ value: '/repo' }))
-  on('tool.call', (_$, e) => {
-    if (control.fail === true) throw new Error('tool failed')
+  on('tool.call', async (_$, e) => {
+    const { gate, deny, fail } = control
+    if (gate !== undefined) {
+      control.gate = undefined
+      control.deny = undefined
+      control.fail = false
+      control.reached = true
+      await gate
+    }
+    const failNow = gate !== undefined ? fail : control.fail
+    const denyNow = gate !== undefined ? deny : control.deny
+    if (failNow === true) throw new Error('tool failed')
     ran.push({ ...e })
-    if (control.deny !== undefined) return { deny: control.deny }
+    if (denyNow !== undefined) return { deny: denyNow }
     return { ref: 1, result: {}, text: 'ok', ...(opts.toolContext === undefined ? {} : { context: opts.toolContext }) }
   })
   on('ui.toast', (_$, e) => {
@@ -689,3 +702,33 @@ test('S9: the 1.3.11 atom, a string[] seen with no session, gives fresh state an
   expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
   expect(r.ran.length).toBe(1)
 })
+
+for (const how of ['refused', 'throws'] as const) {
+  test(`S10: a call that ${how} after the session id changed leaves the new session's announced handles alone`, async ($, on) => {
+    const { r, now } = changing(on)
+    now.facts = [F1]
+    let open!: () => void
+    r.control.gate = new Promise<void>((resolve) => (open = resolve))
+    if (how === 'refused') r.control.deny = 'no'
+    else r.control.fail = true
+
+    const inFlight = $.tool.call(edit(FILE))
+    const outcome = inFlight.then(
+      (v) => v,
+      (err) => err,
+    )
+    for (let i = 0; i < 100 && r.control.reached !== true; i++) await r.clock.advance(0)
+    expect(r.control.reached).toBe(true)
+
+    r.router.sessionId = () => 'session-B'
+    expect(contextOf(await $.tool.call(edit(FILE)))).toEqual([blockOf(F1)])
+
+    open()
+    const done = await outcome
+    if (how === 'refused') expect(denyOf(done)).toBe('no')
+    else expect(done).toBeInstanceOf(Error)
+
+    expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
+    expect(pathFactsCalls(r).length).toBe(3)
+  })
+}

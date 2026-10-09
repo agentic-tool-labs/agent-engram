@@ -119,6 +119,8 @@ export const register: Register = (on, options) => {
       // Takes back exactly the handles this call announced, so the next attempt announces them again.
       const release = () =>
         update($, SENTINEL, (s) => {
+          // The session changed while the call was in flight: the reset already dropped these handles.
+          if (s.session !== sessionId) return s
           const t = forSession(s, sessionId, SENTINEL_SESSION)
           return { ...t, seen: { ...t.seen, [key!]: (t.seen[key!] ?? []).filter((h) => !announced.includes(h)) } }
         })
