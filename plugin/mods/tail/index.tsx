@@ -113,16 +113,17 @@ function start($: EngineInterface, scope: 'session' | 'all') {
 async function open($: EngineInterface, scope: 'session' | 'all') {
   const opened = await $.ui.open({ id: PANE, title: TITLE })
   // A fresh open starts from the store's head: the cursors are dropped so the first request carries
-  // none, and what happened while the pane was shut is never fetched. Rows already drawn stay.
+  // none, and what happened while the pane was shut is never fetched. Rows kept from an earlier
+  // viewing would sit above that gap as if the history were continuous, and an old freshness time
+  // would read as current, so both go; the filter is the person's and stays.
   await update($, TAIL, (s) => ({
     paneOpen: opened.isPlaced,
     filterOpen: s.filterOpen,
-    rows: s.rows,
+    rows: [],
     callSeq: s.callSeq,
     markerSeq: s.markerSeq,
     handles: s.handles,
     groups: s.groups,
-    lastOkAt: s.lastOkAt,
   }))
   if (opened.isPlaced) start($, scope)
   return opened

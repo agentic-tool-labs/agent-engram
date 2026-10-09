@@ -212,7 +212,7 @@ test('M4: the first request carries no cursors and its rows are not drawn', asyn
   expect((await rowsOf($)).length).toBe(0)
 })
 
-test('M4: a pane opened again after being closed starts from fresh cursors and keeps what it drew', async ($, on) => {
+test('M4: a pane opened again after being closed starts from fresh cursors and an empty ring', async ($, on) => {
   const w = world(on)
   w.script(response({ head: 10 }), response({ head: 11, writes: { rows: [write(11)], skipped: null } }), response({ head: 40 }))
   await openAndSettle($, w)
@@ -223,7 +223,7 @@ test('M4: a pane opened again after being closed starts from fresh cursors and k
   await w.advance(0)
 
   expect(Object.keys(w.tails()[2]!.body as Record<string, unknown>).sort()).toEqual(['mod', 'scope', 'session_id'])
-  expect((await rowsOf($)).some((r) => r.includes(' f11 '))).toBe(true)
+  expect((await rowsOf($)).some((r) => r.includes(' f11 '))).toBe(false)
 })
 
 test('M5: later requests send the head, the retraction cursor and the event cursor', async ($, on) => {
@@ -1178,4 +1178,53 @@ test('R9: and a saved flag that says closed does not resume', async ($, on) => {
   await w.advance(60_000)
 
   expect(w.tails().length).toBe(0)
+})
+
+test('R10: reopening shows no earlier rows and no Updated line until the first answer, and keeps the filter', async ($, on) => {
+  const w = world(on)
+  w.script(response(), response({ head: 11, writes: { rows: [write(11)], skipped: null } }), 'hang')
+  const heartbeat = async () => (await shown($)).find((t) => t.startsWith('Updated '))
+
+  await openAndSettle($, w)
+  await w.advance(2_000)
+  expect((await rowViews($)).length).toBe(1)
+  expect(await heartbeat()).toBeDefined()
+  await openFilter($)
+  await (await mountPane($)).press({ key: 'g-reads' })
+
+  await toggle($)
+  const reopened = await toggle($)
+  await w.advance(0)
+
+  expect((reopened as { text: string }).text).toBe('Memory Tail opened.')
+  expect((await rowViews($)).length).toBe(0)
+  expect(await heartbeat()).toBeUndefined()
+  const labels = buttons(await drawn($)).map((b) => String(b.props?.['label']))
+  expect(labels[0]).toBe('Filter 5/8 ▴')
+  expect(labels).toContain('· Reads')
+})
+
+test('R11: a call made while the pane is open and nothing is polling is recorded, and none while it is closed', async ($, on) => {
+  const w = await reloaded($, on, survived(saved()))
+  on('tool.call', () => ({ result: {}, text: '[f77] ok' }) as never)
+  w.script(response({ head: 10 }))
+
+  await $.tool.call({ tool: ENGRAM_TOOLS.remember, tool_use_id: 't1', statement: 'said during the gap' } as never)
+  await toggle($)
+  await w.advance(0)
+
+  const views = await rowViews($)
+  expect(views.some((r) => r.label === 'remember' && r.detail === 'f77 said during the gap')).toBe(true)
+  expect(views.some((r) => r.label === 'note')).toBe(true)
+})
+
+test('R11: with the saved open flag false, a call is not recorded', async ($, on) => {
+  const w = await reloaded($, on, survived(saved({ paneOpen: false })), [])
+  on('tool.call', () => ({ result: {}, text: '[f77] ok' }) as never)
+
+  await $.tool.call({ tool: ENGRAM_TOOLS.remember, tool_use_id: 't1', statement: 'said while closed' } as never)
+  await w.advance(0)
+
+  // Looked at without opening: a fresh open would clear rows, and this must not pass for that reason.
+  expect((await rowViews($)).some((r) => r.label === 'remember')).toBe(false)
 })
