@@ -62,6 +62,8 @@ type World = {
   /** What the hooks beneath saw, in order: 'open' for a ui.open, 'next' for a prompt reaching the engine. */
   order: string[]
   submitted: PromptSubmitInput[]
+  /** `openThrows` makes the next ui.open throw, once. */
+  control: { openThrows: boolean }
   setSession: (id: string) => void
 }
 
@@ -72,6 +74,7 @@ function world(on: On, table: RoutingTable = RUNNING): World {
   const closed: string[] = []
   const order: string[] = []
   const submitted: PromptSubmitInput[] = []
+  const control: World['control'] = { openThrows: false }
   const router = installFakeEngine(on, {
     ...table,
     ops: {
@@ -83,7 +86,15 @@ function world(on: On, table: RoutingTable = RUNNING): World {
     },
   })
   const clock = mock.clock(on, { now: NOW_MS })
-  on('ui.open', (_$, e) => (opened.push((e as { id: string }).id), order.push('open'), { value: { isPlaced: true } }) as never)
+  on('ui.open', (_$, e) => {
+    if (control.openThrows) {
+      control.openThrows = false
+      throw new Error('open failed')
+    }
+    opened.push((e as { id: string }).id)
+    order.push('open')
+    return { value: { isPlaced: true } } as never
+  })
   on('prompt.submit', (_$, e) => (order.push('next'), submitted.push(e), { text: e.text, context: e.context }))
   on('ui.close', (_$, e) => (closed.push((e as { id: string }).id), { value: undefined }) as never)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -100,6 +111,7 @@ function world(on: On, table: RoutingTable = RUNNING): World {
     closed,
     order,
     submitted,
+    control,
     setSession: (id) => {
       router.sessionId = () => id
     },
@@ -1398,6 +1410,20 @@ test('T6/T6b: a pane on screen and polling at the first prompt is left alone (T6
   list.length = 0
   await $.prompt.submit(prompt('and another thing to say'))
   expect(w.opened).toEqual([])
+})
+
+test('T8: an open that throws lets the prompt through once, and the session stays marked so later prompts do not retry', OPTION_ON, async ($, on) => {
+  const w = await reloaded($, on, survived(saved()), [])
+  w.control.openThrows = true
+  const e = prompt()
+
+  await $.prompt.submit(e)
+  expect(w.submitted).toEqual([e])
+  expect(w.opened).toEqual([])
+
+  await $.prompt.submit(prompt('and another thing to say'))
+  expect(w.opened).toEqual([])
+  expect(w.submitted.length).toBe(2)
 })
 
 test('T9: a plugin-origin prompt and one with no origin neither open nor mark; the composer prompt after them does', OPTION_ON, async ($, on) => {

@@ -3,7 +3,14 @@
 Implementer: implementor
 Reviewer: reviewer
 
-Status: r4. Spec only; nothing here has been run. The diagnostic is gated on `tail_auto_open === true` (§4, r3). Plugin 1.3.13 → 1.3.14. Branch `mods/live-memory-tail`.
+Status: r5.
+
+- **Built.** The fix and the gated diagnostic shipped in 1.3.14.
+- **Diagnostic removed in 1.3.15** (commit `9ea607a`), per §4.
+- **T8 restored.** Its open-throws case is restored as a permanent test in the follow-up commit (§6). That case guards a permanent §5 row, and the removal had wrongly deleted it.
+- The original plan text below (r1–r4) is kept as written.
+
+Status at r4: spec only, nothing run. The diagnostic is gated on `tail_auto_open === true` (§4, r3). Plugin 1.3.13 → 1.3.14. Branch `mods/live-memory-tail`.
 
 r2 closes two gaps the Implementor reported:
 
@@ -193,7 +200,7 @@ Rules for the diagnostic:
   - delete both toasts;
   - delete the `tail-diag` atom and every write to it;
   - delete the `/engram-tail` output suffix;
-  - delete the diagnostic tests T7 and T8;
+  - delete the diagnostic test T7 and T8's diagnostic content. T8's open-throws case is permanent: it guards the §5 row "`ui.open` throws or rejects → the session stays marked". Keep it as described in §6 (r5);
   - afterwards, `grep -rn "tail diag" plugin/` returns nothing.
 
 ## 5. Invariants and negative cases
@@ -245,7 +252,7 @@ Tests go in `plugin/mods/tail/tail.test.tsx`, using its existing `world()` and `
 | T6 | Pane shown and polling at the first prompt → no `ui.open`, no `ui.close`, and polling continues at two seconds | Route through `decide('toggle', …)` → red (pane closed) |
 | T7 (diag) | A stubbed undrawn open (`{ isPlaced: false, reason: 'R' }`) yields a toast containing `undrawn: R`, and the next `/engram-tail` output contains that line | Delete the atom append → red on the output half |
 | T6b (r4) | Pane already shown at the first prompt, so the session is marked with no open. The person then closes it with `/engram-tail`. The next composer prompt in the same session → no `ui.open`. | Make the "already shown" path return without marking the session → red |
-| T8 (diag/fail-open) | `ui.open` throwing → `next` is called exactly once with the original event | Remove the guard around the open → red |
+| T8 (permanent, r5) | The first composer prompt's `ui.open` throws. Then: the prompt passes exactly once, with the original event. A second composer prompt in the same session, with `ui.open` now working, makes no further open: the open count stays 1. | Remove the guard around the open → red (prompt not passed once). Move the session mark below the open, which is the Reviewer's arm M → red (second prompt opens). Arm M left all 474 tests green once the diagnostic was gone; this test exists to close that gap. |
 
 **T8 no longer tests a throwing `ui.toast` (r4).**
 - The engine swallows a throwing `ui.toast` handler itself, so removing the guard leaves that arm green (the Reviewer's arm A: 479 passing, 0 failing). An assertion that cannot fail is dropped.
