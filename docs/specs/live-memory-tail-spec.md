@@ -31,6 +31,14 @@ Reviewer: reviewer
   - F5: body clip fixed at 120 characters.
   - §4/S9: `INDEXED BY` plus the unary `+` are stated as load-bearing; the planner does not pick the index unaided.
 
+- **r6 (narrow panes; Jim's screenshot of a ~24-column pane).** §6.9 added, presentation only.
+  - Rows become a fixed head line (marks, time, label) plus an optional detail line (short fields first, free text last). Both lines use host `truncate-end`.
+  - The filter becomes one `Filter n/8 ▾` button that discloses a vertical list of toggles.
+  - Status texts are shortened to wrap-safe forms.
+  - Day separators replace dated timestamps.
+  - The host has no popup and no width reader, so the layout is width-agnostic.
+  - ce26162's button strip is deleted. Plugin version 1.3.7.
+
 ## TL;DR
 
 - `/engram-tail` toggles the **Memory Tail** pane: a live, newest-first log of memory activity.
@@ -312,7 +320,7 @@ The tie order exists because telemetry is appended after the write it reports, s
 
 **"This session" marker `•`.** Shown on a row when `this_session` is true, or when its handle is in §6.4's handle set. The mark means *known* to be this session; an unmarked row may still be (D43). Nothing is dimmed.
 
-**Row shapes.** The label is always the exact kind, origin or tool name:
+**Row shapes.** *(r6: the **content** below still holds. **Layout, order within a row, and degradation at narrow widths** are now governed by §6.9, which supersedes this table wherever the two differ.)* The label is always the exact kind, origin or tool name:
 
 | Row | Shows |
 |---|---|
@@ -328,7 +336,7 @@ The tie order exists because telemetry is appended after the write it reports, s
 
 ### 6.7 Filter control
 
-The pane header has one toggle per group. Filtering is client-side, the state lives in the `tail` atom, and the server returns every kind in scope. Groups exist only for toggling; a row's label is always its own kind.
+*(r6: the **control** is now the disclosure described in §6.9.2, which replaces the one-row button strip. The groups, their members and their defaults below are unchanged.)* Filtering is client-side, the state lives in the `tail` atom, and the server returns every kind in scope. Groups exist only for toggling; a row's label is always its own kind.
 
 | Group | Members | Default |
 |---|---|---|
@@ -356,7 +364,158 @@ The tick never throws (`shared/guard.ts` pattern) and always reschedules unless 
 | `error` | `memory tail error` | 15 s |
 | success with `events: null` | `activity feed unavailable — showing writes only` | 2 s |
 
+*(r6: the status **texts** displayed are the short forms in §6.9.3. The reasons and the loop behaviour above are unchanged.)*
+
 An unknown op returns 404 `not_found`, which the shared client maps to `not-found`. `tail` never returns `not_found` for anything else, so here that reason means "op missing". Do not change the client.
+
+### 6.9 Presentation at narrow widths (r6)
+
+This section is presentation only. Data, cursors, scope, groups, filter defaults, sort order, ring size and the failure loop are unchanged.
+
+**What the host offers** (engine types `plugin/.claude-plugin/types/claude-code/index.d.ts`, stamped 2.1.295):
+- **Elements:** `Box`, `Text`, `Button`, `Input`, `Select`, `Link`, `Code`, `Markdown`, `Client`, `Raster`, `Image`.
+- **Box props** include `flexDirection`, `flexWrap`, `minWidth` and `overflow`.
+- **`Text` takes `wrap`.**
+- **No popup, menu, modal, overlay or collapsible element.**
+- **No pane width reader.** `UiPane` has no width, and `columns` exists only on a `Client` module's region. The `bodyColumns` the brief mentions does not exist.
+
+So the mod **cannot compute a layout for a given width**. The design has to be width-agnostic: every line is either something that fits the narrowest pane (24 columns), or a `Text` the host truncates (`wrap="truncate-end"`), with the information laid out most-important-first so truncation always removes the least important part.
+
+#### 6.9.1 Rows: a fixed head line and an optional detail line
+
+Every row renders as up to two `Text` lines in a column, **both `wrap="truncate-end"`**, so the host never wraps a row mid-token.
+
+**Head** (always present). Fields in this order, single spaces between:
+
+| # | Field | Width | Values |
+|---|---|---|---|
+| 1 | session mark | 1 | `•` known this session (§6.6), else a space |
+| 2 | state mark | 1 | `✗` for a retraction row or a write row now retracted, else a space |
+| 3 | time | 8 | `HH:mm:ss` via lens's `clock`; always today's form (see day separators) |
+| 4 | label | ≤ 14 | the exact kind, origin or tool name |
+| 5 | qualifier | rest | only where present: `← fN` (write that replaces), the retracted fact's origin (retraction) |
+
+At 24 columns the fixed prefix (marks, spaces, time) is 12 characters. Labels of up to 11 characters always show whole. A 12-character label shows whole only when no qualifier follows. Longer labels such as `subagent-start` lose their tail. At 80 and 120 the whole head shows.
+
+**Detail** (only when there is something to say; a kind-only event such as `remember`, `user-prompt` or `pre-compact` renders **head only**, never a blank line). Short, fixed-format fields come first and free text comes last:
+
+| Row | Detail, left to right |
+|---|---|
+| write | `fN`, then body |
+| retraction | `fN`, then body, then `— <reason>` |
+| `recall` event or call row | `<count> facts`, then `· <coverage>`, then `"<query>"` |
+| `mod-call` event | `<mod> · <tool>`, then for `recall` `· <coverage>`, then `"<query>"` (no count, D76) |
+| `remember` / `revise` call row | `fN` (if known), then the statement |
+| `forget` call row | `fN` |
+| `session-start` / `subagent-start` | `<n> facts · <m> tok`, then `agent_type` |
+| any other event or call | present fields in §6.6's fixed order, as `value` joined by ` · ` (values only, no keys) |
+
+At 24 columns a recall keeps `7 facts · high` and loses the query. A write keeps its handle and the start of its body.
+
+**Clip.** The 120-character `CLIP` (r5) stays as a **payload cap** applied to each free-text field before layout. It is not a layout width: the host's `truncate-end` cuts to the real pane width, which the mod cannot know.
+
+**Day separators.** The time column is always `HH:mm:ss`. Between two adjacent displayed rows whose local dates differ, and above the first row when its date is not today, render one separator line: `── yyyy-MM-dd ──`. The date is the first 10 characters of lens's `stamp`; do not write another formatter. Separators are presentation only: not in the ring, not counted, never filtered.
+
+**Rejected:**
+- *A single line with the body after the head.* At 24 columns the head alone fills the line and the body disappears.
+- *Host word-wrap for bodies.* An unbounded number of lines per row, and the row count stops being predictable (the D52 lesson).
+- *A `Client` module to read `columns`.* A second rendering model for one number.
+- *Evidence-gated upgrade E14:* one-line rows on wide panes via `flexWrap` + `minWidth`.
+
+#### 6.9.2 Filter: one button that discloses a vertical list
+
+**Collapsed (default).** The header is one line containing one `Button`, labelled `Filter <on>/<8> ▾`, for example `Filter 6/8 ▾`. That is at most 14 characters, so it fits 24 columns with the button's own frame.
+
+**Expanded.** Pressing the button toggles a `filterOpen` flag in the `tail` atom. The button shows `▴` while open. Directly beneath it, a `Box flexDirection="column"` holds the eight group toggles, **one `Button` per line**, labelled `✓ <Group>` or `· <Group>`.
+- The longest label is `✓ Maintenance`, 13 characters.
+- Pressing a toggle flips that group and keeps the list open.
+- Pressing `Filter … ▴` collapses it.
+- Rows render below the list while it is open.
+
+**Why this over the alternatives:**
+- *Jim's popup idea.* The host has no popup or menu element. The only candidate is `Select`, whose presentation (a closed dropdown or an inline list) and repeated-select behaviour are unconfirmed (**E11**). The disclosure needs only `Box`, `Text` and `Button`, which the tail already uses, so it is the build.
+- *If E11 shows `Select` renders as a closed popup and accepts repeated selections,* an Architect amendment may replace the expanded list with one `Select` whose options are the eight `✓/·` labels and whose `onSelect` toggles one group. The collapsed button and the atom state stay.
+- *Preset cycling* (All / Writes only / …) was rejected: it loses per-group control, which Q6's defaults presuppose.
+- *A second pane* was rejected: its placement and size are unknown, and it would need its own open/close tracking. That is the stale-open problem twice.
+
+`filterOpen` defaults to `false`, lives in the `tail` atom (`plugin/mods/shared/state.d.ts`), and survives as long as the atom does (E3).
+
+#### 6.9.3 Status and empty states
+
+These render on their own line under the header, as `Text wrap="wrap"`. A status is the one element allowed to wrap, because its action must be readable whole. To make host word-wrap safe, every status token (space-separated) is **at most 20 characters**, and the action comes first:
+
+| Reason | Text |
+|---|---|
+| `server-down` | `Server down · /engram:start` |
+| `timeout` | `Server slow · retrying` |
+| `not-initialised` | `Not initialised · engram init` |
+| `not-found` | `Server too old for the tail · update, then /engram:restart` |
+| `unsupported` | `Server has no mod API` |
+| `bad-request` | `Tail request rejected:` then the server's `detail` cut to 60 characters |
+| `error` | `Tail error · retrying` |
+| `events: null` | `Activity feed off · writes only` |
+
+Empty states (no rows to show):
+- **Nothing recorded since opening:** `No activity yet.`
+- **Rows exist but the filter hides all of them:** `All <n> rows hidden by the filter.` This is computed from the ring, so the user knows to open the filter.
+
+The `bad-request` detail is server text and may hold a long token. It renders in its own `Text wrap="truncate-end"` on the next line rather than inside the wrapping status.
+
+#### 6.9.4 Files (one commit, plugin `1.3.7`)
+
+| File | Change |
+|---|---|
+| `plugin/mods/tail/model.ts` | (a) A pure row-layout that returns the head string and an optional detail string per §6.9.1. (b) The day-separator insertion over the displayed list. (c) The filter label (`Filter n/8 ▾/▴`). (d) The §6.9.3 status texts. (e) `CLIP` kept as the payload cap |
+| `plugin/mods/tail/index.tsx` | The header renders the single Filter button. When `filterOpen`, a `Box flexDirection="column"` of eight toggle buttons follows, then the status line, then the empty state or the rows. Each row is a column `Box` holding the head `Text` and, if present, the detail `Text`, both `wrap="truncate-end"`. **Delete the interim `<Box flexWrap="wrap">` button strip from ce26162.** |
+| `plugin/mods/shared/state.d.ts` | The `tail` key gains `filterOpen: boolean`. Edit only that key |
+| `plugin/mods/tail/tail.test.tsx` | Tests below. Update or remove ce26162's wrap-strip assertions, which assert the deleted layout |
+| `plugin/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` | Version `1.3.7` |
+
+No server, C# or other mod file changes.
+
+**The ce26162 interim fix is replaced.** Its wrapping button strip is deleted. Its `truncate-end` on row text is kept and subsumed by §6.9.1, which applies it to both lines.
+
+#### 6.9.5 Tests (`plugin/mods/tail/tail.test.tsx`, `claude plugin test plugin`)
+
+The test kit's ability to render at a set width is unconfirmed (**E13**). The guards are therefore asserted at two levels.
+
+**(1) Pure layout at the three widths.**
+- Feed the row-layout outputs through a test-local `truncateEnd(line, width)`, which cuts to `width − 1` characters plus `…`. That is a model of the host, used only as the test's ruler.
+- Check at widths 24, 80 and 120.
+
+**(2) The mounted Pane's element structure.**
+- Which elements exist.
+- Their `wrap` props.
+- Their arrangement in rows and columns.
+
+| # | Guard | Assertion | Falsification |
+|---|---|---|---|
+| W1 | Marks and time survive at 24 | For every row kind, `truncateEnd(head, 24)` starts with the two marks, a space and `HH:mm:ss` | Put the label before the time → red |
+| W2 | Labels ≤ 11 survive at 24 | Every label of ≤ 11 characters, with a qualifier present, appears whole in `truncateEnd(head, 24)` (the ruler keeps a line of ≤ 24 whole and otherwise cuts to 23 + `…`) | Add a third mark column → red for 11-character labels |
+| W3 | Recall degrades to count and coverage | At 24, a recall's truncated detail contains `facts · <coverage>` and not the query | Put the query first → red |
+| W4 | Write keeps its handle | At 24, a write's truncated detail starts with `fN ` | Put the body before the handle → red |
+| W5 | Wide panes lose nothing | At 120, every head and detail built from fields at or under the CLIP equals its untruncated form whenever its length ≤ 119 | Cap the head at 24 characters in the model → red |
+| W6 | No row line can wrap | The mounted Pane: every row line `Text` has `wrap="truncate-end"`; the only `wrap="wrap"` Text is the status line | Remove `truncate-end` from the detail → red |
+| W7 | No blank detail | A `remember` event renders exactly one row line | Always render the detail Text → red |
+| W8 | Filter collapsed by default and narrow | The header holds exactly one Button, label `Filter 6/8 ▾` under the default groups, at most 14 characters | Default `filterOpen: true`, or restore the strip → red |
+| W9 | Expanded list is vertical | After pressing Filter: eight toggle Buttons, each the only Button in its own row (parent Box `flexDirection="column"`), each label ≤ 13 characters | Lay toggles out in a row → red |
+| W10 | A toggle keeps the list open and updates the count | Press `· Sessions` → label `✓ Sessions`, header `Filter 7/8 ▴`, list still shown | Collapse on toggle → red |
+| W11 | Status tokens wrap safely | Every §6.9.3 text: each space-separated token is ≤ 20 characters | Restore the r4 long text with a 21+ character token, or add one → red |
+| W12 | Filtered-empty explains itself | Ring of 5 `index` rows (Maintenance off) → `All 5 rows hidden by the filter.` | Show `No activity yet.` → red |
+| W13 | Day separator | Two rows on different local dates → exactly one `── yyyy-MM-dd ──` between them; none between same-day rows; separators are not counted in W12's `n` | Drop the separator, or emit one per row → red |
+| W14 | CLIP is a payload cap, not a layout width | A 500-character body: the detail before host truncation is `fN ` + 120 characters + `…` | Remove the cap → red |
+
+Existing tests M1–M18 stay as they are, except where M11 and M12 assert the r5 layout. Those are rewritten against §6.9's head and detail shape, with the same data assertions.
+
+#### 6.9.6 NEEDS-EVIDENCE (live; none gate the build)
+
+| ID | Question | Then |
+|---|---|---|
+| E11 | Does `Select` render as a closed popup that opens on activation, or as an inline list? Does `onSelect` fire again on the same value? | Popup plus repeated fire → amendment: `Select` replaces the expanded list |
+| E12 | In a real pane, does `Text wrap="wrap"` break only at spaces? Does `truncate-end` mark the cut with `…`? | Mid-token breaks → amendment: status also becomes `truncate-end` with a short form |
+| E13 | Can the plugin test kit mount a Pane at a given width and return the rendered lines? | Yes → add W-tests that assert real rendered lines at 24/80/120 alongside (1) |
+| E14 | Does a row `Box flexDirection="row" flexWrap="wrap"`, with a non-shrinking head and a detail `Box minWidth={30} flexGrow={1}`, put the detail beside the head on wide panes and below it on narrow ones? | Yes → amendment: one-line rows on wide panes |
+| E15 | Does `$.ui.open({ columns })` set or floor a docked pane's width? | Recorded only; the design does not depend on it |
 
 ## 8. Options
 
