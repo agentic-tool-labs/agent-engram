@@ -5728,3 +5728,97 @@ grammars and most files took tier 0; E2, E3 and E4 are live-session checks and a
 | E6 | **Measured: retrying-kind loss 0 of 3,057, so the bound holds; spool loss 0 of 25,200 and torn lines 0.** Twelve arms of 60 rounds each, 20 or 50 concurrent `hook file-touched` per round plus one `hook subagent-start` (500 ms budget) in a loop, order ON, off, off, ON then two off/off pairs, a fresh 5,308-fact home each. Reader ON was a server held in demand by a `scope=all` poll every 100 ms. `file-touched` records lost, of 1,200 per arm at 20 editors: ON 11 and 5 (0.67% together), off 10, 3, 1, 1 (0.31%); of 3,000 per arm at 50 editors: ON 15 and 15 (0.50%), off 10, 10, 14, 17 (0.43%). The off/off pairs differ by 7 and 0 records at 20 and by 0 and 3 at 50, which is the harness noise, and it is as large as the ON-versus-off gap, so **no reader effect on `file-touched` loss is measurable here**; the loss is 0.1 to 1% in every arm, consistent with D56's 1.6 to 2.0%. Nothing was added to CLAUDE.md because the number does not change its text | Retrying-kind loss > 0: Architect. Otherwise record here and in CLAUDE.md |
 | E7 | **Measured: no sustained lag above 5 s up to the cap; above the cap lag grows past 5 s.** Event rate: 0 records in 60 s idle (ring head stayed 0 on a polled server); during `index --apply` the only kind that appeared was `index` (`started` and `finished`), 16 records over 24.7 s and over 52.7 s, i.e. under 1 record/s, so neither the burst nor the freshness loop comes near the cap. Reader lag was measured with a synthetic appender writing real `file-touched` records straight to `telemetry.jsonl` at a fixed rate for 20 s, with a `scope=all` poll, lag being poll time minus write time of the newest row returned (so it includes up to one poll interval): 1/s p50 1.0 s; 20/s p50 0.16 s, max 0.25 s; 64/s p50 0.32, p95 1.27, max 2.10 s; 100/s p50 0.43, p95 1.29, max 2.08 s; 128/s at a 2 s poll p50 0.21, p95 1.43, max 2.11 s with at most 83 lines behind; 128/s at a 0.5 s poll p50 0.28, max 0.62 s. At **200/s** (above the cap) p50 4.87 s, p95 8.48 s, max 8.87 s and 1,466 lines behind and still growing at the end of the run, so the 5 s bound is crossed there, as the arithmetic of a 128/s cap requires. Pane rows under `all`: the pane is handed at most `limit` rows per poll, 50 in these runs, so 25 rows/s at the 2 s cadence whatever the input rate; `skipped` carries the rest (771 skipped over the 64/s run, 2,445 over the 200/s run). Caveat: the appender does not take `FileShare.None` as `DurableAppend` does, so this measures the reader, not writer contention | Sustained lag > 5 s: Architect |
 | E2, E3, E4 | Whether a closed pane stops being listed, whether `$.state` atoms survive reload, `/clear` and resume, whether a pane follows its bottom edge | Amend or document, per the spec |
+
+## D80 — An unchanged empty embedding backlog reads a revision, not the corpus
+
+The pending-vector anti-join was first changed to `NOT IN (SELECT fact_id FROM fact_vec)`:
+vec0 equality probes read vector blobs even when only the ID is requested. This removed the
+largest cost but still left corpus-wide pending and reconciliation scans every idle poll.
+
+Schema v18 adds a random 128-bit `embedding_revision` in `schema_meta`. Ordinary SQLite triggers
+advance it transactionally on fact inserts, deletions, and actual changes to body, validity,
+object, or regenerability. They never reference vec0: an authored write must still succeed on
+a connection without the optional extension. VectorIndex advances the same revision inside
+its vector-write transactions, including clear/drop/prune and reconciliation that changes rows.
+A rolled-back transaction rolls back its revision too. Random revisions avoid counter reuse
+when a backup is restored and a different history makes the same number of changes.
+
+The backlog reads the revision, model/dimensions/input pins, trigger readiness, and SQLite's
+schema cookie in one statement. Only a completed, failure-free full pass whose before/after
+states agree may cache that state. An equal state on a later poll returns empty without vector
+reads or a writer lock. A changed/missing marker or trigger, schema/space/input change, partial
+drain, or failure runs the existing full pass. Changes racing reconciliation cannot be
+acknowledged by reading a newer revision after the work. Revisions written by the pass's own
+batches also require a subsequent stable pass before caching. Cadence and progress publication
+are unchanged.
+
+Each poll opens a non-pooled connection through EngramDatabase. Disposing a pooled connection
+can retain the old file after a database replacement; a fresh handle observes the replacement's
+revision. A snapshot with the same revision and pins represents the same relevant fact/vector
+state. A restarted daemon always begins without a cached empty state. Migration takes the
+normal D31 pre-v18 snapshot; marker creation and trigger installation commit together.
+
+Measured on macOS arm64 with the actual .NET SQLite library, disposable on-disk stores,
+1024-dimensional fully embedded vectors, and 15 warm samples alternating arm order: at 5k
+facts a full pass cost 5.716 ms CPU versus 0.700 ms unchanged; at 50k, 77.587 versus 0.826 ms.
+These are pass costs, not whole-daemon CPU percentages. Marker triggers added 8.649–13.726 ms
+CPU per 1,000 inserts in same-corpus rollback transactions, roughly 9–14 microseconds per fact;
+they extend the existing writer transaction rather than acquiring another lock.
+
+The regression holding another connection's writer slot failed on the old unconditional
+reconciliation and passes on the fast path. Integration coverage includes insert/close/delete,
+rollback, writes without vec0, clear/drop/prune, space/input changes, missing machinery, a
+closure during inference, retry after failure, file replacement, cancellation and heartbeat.
+Fresh and genuinely v17-shaped migrated stores have matching trigger DDL. A Native AOT v17→v18
+upgrade preserved every fact row and produced its pre-migration snapshot.
+
+## D81 — Indexed symbol names and history-safe prior-session enumeration
+
+Schema v19 adds `ix_symbol_name ON entity(name, path) WHERE kind = 'symbol'` and the
+corresponding `name COLLATE NOCASE` covering index. Exact and case-insensitive lookups now
+seek names; substring fallback still scans. Resolver tier order, repository filtering before
+LIMIT, path ordering, and ambiguity labels are unchanged. The same indexes serve batched
+callee resolution without changing its SQL. Migration creates both indexes and advances the
+version in one transaction, after the normal pre-v19 snapshot.
+
+The ranker's prior-session enumeration starts from the authoritative indexed entity-path
+range `['/sessions/', '/sessions0')`. It still enumerates every prior session, including ones
+with no candidates, so pN labels do not shift. NULL/current session comparisons are unchanged.
+
+**The direct CROSS JOIN to ix_fact_thread was measured and rejected.** At 50k closed session
+entities alongside 50k knowledge facts and 50 live session notes, it fetched the closed rows
+before filtering validity: 57.5 ms versus 41.7 ms for the original fact-driven scan. Merely
+removing CROSS JOIN did not fix this shape. The final query unions the two existing live
+partitions, explicitly seeking `ux_fact_live` for object-less facts and `ux_fact_edge_live`
+for object-bearing facts. DISTINCT and DENSE_RANK apply after the union. Neither partition
+may be omitted: the prior-session universe has never excluded object-bearing facts. This
+needs no new fact index and avoids fetching historical rows entirely.
+
+Measured with the actual .NET SQLite library against disposable on-disk fixtures: at 50k
+symbols exact lookup cost 2.616 → 0.007 ms CPU, case-insensitive fallback 5.540 → 0.011 ms.
+Missing-symbol p95, including the still-scanning substring fallback, fell 9.738 → 4.012 ms.
+Creating the two indexes took 39.2 ms and added 5,545,984 logical database bytes. A 1k-symbol
+rollback insertion kernel's wall time increased from 1.87 to 2.70 ms. Eight alternating
+before/after Native AOT full-index runs over the same 100-file/5,000-function JavaScript
+repository produced identical 5,045 fact rows and 5,000 symbol entities; median wall times
+were 804 ms before and 715 ms after, with no measured throughput regression in that fixture.
+These are isolated measurements, not end-to-end MCP speedup claims.
+
+The final session kernel's median wall time was 5.932 → 0.033 ms on sparse sessions,
+75.839 → 65.959 ms on a session-heavy store, and 41.665 → 2.190 ms on the history-heavy store.
+Entity-first enumeration using both live partitions passed all three measured shapes.
+
+Production-statement query-plan guards failed without the name indexes and on the original
+session scan. The history guard also failed when both live-index seeks were deliberately
+replaced by ix_fact_thread, with query results otherwise unchanged. Full SQL-row equivalence
+covers all four lane variants, current and NULL session IDs, non-matching sessions, closed
+notes, Unicode/nested agents, object-bearing facts, and renamed entities with stale fact.path.
+Fresh/migrated index shapes and collations match. Symbol output equivalence covers case tiers,
+substring/escaped-name lookup, repository scopes, ordering, limits, and subsequent renames.
+
+Validation caveat: the full Native AOT suite had 340 passes, 9 infrastructure skips and one
+file-touched timing failure under parallel load (195 ms median versus its 100 ms ceiling).
+That test passed separately on both the previous and new binaries. A 20-sample alternating
+binary comparison measured 10.571 versus 10.586 ms median, p95 11.160 versus 11.027 ms.
+The v18→v19 Native AOT upgrade preserved every fact row and created both name indexes with
+its pre-migration snapshot.

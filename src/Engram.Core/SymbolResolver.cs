@@ -87,14 +87,18 @@ public static class SymbolResolver
     public static string LikeEscape(string value) =>
         value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 
+    internal static string StatementFor(string namePredicate, bool repoScoped)
+    {
+        var repoClause = repoScoped ? " AND e.path LIKE '%' || $repo || '%'" : string.Empty;
+        return $"SELECT e.path, e.name FROM entity e WHERE e.kind = 'symbol' AND {namePredicate}{repoClause} "
+            + "ORDER BY e.path LIMIT $limit;";
+    }
+
     private static List<(string Path, string Name)> Query(
         SqliteConnection connection, string namePredicate, string name, int limit, string? pathContains)
     {
         using var command = connection.CreateCommand();
-        var repoClause = pathContains is null ? string.Empty : " AND e.path LIKE '%' || $repo || '%'";
-        command.CommandText =
-            $"SELECT e.path, e.name FROM entity e WHERE e.kind = 'symbol' AND {namePredicate}{repoClause} "
-                + "ORDER BY e.path LIMIT $limit;";
+        command.CommandText = StatementFor(namePredicate, pathContains is not null);
         command.Parameters.AddWithValue("$name", name);
         command.Parameters.AddWithValue("$limit", limit);
         if (pathContains is not null)

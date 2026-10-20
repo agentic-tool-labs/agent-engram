@@ -1098,11 +1098,11 @@ public class SchemaMigrationTests
 
         using var migrated = EngramDatabase.OpenInitialized(sandbox.Home);
 
-        Assert.Equal(17, EngramDatabase.ReadSchemaVersion(migrated));
+        Assert.Equal(EngramDatabase.SchemaVersion, EngramDatabase.ReadSchemaVersion(migrated));
         Assert.Equal("created_at partial=1", RetractedIndexShape(migrated));
         Assert.Contains("USING INDEX ix_supersession_retracted", RetractionQueryPlan(migrated));
         var snapshot = Assert.Single(BackupStore.List(sandbox.Home));
-        Assert.Contains("pre-v17", snapshot.Name, StringComparison.Ordinal);
+        Assert.Contains("pre-v" + EngramDatabase.SchemaVersion, snapshot.Name, StringComparison.Ordinal);
         Assert.Equal(16, snapshot.SchemaVersion);
     }
 

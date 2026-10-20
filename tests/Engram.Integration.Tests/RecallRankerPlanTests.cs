@@ -9,50 +9,14 @@ namespace Engram.Integration.Tests;
 /// text was written ("pin reality, not a hope") — not the properties hoped for.
 /// </summary>
 /// <remarks>
-/// <para><b>What is NOT asserted, and why.</b> Spec §3.2's literal text says "no SCAN of
-/// <c>fact</c> anywhere in the plan." Captured reality, at both a 5-fact sandbox and a 50,000-fact
-/// synthetic corpus (both with <c>ANALYZE</c>), is that this does not hold for the statement as
-/// spec §2.3 literally specifies it — two sites scan <c>fact</c>:</para>
-/// <list type="bullet">
-/// <item><c>prior_sessions</c> materializes via <c>SCAN f USING INDEX ix_fact_session</c>. Every
-/// rewrite of its path filter tried here — <c>substr(e.path,...)</c> through the entity join (as
-/// spec §2.4 literally writes it), <c>substr(f.path,...)</c> against the denormalized column
-/// directly, and <c>f.path LIKE '/sessions/%'</c> — produced the identical scan, at both a
-/// realistic 49,950:50 long-term:session mix and an all-session corpus. The planner is choosing
-/// <c>ix_fact_session</c> for the <c>DISTINCT ... ORDER BY session_id</c> it needs regardless of
-/// the path predicate's selectivity, not failing to use an index — there does not appear to be a
-/// query-text-only fix, and ruling 6 requires ranging over the *entire* prior-session set, which is
-/// what this scan is doing. Reported as a spec-level finding, not fixed here.</item>
-/// </list>
-///
-/// <para>A second exception, <c>SCAN f2</c> from the <c>versions</c> correlated subquery, was on
-/// this list and has been removed because it was fixed rather than accepted. It was raised here as
-/// a call for the spec's author, and the measurement that answered it found the scan was not a
-/// tolerable cost but <b>93–99% of the entire ranking statement</b>, at every corpus size and every
-/// match count: on the 50,097-fact store a term matching 45,132 facts cost 1,545 ms, of which 105 ms
-/// remained with the subquery removed, and 5,308 facts cost 31.8 ms against 1.0 ms. The escalation
-/// offered one fix — substitute the denormalized <c>fact.path</c> for <c>entity.path</c> — and
-/// correctly declined to make that trade, since <c>fact.path</c> is derived state with a rename
-/// staleness window (D8). <c>ix_fact_thread</c> is a third option that costs nothing on either side:
-/// it changes which rows are <i>found</i>, never which are counted, so <c>entity.path</c> stays the
-/// authority and the plan becomes an indexed search. The index is not redundant with
-/// <c>ux_fact_live</c> despite naming the same two columns — that one is partial on
-/// <c>valid_to IS NULL</c>, and a thread length counts closed rows too, which is the whole reason
-/// the planner could not use it.</para>
-/// <para>Asserting the literal §3.2 text here would either fail permanently for a property this
-/// implementation did not regress (it followed §2.3's literal SQL), or silently paper over two real
-/// findings by weakening the assertion without saying so. Both are worse than naming the two
-/// exceptions explicitly and asserting the rest.</para>
+/// The prior-session fact scan formerly accepted here is removed by the entity-path range
+/// and entity-first join. Entity paths stay authoritative, and every prior session is still
+/// enumerated even when it contributes no candidates. The two live-fact indexes avoid
+/// fetching closed history rows for each session entity.
 /// </remarks>
 public class RecallRankerPlanTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 8, 5, 12, 0, 0, TimeSpan.Zero);
-
-    /// <summary>The one known, investigated exception to "no SCAN of fact" — see the class remarks.</summary>
-    private static readonly string[] KnownFactScanLines =
-    [
-        "SCAN f USING INDEX ix_fact_session",
-    ];
 
     /// <summary>
     /// <c>ANALYZE</c> is deliberately not exercised here. Captured at this fixture's 5-fact scale, it
@@ -66,12 +30,18 @@ public class RecallRankerPlanTests
     /// instead, and reported narratively rather than pinned to a test that cannot see that store.
     /// </summary>
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void TheRankingStatement_ScansNeitherFactNorFactTokenOutsideTheNamedExceptions(bool overlapAvailable)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public void TheRankingStatement_SeeksFactsAndTokensByIndex(bool overlapAvailable, bool vectorAvailable)
     {
+        Assert.SkipUnless(!vectorAvailable || VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
         using var sandbox = new SandboxHome(initialize: false);
+        if (vectorAvailable) VectorExtensionFile.InstallInto(sandbox.Home);
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+
+        if (vectorAvailable) VectorIndex.EnsureCreated(connection, new EmbeddingSpace("test", 4));
 
         for (var i = 0; i < 5; i++)
         {
@@ -83,7 +53,9 @@ public class RecallRankerPlanTests
                 T0);
         }
 
-        var lines = CapturePlan(connection, overlapAvailable);
+        var lines = CapturePlan(connection, overlapAvailable, vectorAvailable);
+        Assert.Contains(lines, line => line.Contains("SEARCH f USING INDEX ux_fact_live (subject_id=?)", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("SEARCH f USING INDEX ux_fact_edge_live (subject_id=?)", StringComparison.Ordinal));
         var unexpectedFactScans = UnexplainedFactScans(lines);
 
         Assert.True(
@@ -100,7 +72,7 @@ public class RecallRankerPlanTests
     }
 
     /// <summary>
-    /// Falsification: <see cref="TheRankingStatement_ScansNeitherFactNorFactTokenOutsideTheNamedExceptions"/>
+    /// Falsification: <see cref="TheRankingStatement_SeeksFactsAndTokensByIndex"/>
     /// must be able to fail, or it proves nothing. Runs the guard's own logic against a plan with an
     /// injected, unexplained scan of <c>fact</c> and confirms it is caught.
     /// </summary>
@@ -115,12 +87,11 @@ public class RecallRankerPlanTests
     private static List<string> UnexplainedFactScans(IEnumerable<string> lines) => lines
         .Where(line => line.Contains("SCAN", StringComparison.Ordinal))
         .Where(line => line.Contains(" f ", StringComparison.Ordinal) || line.Contains(" f2", StringComparison.Ordinal) || line.EndsWith(" f", StringComparison.Ordinal))
-        .Where(line => !KnownFactScanLines.Any(known => line.Contains(known, StringComparison.Ordinal)))
         .ToList();
 
-    private static List<string> CapturePlan(SqliteConnection connection, bool overlapAvailable)
+    private static List<string> CapturePlan(SqliteConnection connection, bool overlapAvailable, bool vectorAvailable)
     {
-        var text = RecallRanker.StatementFor(overlapAvailable, false, "fact_vec");
+        var text = RecallRanker.StatementFor(overlapAvailable, vectorAvailable, "fact_vec");
 
         using var command = connection.CreateCommand();
         command.CommandText = "EXPLAIN QUERY PLAN\n" + text;
@@ -130,6 +101,10 @@ public class RecallRankerPlanTests
         command.Parameters.AddWithValue("$currentSessionId", DBNull.Value);
         command.Parameters.AddWithValue("$now", T0.ToUnixTimeSeconds());
         command.Parameters.AddWithValue("$limit", 501);
+        if (vectorAvailable)
+        {
+            command.Parameters.AddWithValue("$embedding", new float[] { 1f, 0f, 0f, 0f }.SelectMany(value => BitConverter.GetBytes(value)).ToArray());
+        }
 
         using var reader = command.ExecuteReader();
         var lines = new List<string>();

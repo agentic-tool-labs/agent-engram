@@ -43,6 +43,28 @@ public static class VectorIndex
     /// </remarks>
     public const string InputVersion = "body/v1";
 
+    // A vec0 equality probe loads vector data even when only fact_id is selected. Scanning
+    // its non-null primary keys once avoids a vector read per fact on every idle poll.
+    internal const string BackfillBatchSql =
+        $"""
+        SELECT f.id, f.body
+        FROM fact f
+        WHERE f.valid_to IS NULL
+          AND f.id NOT IN (SELECT fact_id FROM {TableName})
+          AND NOT (f.regenerable IS 1 AND f.object_id IS NOT NULL)
+        ORDER BY f.id
+        LIMIT $limit;
+        """;
+
+    internal const string PendingCountSql =
+        $"""
+        SELECT COUNT(*)
+        FROM fact f
+        WHERE f.valid_to IS NULL
+          AND f.id NOT IN (SELECT fact_id FROM {TableName})
+          AND NOT (f.regenerable IS 1 AND f.object_id IS NOT NULL);
+        """;
+
     /// <summary>The text embedded for a fact. Change this and <see cref="InputVersion"/>.</summary>
     public static string InputFor(string body) => body;
 
@@ -97,6 +119,7 @@ public static class VectorIndex
             DimensionsKey,
             space.Dimensions.ToString(System.Globalization.CultureInfo.InvariantCulture));
         EngramDatabase.WriteMeta(connection, transaction, InputKey, InputVersion);
+        EmbeddingRevision.Invalidate(connection, transaction);
 
         transaction.Commit();
     }
@@ -156,16 +179,7 @@ public static class VectorIndex
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
 
         using var command = connection.CreateCommand();
-        command.CommandText =
-            $"""
-             SELECT f.id, f.body
-             FROM fact f
-             LEFT JOIN {TableName} v ON v.fact_id = f.id
-             WHERE f.valid_to IS NULL AND v.fact_id IS NULL
-               AND NOT (f.regenerable IS 1 AND f.object_id IS NOT NULL)
-             ORDER BY f.id
-             LIMIT $limit;
-             """;
+        command.CommandText = BackfillBatchSql;
         command.Parameters.AddWithValue("$limit", limit);
 
         var pending = new List<PendingEmbedding>();
@@ -184,14 +198,7 @@ public static class VectorIndex
         ArgumentNullException.ThrowIfNull(connection);
 
         using var command = connection.CreateCommand();
-        command.CommandText =
-            $"""
-             SELECT COUNT(*)
-             FROM fact f
-             LEFT JOIN {TableName} v ON v.fact_id = f.id
-             WHERE f.valid_to IS NULL AND v.fact_id IS NULL
-               AND NOT (f.regenerable IS 1 AND f.object_id IS NOT NULL);
-             """;
+        command.CommandText = PendingCountSql;
 
         return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }
@@ -240,6 +247,9 @@ public static class VectorIndex
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(vector);
 
+        using var ownedTransaction = transaction is null ? EngramDatabase.BeginWrite(connection) : null;
+        transaction ??= ownedTransaction!;
+
         var live = ReadLiveness(connection, transaction, factId);
         if (live is null)
         {
@@ -262,6 +272,8 @@ public static class VectorIndex
         command.Parameters.AddWithValue("$live", live.Value ? 1 : 0);
         command.Parameters.AddWithValue("$v", ToBlob(vector));
         command.ExecuteNonQuery();
+        EmbeddingRevision.Invalidate(connection, transaction);
+        ownedTransaction?.Commit();
     }
 
     /// <summary>
@@ -287,11 +299,15 @@ public static class VectorIndex
             return;
         }
 
+        using var ownedTransaction = transaction is null ? EngramDatabase.BeginWrite(connection) : null;
+        transaction ??= ownedTransaction!;
         Execute(
             connection,
             transaction,
             $"UPDATE {TableName} SET is_live = 0 WHERE fact_id = $id;",
             ("$id", factId));
+        EmbeddingRevision.Invalidate(connection, transaction);
+        ownedTransaction?.Commit();
     }
 
     /// <summary>
@@ -360,6 +376,10 @@ public static class VectorIndex
             touched++;
         }
 
+        if (touched > 0)
+        {
+            EmbeddingRevision.Invalidate(connection, transaction);
+        }
         transaction.Commit();
 
         return touched;
@@ -417,7 +437,11 @@ public static class VectorIndex
     {
         ArgumentNullException.ThrowIfNull(connection);
 
+        using var ownedTransaction = transaction is null ? EngramDatabase.BeginWrite(connection) : null;
+        transaction ??= ownedTransaction!;
         Execute(connection, transaction, $"DELETE FROM {TableName};");
+        EmbeddingRevision.Invalidate(connection, transaction);
+        ownedTransaction?.Commit();
     }
 
     /// <summary>
@@ -462,6 +486,8 @@ public static class VectorIndex
     {
         ArgumentNullException.ThrowIfNull(connection);
 
+        using var ownedTransaction = transaction is null ? EngramDatabase.BeginWrite(connection) : null;
+        transaction ??= ownedTransaction!;
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText =
@@ -470,7 +496,13 @@ public static class VectorIndex
              WHERE fact_id IN (SELECT id FROM fact WHERE regenerable IS 1 AND object_id IS NOT NULL);
              """;
 
-        return command.ExecuteNonQuery();
+        var deleted = command.ExecuteNonQuery();
+        if (deleted > 0)
+        {
+            EmbeddingRevision.Invalidate(connection, transaction);
+        }
+        ownedTransaction?.Commit();
+        return deleted;
     }
 
     /// <summary>
@@ -493,6 +525,7 @@ public static class VectorIndex
                 ("$key", key));
         }
 
+        EmbeddingRevision.Invalidate(connection, transaction);
         transaction.Commit();
     }
 
