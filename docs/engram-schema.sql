@@ -92,6 +92,8 @@ CREATE TABLE entity (
 -- optimization at all. An integration test writes an emoji-bearing path and fails
 -- under the sentinel version.
 CREATE INDEX ix_entity_kind ON entity(kind);
+CREATE INDEX ix_symbol_name ON entity(name, path) WHERE kind = 'symbol';
+CREATE INDEX ix_symbol_name_nocase ON entity(name COLLATE NOCASE, path) WHERE kind = 'symbol';
 
 
 -- Aliases: prior paths after a rename, and alternate names for entity resolution.
@@ -491,7 +493,27 @@ CREATE TABLE fact_review (
 
 
 CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT);
-INSERT INTO schema_meta(key, value) VALUES ('schema_version', '17');
+INSERT INTO schema_meta(key, value) VALUES ('schema_version', '19');
+
+-- The backlog caches only a verified empty revision. Plain SQLite triggers cover all
+-- fact writers without making authored writes depend on the optional vec0 extension.
+-- VectorIndex advances the same revision in its vector-write transactions.
+INSERT INTO schema_meta(key, value) VALUES ('embedding_revision', lower(hex(randomblob(16))));
+
+CREATE TRIGGER fact_embedding_insert AFTER INSERT ON fact BEGIN
+  UPDATE schema_meta SET value = lower(hex(randomblob(16))) WHERE key = 'embedding_revision';
+END;
+
+CREATE TRIGGER fact_embedding_update
+  AFTER UPDATE OF body, valid_to, object_id, regenerable ON fact
+  WHEN old.body IS NOT new.body OR old.valid_to IS NOT new.valid_to
+    OR old.object_id IS NOT new.object_id OR old.regenerable IS NOT new.regenerable BEGIN
+  UPDATE schema_meta SET value = lower(hex(randomblob(16))) WHERE key = 'embedding_revision';
+END;
+
+CREATE TRIGGER fact_embedding_delete AFTER DELETE ON fact BEGIN
+  UPDATE schema_meta SET value = lower(hex(randomblob(16))) WHERE key = 'embedding_revision';
+END;
 
 -- Built by a fresh CREATE, and pre-stamped ready: an empty table matches whatever
 -- FactTokenIndex.Rebuild would produce over zero facts, so a new store needs no rebuild pass.

@@ -499,17 +499,30 @@ public static class RecallRanker
                 """);
         }
 
+        var liveSessionRows = new List<string>(2);
+        foreach (var (index, objectTest) in new[] { ("ux_fact_live", "IS NULL"), ("ux_fact_edge_live", "IS NOT NULL") })
+        {
+            // The two existing live partitions avoid fetching closed history rows. Both are
+            // needed: prior-session enumeration has never excluded object-bearing facts.
+            liveSessionRows.Add(
+                $"""
+                SELECT f.session_id
+                FROM entity e CROSS JOIN fact f INDEXED BY {index} ON f.subject_id = e.id
+                WHERE f.valid_to IS NULL AND f.object_id {objectTest}
+                  AND e.path >= '{sessionPrefix}' AND e.path < '{SessionFacts.Root}0'
+                  AND f.session_id IS NOT $currentSessionId
+                """);
+        }
+
         sb.Append(
             $"""
             -- Ranges over every prior-session fact, never over `candidates` (ruling 6) — a session
             -- contributing no candidates must not shift a later session's label.
             prior_sessions(session_id, label_index) AS (
-              SELECT DISTINCT f.session_id,
-                     DENSE_RANK() OVER (ORDER BY f.session_id)
-              FROM fact f JOIN entity e ON e.id = f.subject_id
-              WHERE f.valid_to IS NULL
-                AND substr(e.path, 1, {sessionPrefix.Length}) = '{sessionPrefix}'
-                AND f.session_id IS NOT $currentSessionId
+              SELECT DISTINCT session_id, DENSE_RANK() OVER (ORDER BY session_id)
+              FROM (
+                {string.Join("\nUNION ALL\n", liveSessionRows)}
+              )
             ),
 
             candidates AS (

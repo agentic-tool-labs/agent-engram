@@ -139,6 +139,77 @@ public class VectorIndexTests
         Assert.Equal(VectorIndex.InputFor("engram stores temporal facts"), pending.Text);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PendingQueries_ScanVectorIdsWithoutPerFactVectorLookups(bool count)
+    {
+        Assert.SkipUnless(VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
+
+        using var sandbox = new VectorSandbox();
+        VectorIndex.EnsureCreated(sandbox.Connection, Space);
+        var id = sandbox.AddFact("embedded", "already embedded");
+        VectorIndex.Write(sandbox.Connection, transaction: null, id, At(0));
+
+        using var command = sandbox.Connection.CreateCommand();
+        command.CommandText = "EXPLAIN QUERY PLAN "
+            + (count ? VectorIndex.PendingCountSql : VectorIndex.BackfillBatchSql);
+        if (!count)
+        {
+            command.Parameters.AddWithValue("$limit", 16);
+        }
+
+        var plan = new List<string>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            plan.Add(reader.GetString(3));
+        }
+
+        // vec0's point-lookup strategy reads vector blobs even when only the ID is requested.
+        // Its ID scan (strategy 0) avoids that work. Pin the real production statements, not
+        // a test-only rewrite or a wall-clock threshold that passes on a faster machine.
+        var vectorAccess = Assert.Single(plan, line => line.Contains("VIRTUAL TABLE", StringComparison.Ordinal));
+        Assert.Contains("INDEX 0:", vectorAccess, StringComparison.Ordinal);
+        Assert.DoesNotContain(plan, line => line.Contains("CORRELATED", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(100)]
+    public void PendingQueries_PreserveEligibilityOrderAndLimitsWithMixedVectorState(int limit)
+    {
+        Assert.SkipUnless(VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
+
+        using var sandbox = new VectorSandbox();
+        VectorIndex.EnsureCreated(sandbox.Connection, Space);
+        var expected = new List<long>();
+        for (var i = 0; i < 24; i++)
+        {
+            var id = sandbox.AddFact($"fact-{i}", $"body {i}");
+            if (i % 3 == 0)
+            {
+                VectorIndex.Write(sandbox.Connection, transaction: null, id, At(0));
+            }
+            else if (i % 3 == 1)
+            {
+                expected.Add(id);
+            }
+            else
+            {
+                sandbox.Close(id);
+            }
+        }
+
+        sandbox.AddEdgeFact("caller", "calls", "callee");
+
+        Assert.Equal(expected.Count, VectorIndex.CountPending(sandbox.Connection));
+        var pending = VectorIndex.ReadBackfillBatch(sandbox.Connection, limit);
+        Assert.Equal(expected.Take(limit), pending.Select(item => item.FactId));
+        Assert.All(pending, item => Assert.StartsWith("body ", item.Text, StringComparison.Ordinal));
+    }
+
     /// <summary>
     /// <c>INSERT OR REPLACE</c> does not work on a <c>vec0</c> table, and the failure only
     /// appears on the second write for a fact — which is exactly what <c>embed --rebuild</c>

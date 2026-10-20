@@ -20,7 +20,7 @@ namespace Engram.Core;
 /// </remarks>
 public static class EngramDatabase
 {
-    public const int SchemaVersion = 17;
+    public const int SchemaVersion = 19;
 
     public const int BusyTimeoutMilliseconds = 5000;
 
@@ -31,7 +31,8 @@ public static class EngramDatabase
     private const string SchemaResourceName = "Engram.Core.Schema.sql";
 
     /// <summary>Opens a configured connection. Does not create or verify the schema.</summary>
-    public static SqliteConnection Open(EngramHome home) => Open(home.DatabasePath, home.LibDir);
+    public static SqliteConnection Open(EngramHome home, bool pooling = true) =>
+        Open(home.DatabasePath, home.LibDir, pooling);
 
     /// <summary>Opens a configured connection, creating the schema if the file is new.</summary>
     public static SqliteConnection OpenInitialized(EngramHome home)
@@ -49,11 +50,12 @@ public static class EngramDatabase
         }
     }
 
-    private static string ConnectionStringFor(string databasePath) =>
+    private static string ConnectionStringFor(string databasePath, bool pooling = true) =>
         new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = pooling,
         }.ToString();
 
     /// <summary>Closes pooled connections to one database, so its file can be moved or deleted.</summary>
@@ -72,7 +74,7 @@ public static class EngramDatabase
     ///
     /// <para>The string is built here rather than by the caller for the same reason: a pool is
     /// identified by that exact text, so a caller that reconstructed it would keep working until
-    /// <see cref="Open(string, string?)"/> gained an option, and then release nothing while
+    /// <see cref="Open(string, string?, bool)"/> gained an option, and then release nothing while
     /// reporting success.</para>
     /// </remarks>
     public static void ReleasePooledConnections(string databasePath)
@@ -87,7 +89,7 @@ public static class EngramDatabase
     /// other caller, because connection pooling can make the missing extension look present.
     /// Prefer <see cref="Open(EngramHome)"/>, which supplies it.
     /// </param>
-    public static SqliteConnection Open(string databasePath, string? libraryDirectory = null)
+    public static SqliteConnection Open(string databasePath, string? libraryDirectory = null, bool pooling = true)
     {
         var directory = Path.GetDirectoryName(databasePath);
         if (!string.IsNullOrEmpty(directory))
@@ -95,7 +97,7 @@ public static class EngramDatabase
             Directory.CreateDirectory(directory);
         }
 
-        var connection = new SqliteConnection(ConnectionStringFor(databasePath));
+        var connection = new SqliteConnection(ConnectionStringFor(databasePath, pooling));
         connection.Open();
 
         try
@@ -541,6 +543,45 @@ public static class EngramDatabase
                 """);
 
             WriteMeta(connection, null, "schema_version", "17");
+        }
+
+        if (from < 18)
+        {
+            using var transaction = BeginWrite(connection);
+            Execute(connection, transaction,
+                """
+                INSERT OR REPLACE INTO schema_meta(key, value)
+                  VALUES ('embedding_revision', lower(hex(randomblob(16))));
+
+                CREATE TRIGGER IF NOT EXISTS fact_embedding_insert AFTER INSERT ON fact BEGIN
+                  UPDATE schema_meta SET value = lower(hex(randomblob(16))) WHERE key = 'embedding_revision';
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS fact_embedding_update
+                  AFTER UPDATE OF body, valid_to, object_id, regenerable ON fact
+                  WHEN old.body IS NOT new.body OR old.valid_to IS NOT new.valid_to
+                    OR old.object_id IS NOT new.object_id OR old.regenerable IS NOT new.regenerable BEGIN
+                  UPDATE schema_meta SET value = lower(hex(randomblob(16))) WHERE key = 'embedding_revision';
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS fact_embedding_delete AFTER DELETE ON fact BEGIN
+                  UPDATE schema_meta SET value = lower(hex(randomblob(16))) WHERE key = 'embedding_revision';
+                END;
+                """);
+            WriteMeta(connection, transaction, "schema_version", "18");
+            transaction.Commit();
+        }
+
+        if (from < 19)
+        {
+            using var transaction = BeginWrite(connection);
+            Execute(connection, transaction,
+                """
+                CREATE INDEX IF NOT EXISTS ix_symbol_name ON entity(name, path) WHERE kind = 'symbol';
+                CREATE INDEX IF NOT EXISTS ix_symbol_name_nocase ON entity(name COLLATE NOCASE, path) WHERE kind = 'symbol';
+                """);
+            WriteMeta(connection, transaction, "schema_version", "19");
+            transaction.Commit();
         }
     }
 

@@ -18,10 +18,11 @@ namespace Engram.Core;
 /// must land even with the endpoint down. So a new fact is lexically searchable immediately and
 /// becomes semantically searchable when this loop next runs. The queue is a query over
 /// <c>fact</c>, so nothing is lost in between: a crash, a restart, or a week with embeddings
-/// switched off leaves exactly the same work to do, and no bookkeeping to reconcile.</para>
+/// switched off leaves exactly the same work to do. The revision is only permission to skip
+/// an already verified empty state; it is never a second queue.</para>
 ///
-/// <para><b>Idle is the common case.</b> A poll that costs a COUNT over a LEFT JOIN is cheap,
-/// but not free forever, so the interval backs off when there is nothing to do and snaps back
+/// <para><b>Idle is the common case.</b> A verified empty revision skips the vector scans on
+/// subsequent polls. The interval backs off when there is nothing to do and snaps back
 /// the moment there is. That keeps a fact written during a busy session waiting seconds rather
 /// than a fixed worst case, without a wakeup a minute on a machine nobody is using.</para>
 /// </remarks>
@@ -54,6 +55,7 @@ public sealed class EmbeddingBacklog(
     private DateTimeOffset startedAt = DateTimeOffset.UtcNow;
     private int sessionEmbedded;
     private int sessionFailed;
+    private EmbeddingRevision? completedRevision;
 
     /// <summary>One pass over the queue. Opens its own connection and closes it.</summary>
     /// <remarks>
@@ -63,15 +65,38 @@ public sealed class EmbeddingBacklog(
     /// </remarks>
     public async Task<BackfillResult> DrainOnceAsync(CancellationToken cancellationToken)
     {
-        using var connection = EngramDatabase.Open(home);
+        cancellationToken.ThrowIfCancellationRequested();
+        // A pooled handle can still address the old inode after a database replacement.
+        using var connection = EngramDatabase.Open(home, pooling: false);
 
-        return await VectorBackfill.RunAsync(
+        var before = EmbeddingRevision.Read(connection);
+        if (before is not null && before == completedRevision
+            && before.Model == embedder.Space.Model
+            && before.Dimensions == embedder.Space.Dimensions.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            && before.Input == VectorIndex.InputVersion)
+        {
+            return new BackfillResult(BackfillOutcome.Completed, Embedded: 0, Failed: 0, Remaining: 0);
+        }
+
+        completedRevision = null;
+
+        var result = await VectorBackfill.RunAsync(
             connection,
             embedder,
             settings.MaxBatch,
             maxBatches: 8,
             cancellationToken,
             onBatchWritten: NoteBatch).ConfigureAwait(false);
+
+        // Never acknowledge a write racing this pass, including our own batch commits.
+        // Failures and partial drains must retry even when nothing else changes the store.
+        if (before is not null && result.Outcome == BackfillOutcome.Completed && result.Failed == 0
+            && before == EmbeddingRevision.Read(connection))
+        {
+            completedRevision = before;
+        }
+
+        return result;
     }
 
     public async Task RunAsync(CancellationToken cancellationToken)
