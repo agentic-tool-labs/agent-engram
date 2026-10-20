@@ -120,6 +120,7 @@ export const register: Register = (on, options) => {
               ) : null}
             </Box>
           ))}
+          {await go(e)}
         </Box>
       )
     } catch {

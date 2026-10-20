@@ -50,7 +50,7 @@ const cli = (stdout: object | string, exitCode = 0) => ({
 
 type World = { setLens: (lens: LensState) => void; statuses: (string | undefined)[]; submits: string[]; processes: () => string[]; advance: (ms: number) => Promise<void> }
 
-function world(on: On, lens: LensState | undefined, table: RoutingTable = { binary: BIN }): World {
+function world(on: On, lens: LensState | undefined, table: RoutingTable = { binary: BIN }, innerText?: string): World {
   const router = installFakeEngine(on, table)
   const clock = mock.clock(on, { now: 1_000_000 })
   const statuses: (string | undefined)[] = []
@@ -60,8 +60,8 @@ function world(on: On, lens: LensState | undefined, table: RoutingTable = { bina
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('ui.render', ($, e) => {
-    const { Box } = $.ui.resolve(e)
-    return <Box />
+    const { Box, Text } = $.ui.resolve(e)
+    return <Box>{innerText === undefined ? null : <Text>{innerText}</Text>}</Box>
   })
   on('ui.status', (_$, e) => {
     statuses.push(e.text)
@@ -188,6 +188,28 @@ for (const surface of SURFACES) {
     world(on, lensOf([recall()]))
     const ui = await draw(eng, surface, { hasSurvey: true })
     expect(await ui.find({ type: 'Text', text: /memory/ })).toBeUndefined()
+  })
+}
+
+for (const surface of SURFACES) {
+  test(`${surface}: the band draws above whatever the rest of the chain draws, not in its place`, async (eng, on) => {
+    world(on, lensOf([recall()]), { binary: BIN }, 'another plugin band')
+    const ui = await draw(eng, surface)
+    expect(await ui.find({ type: 'Text', text: /memory high/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'another plugin band' })).toBeDefined()
+  })
+
+  test(`${surface}: a survey holds the band and still leaves the rest of the chain's tree`, async (eng, on) => {
+    world(on, lensOf([recall()]), { binary: BIN }, 'another plugin band')
+    const ui = await draw(eng, surface, { hasSurvey: true })
+    expect(await ui.find({ type: 'Text', text: /memory/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'another plugin band' })).toBeDefined()
+  })
+
+  test(`${surface}: with no lines of its own the band leaves the rest of the chain's tree`, async (eng, on) => {
+    world(on, lensOf([]), { binary: BIN }, 'another plugin band')
+    const ui = await draw(eng, surface)
+    expect(await ui.find({ type: 'Text', text: 'another plugin band' })).toBeDefined()
   })
 }
 
