@@ -431,6 +431,19 @@ public class BackupStoreTests
     }
 
     [Fact]
+    public void Plan_TwoPinsAtACeilingOfFiveLeaveFiveInTotalWithTheNewestFillingTheRest()
+    {
+        var snapshots = Fake(0, 1, 2, 3, 4, 5, 6);
+        var pins = new[] { snapshots[5].Path, snapshots[6].Path };
+
+        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 5), pins);
+
+        Assert.Equal(5, plan.Keep.Count);
+        Assert.All(pins, pin => Assert.Contains(plan.Keep, s => s.Path == pin));
+        Assert.Equal(snapshots.Take(3).Select(s => s.Path), plan.Keep.Where(s => !pins.Contains(s.Path)).Select(s => s.Path));
+    }
+
+    [Fact]
     public void Plan_PinsThatOutnumberTheCeilingAreAllKept()
     {
         var snapshots = Fake(0, 1, 2, 3);
