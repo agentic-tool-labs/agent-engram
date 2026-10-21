@@ -383,7 +383,7 @@ public static class BackupStore
     /// bucket and survives anyway. It is reachable from code, which constructs settings directly
     /// and is under no such floor, and that is the case the test for it exercises.</para>
     /// </remarks>
-    public static PrunePlan Plan(IReadOnlyList<BackupSnapshot> snapshots, BackupSettings settings, string? pinnedPath = null)
+    public static PrunePlan Plan(IReadOnlyList<BackupSnapshot> snapshots, BackupSettings settings, IReadOnlyCollection<string>? pinnedPaths = null)
     {
         ArgumentNullException.ThrowIfNull(snapshots);
         ArgumentNullException.ThrowIfNull(settings);
@@ -400,19 +400,18 @@ public static class BackupStore
         Fill(ordered, keep, settings.KeepDaily, s => s.TakenAt.ToUniversalTime().ToString("yyyyMMdd", CultureInfo.InvariantCulture));
         Fill(ordered, keep, settings.KeepWeekly, WeekOf);
 
-        // The ceiling wins over the generations: newest first, at least one, and the snapshot just
-        // written keeps its place even when its timestamp is not the newest.
-        var survivors = ordered.Where(s => keep.Contains(s.Path)).ToList();
+        // The ceiling wins over the generations: newest first, at least one. A pinned snapshot (one
+        // the caller just wrote or just chose) survives even when it is not among the newest, and
+        // even when that costs the newest one its place: with a ceiling of one and a pinned
+        // snapshot that is not the newest, the pinned one is the one kept. Pins that outnumber the
+        // ceiling are all kept; the ceiling only limits the unpinned rest.
         var cap = Math.Max(1, settings.MaxSnapshots);
-        if (survivors.Count > cap)
+        var pinned = ordered.Where(s => pinnedPaths?.Contains(s.Path) == true).ToList();
+        var survivors = ordered.Where(s => keep.Contains(s.Path)).ToList();
+        if (survivors.Count > cap || pinned.Any(s => !keep.Contains(s.Path)))
         {
-            var capped = survivors.Take(cap).ToList();
-            if (pinnedPath is not null && survivors.FirstOrDefault(s => s.Path == pinnedPath) is { } pinned && !capped.Contains(pinned))
-            {
-                capped[^1] = pinned;
-            }
-
-            keep = new HashSet<string>(capped.Select(s => s.Path), StringComparer.Ordinal);
+            var rest = survivors.Where(s => !pinned.Contains(s)).Take(Math.Max(0, cap - pinned.Count));
+            keep = new HashSet<string>(pinned.Concat(rest).Select(s => s.Path), StringComparer.Ordinal);
         }
 
         return new PrunePlan(
@@ -421,19 +420,20 @@ public static class BackupStore
     }
 
     /// <summary>
-    /// Prunes under the configured limits right after a snapshot was written outside the scheduled
-    /// take, so a forced snapshot counts toward the ceiling too. A failure to delete is swallowed:
-    /// the operation that asked for the snapshot has already been protected by it and must go on.
+    /// Prunes under the configured limits right after snapshots were written or chosen outside the scheduled
+    /// take, so a forced snapshot counts toward the ceiling too. The given snapshots are never deleted.
+    /// A failure to delete is swallowed: the operation that asked for the snapshot has already been
+    /// protected by it and must go on.
     /// </summary>
-    public static void PruneAfterWrite(EngramHome home, BackupSnapshot written)
+    public static void PruneAfterWrite(EngramHome home, params BackupSnapshot[] pinned)
     {
         ArgumentNullException.ThrowIfNull(home);
-        ArgumentNullException.ThrowIfNull(written);
+        ArgumentNullException.ThrowIfNull(pinned);
 
         try
         {
             var settings = BackupSettings.Read(ConfigFile.Load(home.ConfigPath));
-            Prune(Plan(List(home), settings, written.Path));
+            Prune(Plan(List(home), settings, pinned.Select(s => s.Path).ToList()));
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -494,10 +494,10 @@ public static class BackupStore
         File.Delete(home.DatabasePath + "-wal");
         File.Delete(home.DatabasePath + "-shm");
 
-        // Only now: pruning right after the preserving snapshot could delete the very snapshot being restored.
+        // Only now, and with the chosen snapshot pinned: pruning right after the preserving snapshot could delete the very one being restored from.
         if (preserved is not null)
         {
-            PruneAfterWrite(home, preserved);
+            PruneAfterWrite(home, preserved, snapshot);
         }
     }
 

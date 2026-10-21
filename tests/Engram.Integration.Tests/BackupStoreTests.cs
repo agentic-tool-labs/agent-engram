@@ -402,11 +402,44 @@ public class BackupStoreTests
         var snapshots = Fake(0, 1, 2, 3, 4, 5, 6);
         var oldest = snapshots[^1];
 
-        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 5), oldest.Path);
+        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 5), [oldest.Path]);
 
         Assert.Equal(5, plan.Keep.Count);
         Assert.Contains(plan.Keep, s => s.Path == oldest.Path);
         Assert.Contains(plan.Keep, s => s.Path == snapshots[0].Path);
+    }
+
+    [Fact]
+    public void Plan_ACeilingOfOneKeepsThePinnedSnapshotRatherThanTheNewest()
+    {
+        var snapshots = Fake(0, 1, 2, 3);
+
+        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 1), [snapshots[2].Path]);
+
+        Assert.Equal(snapshots[2].Path, Assert.Single(plan.Keep).Path);
+        Assert.Equal(3, plan.Delete.Count);
+    }
+
+    [Fact]
+    public void Plan_ACeilingOfOneWithNoPinKeepsTheNewest()
+    {
+        var snapshots = Fake(0, 1, 2, 3);
+
+        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 1));
+
+        Assert.Equal(snapshots[0].Path, Assert.Single(plan.Keep).Path);
+    }
+
+    [Fact]
+    public void Plan_PinsThatOutnumberTheCeilingAreAllKept()
+    {
+        var snapshots = Fake(0, 1, 2, 3);
+
+        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 1), [snapshots[1].Path, snapshots[3].Path]);
+
+        Assert.Equal(2, plan.Keep.Count);
+        Assert.Contains(plan.Keep, s => s.Path == snapshots[1].Path);
+        Assert.Contains(plan.Keep, s => s.Path == snapshots[3].Path);
     }
 
     [Fact]
@@ -471,7 +504,8 @@ public class BackupStoreTests
         BackupStore.Restore(sandbox.Home, oldest, T0.AddHours(10));
 
         var left = BackupStore.List(sandbox.Home);
-        Assert.True(left.Count <= 5);
+        Assert.Equal(5, left.Count);
+        Assert.Contains(left, s => s.Path == oldest.Path);
         Assert.Contains(left, s => s.TakenAt == T0.AddHours(10));
         Assert.True(File.Exists(sandbox.Home.DatabasePath));
     }

@@ -146,7 +146,7 @@ public static class BackupCommand
             }
         }
 
-        var plan = BackupStore.Plan(BackupStore.List(home), settings, snapshot.Path);
+        var plan = BackupStore.Plan(BackupStore.List(home), settings, [snapshot.Path]);
         if (plan.Delete.Count > 0)
         {
             BackupStore.Prune(plan);
