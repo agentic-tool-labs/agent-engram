@@ -22,6 +22,7 @@ public sealed record BackupSettings(
     int KeepHourly,
     int KeepDaily,
     int KeepWeekly,
+    int MaxSnapshots,
     IReadOnlyList<string> Problems)
 {
     public const string Section = "backup";
@@ -51,6 +52,15 @@ public sealed record BackupSettings(
     public const int DefaultKeepDaily = 7;
     public const int DefaultKeepWeekly = 4;
 
+    /// <summary>The most snapshots that ever stay on disk, whatever the generational limits would keep.</summary>
+    /// <remarks>
+    /// Five, because a snapshot is a whole copy of the store and a store can be gigabytes: the
+    /// generational limits alone allow thirty-five of them, and forced snapshots (before a
+    /// migration, a compaction, a repair or a restore) arrive outside the schedule. A hard
+    /// ceiling is the only rule that bounds the disk however those add up.
+    /// </remarks>
+    public const int DefaultMaxSnapshots = 5;
+
     public static BackupSettings Default { get; } = new(
         DefaultEnabled,
         DefaultJournal,
@@ -58,6 +68,7 @@ public sealed record BackupSettings(
         DefaultKeepHourly,
         DefaultKeepDaily,
         DefaultKeepWeekly,
+        DefaultMaxSnapshots,
         []);
 
     public static BackupSettings Read(ConfigFile config)
@@ -73,6 +84,7 @@ public sealed record BackupSettings(
             Positive(config, "keep_hourly", DefaultKeepHourly, problems),
             Positive(config, "keep_daily", DefaultKeepDaily, problems),
             Positive(config, "keep_weekly", DefaultKeepWeekly, problems),
+            Positive(config, "max_snapshots", DefaultMaxSnapshots, problems),
             problems);
     }
 

@@ -23,8 +23,9 @@ public class BackupStoreTests
         int hourly = 24,
         int daily = 7,
         int weekly = 4,
-        bool journal = true) =>
-        new(enabled, journal, intervalMinutes, hourly, daily, weekly, []);
+        bool journal = true,
+        int maxSnapshots = 1000) =>
+        new(enabled, journal, intervalMinutes, hourly, daily, weekly, maxSnapshots, []);
 
     // --- taking one -------------------------------------------------------------------------
 
@@ -371,6 +372,197 @@ public class BackupStoreTests
         Assert.Equal(plan.Keep.Count, BackupStore.List(sandbox.Home).Count);
         Assert.All(plan.Delete, s => Assert.False(File.Exists(s.Path)));
         Assert.All(plan.Keep, s => Assert.True(File.Exists(s.Path)));
+    }
+
+    // --- the ceiling ------------------------------------------------------------------------
+
+    [Fact]
+    public void Plan_KeepsOnlyTheNewestMaxSnapshotsWhateverTheGenerationsWouldKeep()
+    {
+        var snapshots = Fake(0, 1, 2, 3, 4, 5, 6);
+
+        var plan = BackupStore.Plan(snapshots, Settings(hourly: 24, daily: 7, weekly: 4, maxSnapshots: 5));
+
+        Assert.Equal(snapshots.Take(5).Select(s => s.Path), plan.Keep.Select(s => s.Path));
+        Assert.Equal(snapshots.Skip(5).Select(s => s.Path).Order(), plan.Delete.Select(s => s.Path).Order());
+    }
+
+    [Fact]
+    public void Plan_UnderTheCeilingDeletesNothingTheGenerationsKeep()
+    {
+        var plan = BackupStore.Plan(Fake(0, 1, 2, 3, 4), Settings(hourly: 24, daily: 7, weekly: 4, maxSnapshots: 5));
+
+        Assert.Equal(5, plan.Keep.Count);
+        Assert.Empty(plan.Delete);
+    }
+
+    [Fact]
+    public void Plan_KeepsThePinnedSnapshotEvenWhenItIsTheOldest()
+    {
+        var snapshots = Fake(0, 1, 2, 3, 4, 5, 6);
+        var oldest = snapshots[^1];
+
+        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 5), [oldest.Path]);
+
+        Assert.Equal(5, plan.Keep.Count);
+        Assert.Contains(plan.Keep, s => s.Path == oldest.Path);
+        Assert.Contains(plan.Keep, s => s.Path == snapshots[0].Path);
+    }
+
+    [Fact]
+    public void Plan_ACeilingOfOneKeepsThePinnedSnapshotRatherThanTheNewest()
+    {
+        var snapshots = Fake(0, 1, 2, 3);
+
+        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 1), [snapshots[2].Path]);
+
+        Assert.Equal(snapshots[2].Path, Assert.Single(plan.Keep).Path);
+        Assert.Equal(3, plan.Delete.Count);
+    }
+
+    [Fact]
+    public void Plan_ACeilingOfOneWithNoPinKeepsTheNewest()
+    {
+        var snapshots = Fake(0, 1, 2, 3);
+
+        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 1));
+
+        Assert.Equal(snapshots[0].Path, Assert.Single(plan.Keep).Path);
+    }
+
+    [Fact]
+    public void Plan_TwoPinsAtACeilingOfFiveLeaveFiveInTotalWithTheNewestFillingTheRest()
+    {
+        var snapshots = Fake(0, 1, 2, 3, 4, 5, 6);
+        var pins = new[] { snapshots[5].Path, snapshots[6].Path };
+
+        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 5), pins);
+
+        Assert.Equal(5, plan.Keep.Count);
+        Assert.All(pins, pin => Assert.Contains(plan.Keep, s => s.Path == pin));
+        Assert.Equal(snapshots.Take(3).Select(s => s.Path), plan.Keep.Where(s => !pins.Contains(s.Path)).Select(s => s.Path));
+    }
+
+    [Fact]
+    public void Plan_PinsThatOutnumberTheCeilingAreAllKept()
+    {
+        var snapshots = Fake(0, 1, 2, 3);
+
+        var plan = BackupStore.Plan(snapshots, Settings(maxSnapshots: 1), [snapshots[1].Path, snapshots[3].Path]);
+
+        Assert.Equal(2, plan.Keep.Count);
+        Assert.Contains(plan.Keep, s => s.Path == snapshots[1].Path);
+        Assert.Contains(plan.Keep, s => s.Path == snapshots[3].Path);
+    }
+
+    [Fact]
+    public void Plan_ACeilingOfZeroFromCodeStillKeepsTheNewestSnapshot()
+    {
+        var plan = BackupStore.Plan(Fake(0, 1, 2), Settings(maxSnapshots: 0));
+
+        Assert.Equal(TFake, Assert.Single(plan.Keep).TakenAt);
+    }
+
+    [Fact]
+    public void PruneAfterWrite_AForcedSnapshotPastTheCeilingDropsTheOldest()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
+        for (var i = 0; i < 5; i++)
+        {
+            BackupStore.Take(connection, sandbox.Home, T0.AddHours(i));
+        }
+
+        var forced = BackupStore.Take(connection, sandbox.Home, T0.AddHours(10), "pre-compact");
+        BackupStore.PruneAfterWrite(sandbox.Home, forced);
+
+        var left = BackupStore.List(sandbox.Home);
+        Assert.Equal(5, left.Count);
+        Assert.Contains(left, s => s.Path == forced.Path);
+        Assert.DoesNotContain(left, s => s.TakenAt == T0);
+    }
+
+    [Fact]
+    public void PruneAfterWrite_AtTheCeilingDeletesNothing()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
+        for (var i = 0; i < 4; i++)
+        {
+            BackupStore.Take(connection, sandbox.Home, T0.AddHours(i));
+        }
+
+        var forced = BackupStore.Take(connection, sandbox.Home, T0.AddHours(10), "pre-repair");
+        BackupStore.PruneAfterWrite(sandbox.Home, forced);
+
+        Assert.Equal(5, BackupStore.List(sandbox.Home).Count);
+    }
+
+    [Fact]
+    public void Restore_OfTheOldestSnapshotAtTheCeilingStillRestoresAndStaysWithinIt()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
+            for (var i = 0; i < 5; i++)
+            {
+                BackupStore.Take(connection, sandbox.Home, T0.AddHours(i));
+            }
+        }
+
+        var oldest = BackupStore.List(sandbox.Home)[^1];
+        BackupStore.Restore(sandbox.Home, oldest, T0.AddHours(10));
+
+        var left = BackupStore.List(sandbox.Home);
+        Assert.Equal(5, left.Count);
+        Assert.Contains(left, s => s.Path == oldest.Path);
+        Assert.Contains(left, s => s.TakenAt == T0.AddHours(10));
+        Assert.True(File.Exists(sandbox.Home.DatabasePath));
+    }
+
+    [Theory]
+    [InlineData("--help")]
+    [InlineData("-h")]
+    [InlineData("take", "--help")]
+    [InlineData("take", "--if-due", "-h")]
+    [InlineData("prune", "--help")]
+    [InlineData("restore", "--help")]
+    public void BackupHelp_PrintsUsageAndChangesNothing(params string[] args)
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
+            BackupStore.Take(connection, sandbox.Home, T0);
+        }
+
+        var before = Directory.EnumerateFileSystemEntries(sandbox.Home.Root, "*", SearchOption.AllDirectories).Order().ToList();
+        var stdout = new StringWriter();
+
+        var exit = Engram.Cli.BackupCommand.Run(sandbox.Home.Root, args, stdout, new StringWriter());
+
+        Assert.Equal(0, exit);
+        Assert.Contains("Usage: engram backup", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Equal(before, Directory.EnumerateFileSystemEntries(sandbox.Home.Root, "*", SearchOption.AllDirectories).Order().ToList());
+        Assert.Single(BackupStore.List(sandbox.Home));
+    }
+
+    [Fact]
+    public void BackupTake_WithoutHelpStillWritesASnapshot()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
+        }
+
+        var exit = Engram.Cli.BackupCommand.Run(sandbox.Home.Root, ["take"], new StringWriter(), new StringWriter());
+
+        Assert.Equal(0, exit);
+        Assert.Single(BackupStore.List(sandbox.Home));
     }
 
     // --- putting one back -------------------------------------------------------------------
