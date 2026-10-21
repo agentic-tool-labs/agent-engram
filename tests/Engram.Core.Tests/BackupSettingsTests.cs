@@ -19,6 +19,7 @@ public class BackupSettingsTests
         Assert.Equal(BackupSettings.DefaultKeepHourly, settings.KeepHourly);
         Assert.Equal(BackupSettings.DefaultKeepDaily, settings.KeepDaily);
         Assert.Equal(BackupSettings.DefaultKeepWeekly, settings.KeepWeekly);
+        Assert.Equal(BackupSettings.DefaultMaxSnapshots, settings.MaxSnapshots);
     }
 
     [Fact]
@@ -64,12 +65,20 @@ public class BackupSettingsTests
     [InlineData("keep_hourly")]
     [InlineData("keep_daily")]
     [InlineData("keep_weekly")]
+    [InlineData("max_snapshots")]
     public void AZeroRetentionCount_IsRefusedAndReported(string key)
     {
         var settings = Read($"[backup]\n{key} = 0\n");
 
         AssertIsDefault(settings);
         Assert.Contains(settings.Problems, p => p.Contains(key, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MaxSnapshots_DefaultsToFiveAndIsRead()
+    {
+        Assert.Equal(5, BackupSettings.Default.MaxSnapshots);
+        Assert.Equal(3, Read("[backup]\nmax_snapshots = 3\n").MaxSnapshots);
     }
 
     [Fact]

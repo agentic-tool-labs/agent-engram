@@ -144,7 +144,7 @@ public static class EngramDatabase
                 // The one moment Engram's own code puts authored truth at risk. Everything else
                 // that writes is append-only; a migration rewrites structure, and it does so
                 // unattended, on open, before anyone has decided today is a good day for it.
-                BackupStore.Take(connection, home, DateTimeOffset.UtcNow, $"pre-v{SchemaVersion}");
+                BackupStore.PruneAfterWrite(home, BackupStore.Take(connection, home, DateTimeOffset.UtcNow, $"pre-v{SchemaVersion}"));
             }
 
             Migrate(connection, from);

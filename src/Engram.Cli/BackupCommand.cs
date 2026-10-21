@@ -20,6 +20,12 @@ public static class BackupCommand
         ArgumentNullException.ThrowIfNull(stdout);
         ArgumentNullException.ThrowIfNull(stderr);
 
+        if (args.Any(a => a is "--help" or "-h"))
+        {
+            stdout.WriteLine(Usage);
+            return 0;
+        }
+
         var home = EngramHome.ResolveFromProcess(homePath);
         var config = ConfigFile.Load(home.ConfigPath);
         var settings = BackupSettings.Read(config);
@@ -43,6 +49,22 @@ public static class BackupCommand
             _ => Unknown(subcommand, stderr),
         };
     }
+
+    private const string Usage =
+        """
+        Usage: engram backup [take|list|prune|restore|replay|import] [options]
+
+          take [--if-due]        write a snapshot, then prune to the [backup] limits (at most max_snapshots, default 5)
+          list                   list the snapshots
+          prune [--apply]        show (or with --apply, delete) what the limits would drop
+          restore [name] [--apply]
+                                 put a snapshot back; the current store is snapshotted first
+          replay [file] [--apply]
+                                 read facts from the journal into the store
+          import [dir] [--apply] bring the legacy JSON user facts into the store
+
+        Anything that deletes or overwrites is a dry run until --apply. -h and --help print this and change nothing.
+        """;
 
     private static int Take(
         EngramHome home,
@@ -124,7 +146,7 @@ public static class BackupCommand
             }
         }
 
-        var plan = BackupStore.Plan(BackupStore.List(home), settings);
+        var plan = BackupStore.Plan(BackupStore.List(home), settings, snapshot.Path);
         if (plan.Delete.Count > 0)
         {
             BackupStore.Prune(plan);
@@ -168,7 +190,7 @@ public static class BackupCommand
         if (plan.Delete.Count == 0)
         {
             stdout.WriteLine($"Nothing to prune — {plan.Keep.Count} {Snapshots(plan.Keep.Count)} kept, all inside "
-                + $"the {settings.KeepHourly} hourly / {settings.KeepDaily} daily / {settings.KeepWeekly} weekly limits.");
+                + $"the {settings.KeepHourly} hourly / {settings.KeepDaily} daily / {settings.KeepWeekly} weekly / {settings.MaxSnapshots} total limits.");
             return 0;
         }
 

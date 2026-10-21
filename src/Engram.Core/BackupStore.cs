@@ -383,7 +383,7 @@ public static class BackupStore
     /// bucket and survives anyway. It is reachable from code, which constructs settings directly
     /// and is under no such floor, and that is the case the test for it exercises.</para>
     /// </remarks>
-    public static PrunePlan Plan(IReadOnlyList<BackupSnapshot> snapshots, BackupSettings settings)
+    public static PrunePlan Plan(IReadOnlyList<BackupSnapshot> snapshots, BackupSettings settings, string? pinnedPath = null)
     {
         ArgumentNullException.ThrowIfNull(snapshots);
         ArgumentNullException.ThrowIfNull(settings);
@@ -400,9 +400,45 @@ public static class BackupStore
         Fill(ordered, keep, settings.KeepDaily, s => s.TakenAt.ToUniversalTime().ToString("yyyyMMdd", CultureInfo.InvariantCulture));
         Fill(ordered, keep, settings.KeepWeekly, WeekOf);
 
+        // The ceiling wins over the generations: newest first, at least one, and the snapshot just
+        // written keeps its place even when its timestamp is not the newest.
+        var survivors = ordered.Where(s => keep.Contains(s.Path)).ToList();
+        var cap = Math.Max(1, settings.MaxSnapshots);
+        if (survivors.Count > cap)
+        {
+            var capped = survivors.Take(cap).ToList();
+            if (pinnedPath is not null && survivors.FirstOrDefault(s => s.Path == pinnedPath) is { } pinned && !capped.Contains(pinned))
+            {
+                capped[^1] = pinned;
+            }
+
+            keep = new HashSet<string>(capped.Select(s => s.Path), StringComparer.Ordinal);
+        }
+
         return new PrunePlan(
             ordered.Where(s => keep.Contains(s.Path)).ToList(),
             ordered.Where(s => !keep.Contains(s.Path)).ToList());
+    }
+
+    /// <summary>
+    /// Prunes under the configured limits right after a snapshot was written outside the scheduled
+    /// take, so a forced snapshot counts toward the ceiling too. A failure to delete is swallowed:
+    /// the operation that asked for the snapshot has already been protected by it and must go on.
+    /// </summary>
+    public static void PruneAfterWrite(EngramHome home, BackupSnapshot written)
+    {
+        ArgumentNullException.ThrowIfNull(home);
+        ArgumentNullException.ThrowIfNull(written);
+
+        try
+        {
+            var settings = BackupSettings.Read(ConfigFile.Load(home.ConfigPath));
+            Prune(Plan(List(home), settings, written.Path));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // left for the next prune
+        }
     }
 
     /// <summary>Deletes what <see cref="Plan"/> chose. The caller decides whether to call it.</summary>
@@ -445,9 +481,10 @@ public static class BackupStore
                     + "than reading it wrongly.");
         }
 
+        BackupSnapshot? preserved = null;
         if (File.Exists(home.DatabasePath))
         {
-            PreserveCurrent(home, now);
+            preserved = PreserveCurrent(home, now);
         }
 
         var staged = home.DatabasePath + PartialSuffix;
@@ -456,6 +493,12 @@ public static class BackupStore
 
         File.Delete(home.DatabasePath + "-wal");
         File.Delete(home.DatabasePath + "-shm");
+
+        // Only now: pruning right after the preserving snapshot could delete the very snapshot being restored.
+        if (preserved is not null)
+        {
+            PruneAfterWrite(home, preserved);
+        }
     }
 
     /// <summary>
@@ -468,7 +511,7 @@ public static class BackupStore
     /// failed snapshot degrades to moving the bytes aside under a name that deliberately does not
     /// parse as a snapshot: it is kept, and it is never offered as something to restore from.
     /// </remarks>
-    private static void PreserveCurrent(EngramHome home, DateTimeOffset now)
+    private static BackupSnapshot? PreserveCurrent(EngramHome home, DateTimeOffset now)
     {
         Directory.CreateDirectory(home.BackupDir);
         SqliteConnection.ClearAllPools();
@@ -476,12 +519,13 @@ public static class BackupStore
         try
         {
             using var connection = EngramDatabase.Open(home);
-            Take(connection, home, now, "pre-restore");
+            return Take(connection, home, now, "pre-restore");
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
         {
             var stamp = now.ToUniversalTime().ToString(TimestampFormat, CultureInfo.InvariantCulture);
             File.Copy(home.DatabasePath, Path.Combine(home.BackupDir, $"unreadable-{stamp}{Extension}"), overwrite: true);
+            return null;
         }
         finally
         {

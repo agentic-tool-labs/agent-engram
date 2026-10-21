@@ -52,6 +52,7 @@ public static class DefaultConfig
         keep_hourly = 24
         keep_daily = 7
         keep_weekly = 4
+        max_snapshots = 5             # a hard ceiling on snapshots kept, forced ones included
 
         [indexing]
         auto_index_on_session_start = true
