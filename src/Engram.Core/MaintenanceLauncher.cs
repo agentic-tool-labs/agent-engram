@@ -78,6 +78,13 @@ public static class MaintenanceLauncher
         var engram = ShellQuote(executablePath);
         var home = " --home " + ShellQuote(homeRoot);
 
+        // One chain per home. Session starts arrive in bursts (subagents, resumes, several
+        // terminals), and every job below already copes with being skipped: the spool is durable and
+        // the next chain's --drain-all services whatever this one would have.
+        var claim = jobs == MaintenanceJobs.SessionStart
+            ? engram + " maintenance claim --pid $$" + home + " || exit 0; "
+            : string.Empty;
+
         var command = new StringBuilder("{ ");
 
         // --auto gates ambient work; it may not gate commanded work (spec §6.9). An enrollment
@@ -134,7 +141,7 @@ public static class MaintenanceLauncher
         // redirection exists to prevent. `exec` with no command replaces sh's own descriptors,
         // so the inherited pipe has no writer left the moment the shell starts.
         return Redirect + Priority + (OperatingSystem.IsMacOS() ? MacPriority : string.Empty)
-            + command.Append("}").ToString();
+            + claim + command.Append("}").ToString();
     }
 
     /// <summary>
