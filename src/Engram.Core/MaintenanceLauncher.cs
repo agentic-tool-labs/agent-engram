@@ -133,7 +133,8 @@ public static class MaintenanceLauncher
         // stays open for as long as the slowest job runs — which is the whole of what this
         // redirection exists to prevent. `exec` with no command replaces sh's own descriptors,
         // so the inherited pipe has no writer left the moment the shell starts.
-        return Redirect + command.Append("}").ToString();
+        return Redirect + Priority + (OperatingSystem.IsMacOS() ? MacPriority : string.Empty)
+            + command.Append("}").ToString();
     }
 
     /// <summary>
@@ -160,6 +161,20 @@ public static class MaintenanceLauncher
     /// Replaces the shell's own descriptors before it runs anything.
     /// </summary>
     internal const string Redirect = "exec </dev/null >/dev/null 2>&1; ";
+
+    /// <summary>
+    /// Lowers the shell to background priority, which every job it starts inherits. Applied from
+    /// inside the script rather than by launching through <c>nice</c> or <c>taskpolicy</c>: a
+    /// wrapper that does not exec would hold the hook's stdout until the chain finished. Each line
+    /// fails open, so a host without the tool still runs every job.
+    /// </summary>
+    internal const string Priority = "renice -n 10 -p $$ >/dev/null 2>&1 || :; ";
+
+    /// <summary>
+    /// macOS background QoS for the shell: throttled I/O and efficiency cores. It keeps the nice
+    /// value <see cref="Priority"/> set; applying it first would leave the shell at 15.
+    /// </summary>
+    internal const string MacPriority = "taskpolicy -b -p $$ >/dev/null 2>&1 || :; ";
 
     private static string ShellQuote(string value) => "'" + value.Replace("'", "'\\''") + "'";
 }

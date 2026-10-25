@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Engram.Core;
 
 namespace Engram.Core.Tests;
@@ -172,5 +173,69 @@ public class MaintenanceLauncherTests
         var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: true, "/repo", jobs);
 
         Assert.StartsWith(MaintenanceLauncher.Redirect, script, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The priority lines come after the descriptors are replaced, so a <c>renice</c> that lingers
+    /// can never hold the hook's pipe, and before the first job, so every job inherits them.
+    /// </summary>
+    [Theory]
+    [InlineData(MaintenanceLauncher.MaintenanceJobs.SessionStart)]
+    [InlineData(MaintenanceLauncher.MaintenanceJobs.EnrollmentIndex)]
+    public void PriorityFollowsTheRedirect_AndPrecedesTheFirstJob(MaintenanceLauncher.MaintenanceJobs jobs)
+    {
+        var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: true, "/repo", jobs);
+
+        var priorityAt = script.IndexOf(MaintenanceLauncher.Priority, StringComparison.Ordinal);
+        Assert.Equal(MaintenanceLauncher.Redirect.Length, priorityAt);
+        Assert.True(
+            script.IndexOf(Executable, StringComparison.Ordinal) > priorityAt,
+            $"every job must start after the priority line: {script}");
+
+        if (OperatingSystem.IsMacOS())
+        {
+            Assert.Equal(
+                priorityAt + MaintenanceLauncher.Priority.Length,
+                script.IndexOf(MaintenanceLauncher.MacPriority, StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// A host with neither <c>renice</c> nor <c>taskpolicy</c> on its PATH still runs every job:
+    /// background priority is a courtesy to the foreground, never a precondition for the work.
+    /// </summary>
+    [Fact]
+    public void TheJobsStillRun_WhenThePriorityToolsAreMissing()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Skip("the maintenance chain is a POSIX shell script");
+            return;
+        }
+
+        var dir = Directory.CreateTempSubdirectory("engram-maint-");
+        try
+        {
+            var log = Path.Combine(dir.FullName, "jobs.log");
+            var fake = Path.Combine(dir.FullName, "engram");
+            File.WriteAllText(fake, $"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n");
+            File.SetUnixFileMode(fake, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            var info = new ProcessStartInfo("/bin/sh") { UseShellExecute = false };
+            info.ArgumentList.Add("-c");
+            info.ArgumentList.Add(MaintenanceLauncher.BuildScript(fake, dir.FullName, syncEnabled: false, indexRoot: null));
+            info.Environment["PATH"] = Path.Combine(dir.FullName, "no-such-dir");
+
+            using var process = Process.Start(info)!;
+            Assert.True(process.WaitForExit(TimeSpan.FromSeconds(30)), "the chain did not finish");
+
+            var ran = File.ReadAllText(log);
+            Assert.Contains("backup take --if-due", ran, StringComparison.Ordinal);
+            Assert.Contains("repair --apply --tokens", ran, StringComparison.Ordinal);
+        }
+        finally
+        {
+            dir.Delete(recursive: true);
+        }
     }
 }
