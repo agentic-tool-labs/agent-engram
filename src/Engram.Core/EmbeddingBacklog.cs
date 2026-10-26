@@ -30,10 +30,20 @@ public sealed class EmbeddingBacklog(
     EngramHome home,
     IEmbedder embedder,
     EmbeddingSettings settings,
-    Action<string>? log = null)
+    Action<string>? log = null,
+    ForegroundWork? foreground = null)
 {
     public static readonly TimeSpan BusyInterval = TimeSpan.FromSeconds(2);
     public static readonly TimeSpan IdleInterval = TimeSpan.FromSeconds(30);
+
+    /// <summary>The longest one batch waits for foreground work before it proceeds anyway.</summary>
+    /// <remarks>
+    /// Without a cap, an MCP session left mid-call would stop vector production and nothing would
+    /// say why. Kept well inside the staleness window <see cref="EmbeddingProgress.LooksLive"/>
+    /// applies, since a batch that yields publishes nothing while it waits and must not read as a
+    /// stalled loop.
+    /// </remarks>
+    public static readonly TimeSpan ForegroundYieldCap = TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// How long to wait before the next pass, given what the last one did.
@@ -86,7 +96,8 @@ public sealed class EmbeddingBacklog(
             settings.MaxBatch,
             maxBatches: 8,
             cancellationToken,
-            onBatchWritten: NoteBatch).ConfigureAwait(false);
+            onBatchWritten: NoteBatch,
+            beforeBatch: foreground is null ? null : YieldToForegroundAsync).ConfigureAwait(false);
 
         // Never acknowledge a write racing this pass, including our own batch commits.
         // Failures and partial drains must retry even when nothing else changes the store.
@@ -214,6 +225,9 @@ public sealed class EmbeddingBacklog(
             SessionId: "server",
             Kind: TelemetryEventKind.Embedding,
             Phase: phase));
+
+    private Task YieldToForegroundAsync(CancellationToken cancellationToken) =>
+        foreground!.WaitForIdleAsync(ForegroundYieldCap, cancellationToken);
 
     private void NoteBatch(IReadOnlyList<string> bodies)
     {

@@ -4,6 +4,7 @@ using Engram.Core;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Protocol;
 
 namespace Engram.Cli;
 
@@ -106,6 +107,11 @@ internal static class ServeCommand
         // backlog and the query side share one server instead of loading the model twice.
         builder.Services.AddSingleton(_ => new LocalRuntime(home));
 
+        // What the model is waiting on, counted at the two surfaces it reaches us through, so the
+        // backlog can step aside for it. Entered below by the call-tool filter and the mod route.
+        var foreground = new ForegroundWork();
+        builder.Services.AddSingleton(foreground);
+
         // Per-session pin (docs/memory-expansion/04-lifecycle-spec.md) — one store for the life of
         // the server, keyed internally by McpSessionId, never persisted (D8).
         builder.Services.AddSingleton<SessionPinStore>();
@@ -147,7 +153,13 @@ internal static class ServeCommand
             // metric both depend on that header existing and being stable for a
             // session's lifetime, so this must stay false. Do not "simplify" this to
             // the default — that silently drops session identity with no error anywhere.
-            .WithRequestFilters(f => f.AddCallToolFilter(McpCallNudge.Filter))
+            // A filter on every tool call rather than a middleware on the endpoint: the endpoint also
+            // carries each session's long-lived GET stream, which would count as foreground for as
+            // long as the session stays connected.
+            .WithRequestFilters(f => f
+                .AddCallToolFilter(McpCallNudge.Filter)
+                .AddCallToolFilter(next => (request, cancellationToken) =>
+                    new ValueTask<CallToolResult>(foreground.RunAsync(() => next(request, cancellationToken).AsTask()))))
             .WithHttpTransport(options => options.Stateless = false);
 
         if (registered.Contains(typeof(EngramMcpTools)))
@@ -185,7 +197,7 @@ internal static class ServeCommand
             return EmbedStatus.ToJson(EmbedStatus.Read(home, now), now, new EmbedServerJson(identity.Version, identity.Pid));
         });
         app.Map("/mod/v1/{op}", (HttpContext context, string op) =>
-            HandleModCall(context, op, home, localRuntime, app.Services.GetRequiredService<TelemetryFeed>(), embedStatus));
+            HandleModCall(context, op, home, localRuntime, app.Services.GetRequiredService<TelemetryFeed>(), embedStatus, foreground));
 
         // On ApplicationStarted rather than beside app.Run(), so the event means the server is
         // accepting requests rather than about to try and possibly fail on a bound port.
@@ -255,7 +267,8 @@ internal static class ServeCommand
     /// check runs before the body is read, so a rejected request costs no parse and no write.
     /// </summary>
     private static async Task HandleModCall(
-        HttpContext context, string op, EngramHome home, LocalRuntime local, TelemetryFeed feed, EmbedStatusCache embedStatus)
+        HttpContext context, string op, EngramHome home, LocalRuntime local, TelemetryFeed feed, EmbedStatusCache embedStatus,
+        ForegroundWork foreground)
     {
         var request = context.Request;
         if (!HttpMethods.IsPost(request.Method))
@@ -303,8 +316,16 @@ internal static class ServeCommand
             }
         }
 
-        await WriteModResult(context, ModApi.Execute(home, local, op, headerMod, buffer.GetBuffer().AsSpan(0, (int)buffer.Length), feed, embedStatus.Get));
+        var result = await RunModOp(foreground, op, () =>
+            ModApi.Execute(home, local, op, headerMod, buffer.GetBuffer().AsSpan(0, (int)buffer.Length), feed, embedStatus.Get));
+        await WriteModResult(context, result);
     }
+
+    /// <summary>Runs a mod op, as foreground work unless it is a read-only lookup.</summary>
+    internal static Task<ModApiResult> RunModOp(ForegroundWork foreground, string op, Func<ModApiResult> execute) =>
+        ModApi.IsLookup(op)
+            ? Task.FromResult(execute())
+            : foreground.RunAsync(() => Task.FromResult(execute()));
 
     private static Task WriteModResult(HttpContext context, ModApiResult result)
     {

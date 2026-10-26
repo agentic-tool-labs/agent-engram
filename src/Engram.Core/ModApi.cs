@@ -45,6 +45,14 @@ public static class ModApi
 
     public static bool IsKnownOp(string op) => Array.IndexOf(Operations, op) >= 0;
 
+    private static readonly string[] Lookups = ["fact", "history", "captures", "path-facts", "tail", "embed-status"];
+
+    /// <summary>
+    /// Whether an op only reads. Lookups write no telemetry and are not foreground work: mods poll
+    /// them on timers, so counting them would pause the embedding backlog for as long as a pane is open.
+    /// </summary>
+    public static bool IsLookup(string op) => Array.IndexOf(Lookups, op) >= 0;
+
     /// <summary>Whether a value may name a mod: lowercase letters, digits and hyphens, 1–32 characters.</summary>
     public static bool IsModName(string? value) =>
         value is { Length: >= 1 and <= MaxModChars } && value.All(c => c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-');
