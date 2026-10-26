@@ -840,6 +840,25 @@ any `Host` that is not loopback, on every route. Deleting any of those three gua
 of the suite green, which is why each has its own falsification row. Lookups (`fact`, `history`,
 `captures`, `path-facts`, `tail`) write nothing, and handlers log nothing from the request (D76).
 
+**Background work yields to the model, and never for longer than its cap.** The server counts
+foreground work in `ForegroundWork`, entered in exactly two places: a call-tool filter for MCP and
+the `/mod/v1` route for every op that is not a lookup. Never per tool, so a new tool cannot forget
+it; never as endpoint middleware, because the MCP endpoint also carries each session's long-lived
+GET stream, which would count as foreground for the whole session. **Lookups — `tail`, `fact`,
+`history`, `captures`, `path-facts`, `embed-status` — are excluded on purpose**: mods poll them on
+timers, and a 2 s tail per open pane would hold the backlog paused for as long as anyone looks at
+memory. The backlog waits while the count is non-zero before each batch, **capped at 10 s per
+batch**, then proceeds anyway. The cap is load-bearing twice: without it an MCP session left
+mid-call stops vector production with no reason recorded, and it must stay inside the 45 s window
+`LooksLive` applies or a yielding loop reads as stalled. `LLamaSharpEmbedder` takes its gate per
+text because the backlog and recall share one instance, so a query embed waits for the text in
+flight, not a batch of 16. Session-start maintenance renices itself to 10 (and `taskpolicy -b` on
+macOS) from *inside* the script, after the redirect — never by launching through `nice` or
+`taskpolicy`, whose shell would hold the hook's pipe again — and claims the home-wide
+`maintenance` lock (`IndexLock.TryClaimNamed`, holder `$$`) so one chain runs at a time. Measured:
+the unguarded `IndexLock` let two claimants forked in the same millisecond both win 3 times in 4,
+which is why the read/reap/create runs under a guard file now (D82).
+
 ## Build constraints
 
 - .NET 10, `net10.0`. Warnings are errors.

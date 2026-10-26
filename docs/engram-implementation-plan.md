@@ -5822,3 +5822,82 @@ That test passed separately on both the previous and new binaries. A 20-sample a
 binary comparison measured 10.571 versus 10.586 ms median, p95 11.160 versus 11.027 ms.
 The v18→v19 Native AOT upgrade preserved every fact row and created both name indexes with
 its pre-migration snapshot.
+
+## D82 — Background work yields to the requests the model waits on
+
+LLM-driven queries and writes (MCP tool calls, `/mod/v1` ops that act for the model) run at full
+priority. Session-start maintenance, the embedding backlog and band polling are background work
+and stay out of their way. The evidence came from 7 days of telemetry on one machine: 929
+session-starts, 2,108 subagent-starts, 5,258 `index` runs (median 0.09 s, max 15.7 s, busiest
+hour 142), 1,947 embedding passes (median 2.3 s, max 223 s) and 14,474 file-touched. The server
+used 8 min 40 s of CPU over 2 h 43 min of uptime, about 5% on average. The load was bursty, and
+the reported spike was not captured. Before this, nothing set a process or thread priority, the
+session-start fork had no single-flight guard, the local embedder held its gate for a whole
+batch, and every session's band spawned `engram embed --status --json` every 5 s while a
+backlog drained. Four changes follow.
+
+**1. Maintenance runs at background priority.** The chain script runs
+`renice -n 10 -p $$ || :` right after the `exec` redirect. On macOS it then runs
+`taskpolicy -b -p $$ || :` (background QoS: throttled I/O and efficiency cores). Children
+inherit both. Measured as a non-root user: taskpolicy accepts an existing pid. The order
+matters: taskpolicy first and renice second leaves the shell at nice 15. On a running chain,
+`ps` showed the shell and its `backup take` and `index --freshen` children at nice 10, pri 4.
+Each line fails open: with PATH stripped, every job still runs. **Rejected: launching through
+`nice /bin/sh` or `taskpolicy -b /bin/sh`.** A wrapper that does not exec holds the hook's
+stdout until the chain ends, which is the pipe leak `MaintenanceLauncher` documents. The
+session-start hook was timed through a file and through a pipe, with arms alternated over 30
+rounds: p50 15.97 ms through a file and 15.94 ms through a pipe, so pipe minus file is −0.03 ms.
+A file-against-file self-calibration read 0.37 ms, so the difference is within noise. The
+server is not reniced, because it is the process that answers the model.
+
+**2. One chain at a time per home.** The chain's first command is
+`engram maintenance claim --pid $$ || exit 0`. The claim is a hidden verb that opens no database.
+It uses `IndexLock.TryClaimNamed` with the name `maintenance` and the shell as the holder, so
+the lock frees itself however the chain ends, with no release and no timeout. Nothing is lost
+by skipping, because the spool is durable and the next `--drain-all` services it. Enrollment
+indexing takes no claim: it is a typed command, and skipping it would drop it. **The unguarded
+IndexLock let two claimants forked in the same millisecond both win in 3 of 4 runs.** In one
+case the reader failed to read a lock the writer held with FileShare.None and reaped it as
+unreadable. In the other, two reapers of one stale record each deleted the other's fresh claim.
+The read, reap and create now run under a guard file held exclusively for the decision, and
+the claimants went 4 of 4 after. Rejected: staging the record and calling
+`File.Move(overwrite: false)`. On Unix that call checks first and then renames, and both
+claimants still won 4 of 4.
+
+**3. The backlog yields.** Recall and the backlog resolve the same `LLamaSharpEmbedder`
+through the container-singleton `LocalRuntime`. That embedder now takes its gate per text, so
+a query embed waits for the text in flight, not for a batch of 16. `HttpEmbedder` sends a batch
+as one request and is unchanged. `ForegroundWork` counts foreground requests. It is entered by
+a call-tool filter and by the mod route for every op that is not a lookup. Endpoint middleware
+was rejected because the MCP endpoint carries each session's long-lived GET stream. Lookups
+(`tail`, `fact`, `history`, `captures`, `path-facts`, `embed-status`) are excluded because mods
+poll them on timers. After a batch is read, the backlog waits while the count is non-zero,
+capped at 10 s. The cap keeps an abandoned call from stopping vector production and stays
+inside `LooksLive`'s 45 s window. The embedder still runs outside the write transaction, and
+`EmbeddingBacklog` stays the one producer (D38).
+
+Recall p50 was measured on a 5,131-fact sandbox store with qwen3-embedding-0.6b loaded locally,
+over 30 sequential mod-API recalls. While a backfill of 5,115 pending facts was running, recall
+p50 was 481 ms (max 706 ms), and the backlog embedded only 16 facts during the run. With the
+backlog idle, p50 was 270 ms (max 299 ms). The gap is real and is not a defect in the yield. The
+count drops to zero between back-to-back queries, so a batch that passed its check before a
+query arrived embeds its remaining texts on the same device. The query waits for only one text,
+but it shares the GPU with the batch. No measurement was taken against the pre-change binary.
+
+**4. The band reads embed status over HTTP.** `/mod/v1/embed-status` returns the
+`embed --status --json` object, built by the same `EmbedStatus.Read`, plus a `server` block with
+the version and pid. It writes no telemetry. It is served from a 2 s single-flight cache,
+because `Read` costs about 145 ms over the process floor on a 1.37 GB copy of the real store
+(137,163 embeddable facts). The band asks the server first. When the server is down or does not
+know the op, the band falls back to the CLI at the 60 s cadence only, never at 5 s.
+
+Falsified against committed trees, with each break confirmed by `git diff --quiet` before it
+was trusted:
+
+- Moving the priority line before the redirect reddened the redirect and priority placement
+  tests.
+- Deleting `|| exit 0` reddened the two-chains test, and so did weakening the guard.
+- Removing the scope's `finally` reddened both throwing-scope tests.
+- Removing the 10 s cap reddened the held-open test, which timed out at 60 s.
+- Reverting to a per-batch gate reddened the mid-batch query test.
+- Dropping the cache reddened the ten-concurrent test.
