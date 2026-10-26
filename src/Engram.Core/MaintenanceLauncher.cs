@@ -80,9 +80,10 @@ public static class MaintenanceLauncher
 
         // One chain per home. Session starts arrive in bursts (subagents, resumes, several
         // terminals), and every job below already copes with being skipped: the spool is durable and
-        // the next chain's --drain-all services whatever this one would have.
+        // the next chain's --drain-all services whatever this one would have. Only contention skips;
+        // a claim that errors runs the jobs, each still behind its own gate.
         var claim = jobs == MaintenanceJobs.SessionStart
-            ? engram + " maintenance claim --pid $$" + home + " || exit 0; "
+            ? engram + " maintenance claim --pid $$" + home + "; " + SkipOnContention
             : string.Empty;
 
         var command = new StringBuilder("{ ");
@@ -182,6 +183,9 @@ public static class MaintenanceLauncher
     /// value <see cref="Priority"/> set; applying it first would leave the shell at 15.
     /// </summary>
     internal const string MacPriority = "taskpolicy -b -p $$ >/dev/null 2>&1 || :; ";
+
+    /// <summary>Ends the chain when the claim reports contention (exit 1), and only then.</summary>
+    internal const string SkipOnContention = "rc=$?; [ \"$rc\" -eq 1 ] && exit 0; ";
 
     private static string ShellQuote(string value) => "'" + value.Replace("'", "'\\''") + "'";
 }

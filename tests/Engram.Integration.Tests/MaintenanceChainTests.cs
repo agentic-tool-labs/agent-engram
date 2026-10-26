@@ -72,6 +72,35 @@ public sealed class MaintenanceChainTests : IDisposable
         Assert.Equal(2, JobLines().Count(line => line.StartsWith("backup take", StringComparison.Ordinal)));
     }
 
+    /// <summary>
+    /// A claim that cannot be made at all — here an unwritable lock directory — is not contention,
+    /// so the chain still runs its jobs rather than silently giving up backup, repair and drain.
+    /// </summary>
+    [Fact]
+    public void AClaimThatErrors_StillRunsTheJobs()
+    {
+        SkipOnWindows();
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(sandbox.Home.IndexLockDir);
+        File.SetUnixFileMode(sandbox.Home.IndexLockDir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            using var chain = StartChain();
+            Assert.True(chain.WaitForExit(TimeSpan.FromSeconds(60)), "the chain did not finish");
+
+            Assert.Equal(0, chain.ExitCode);
+            Assert.Single(JobLines(), line => line.StartsWith("backup take", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.SetUnixFileMode(sandbox.Home.IndexLockDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
     private Process StartChain()
     {
         var info = new ProcessStartInfo("/bin/sh") { UseShellExecute = false };

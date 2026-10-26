@@ -201,6 +201,23 @@ public class MaintenanceLauncherTests
     }
 
     /// <summary>
+    /// The claim comes after the priority lines and before the first job, and only its contention
+    /// answer (exit 1) ends the chain: any other failure falls through to the jobs.
+    /// </summary>
+    [Fact]
+    public void TheClaimPrecedesTheJobs_AndSkipsThemOnlyOnContention()
+    {
+        var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null);
+
+        var claim = $"'{Executable}' maintenance claim --pid $$ --home '{Home}'; " + MaintenanceLauncher.SkipOnContention;
+        var claimAt = script.IndexOf(claim, StringComparison.Ordinal);
+        Assert.True(claimAt > script.IndexOf(MaintenanceLauncher.Priority, StringComparison.Ordinal), $"claim missing or before priority: {script}");
+        Assert.True(script.IndexOf(" backup take", StringComparison.Ordinal) > claimAt, $"a job runs before the claim: {script}");
+        Assert.Equal("rc=$?; [ \"$rc\" -eq 1 ] && exit 0; ", MaintenanceLauncher.SkipOnContention);
+        Assert.DoesNotContain("|| exit", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A host with neither <c>renice</c> nor <c>taskpolicy</c> on its PATH still runs every job:
     /// background priority is a courtesy to the foreground, never a precondition for the work.
     /// </summary>

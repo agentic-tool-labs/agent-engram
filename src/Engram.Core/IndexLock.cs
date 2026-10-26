@@ -99,6 +99,9 @@ public sealed class IndexLock : IDisposable
     /// as unreadable, or both read one stale record and each reaped the other's fresh claim.
     /// Measured: two chains forked in the same millisecond both ran their jobs in 3 runs of 4.
     /// A claimant that finds the guard taken reports contention; whoever holds it is deciding.
+    /// The guard file is left in place after every claim. Deleting it is not safe: a claimant
+    /// that opened the old file before the unlink and one that creates a new file after it would
+    /// each hold an exclusive lock, on different files, at the same time.
     /// </remarks>
     private static (IndexLock? Lock, IndexLockRecord? BlockedBy) TryClaimAt(
         EngramHome home, string path, string identity, DateTimeOffset now, int holderPid)
