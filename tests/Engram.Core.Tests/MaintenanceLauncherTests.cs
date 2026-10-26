@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Engram.Core;
 
 namespace Engram.Core.Tests;
@@ -204,30 +205,36 @@ public class MaintenanceLauncherTests
     [Fact]
     public void TheMacScriptCarriesBackgroundQos_AndNoIonice()
     {
-        if (!OperatingSystem.IsMacOS())
-        {
-            Assert.Skip("asserts the script macOS builds");
-        }
-
-        var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null);
+        var script = MaintenanceLauncher.BuildScript(
+            Executable, Home, syncEnabled: false, indexRoot: null, platform: OSPlatform.OSX);
 
         Assert.StartsWith(MaintenanceLauncher.Redirect + MaintenanceLauncher.Priority + MaintenanceLauncher.MacPriority, script, StringComparison.Ordinal);
+        Assert.Contains("taskpolicy -b -p $$", script, StringComparison.Ordinal);
         Assert.DoesNotContain("ionice", script, StringComparison.Ordinal);
     }
 
     [Fact]
     public void TheLinuxScriptCarriesBestEffortLowestIo_AndNoTaskpolicy()
     {
-        if (!OperatingSystem.IsLinux())
-        {
-            Assert.Skip("asserts the script Linux builds");
-        }
-
-        var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null);
+        var script = MaintenanceLauncher.BuildScript(
+            Executable, Home, syncEnabled: false, indexRoot: null, platform: OSPlatform.Linux);
 
         Assert.StartsWith(MaintenanceLauncher.Redirect + MaintenanceLauncher.Priority + MaintenanceLauncher.LinuxPriority, script, StringComparison.Ordinal);
         Assert.Contains("ionice -c2 -n7 -p $$", script, StringComparison.Ordinal);
         Assert.DoesNotContain("taskpolicy", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>Left unstated, the platform is the one the script will run on.</summary>
+    [Fact]
+    public void TheDefaultPlatform_IsTheRuntimes()
+    {
+        var host = OperatingSystem.IsMacOS() ? OSPlatform.OSX
+            : OperatingSystem.IsLinux() ? OSPlatform.Linux
+            : OSPlatform.Windows;
+
+        Assert.Equal(
+            MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null, platform: host),
+            MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null));
     }
 
     /// <summary>

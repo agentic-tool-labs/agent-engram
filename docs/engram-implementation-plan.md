@@ -5842,7 +5842,10 @@ backlog drained. Four changes follow.
 then runs `ionice -c2 -n7 -p $$ || :`. That is the best-effort class at its lowest level, not
 the idle class (`-c3`). The idle class is served only when the disk is otherwise idle, so on a
 busy disk it can hold a backup back indefinitely. Like the other lines, it fails open where
-`ionice` is absent (busybox, minimal images). Children inherit all of these. Measured as a non-root user: taskpolicy accepts an existing pid. The order
+`ionice` is absent (busybox, minimal images). Children inherit all of these. On Linux it is a
+best-effort hint, not a guaranteed I/O throttle. ioprio is honoured only under the BFQ and CFQ
+schedulers; mq-deadline and none ignore it. And nice 10 on its own already implies best-effort
+level 6, so `-c2 -n7` moves the chain one level further down. Measured as a non-root user: taskpolicy accepts an existing pid. The order
 matters: taskpolicy first and renice second leaves the shell at nice 15. On a running chain,
 `ps` showed the shell and its `backup take` and `index --freshen` children at nice 10, pri 4.
 Each line fails open: with PATH stripped, every job still runs. **Rejected: launching through

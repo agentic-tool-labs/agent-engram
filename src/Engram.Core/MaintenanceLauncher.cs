@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Engram.Core;
@@ -70,7 +71,8 @@ public static class MaintenanceLauncher
         string homeRoot,
         bool syncEnabled,
         string? indexRoot,
-        MaintenanceJobs jobs = MaintenanceJobs.SessionStart)
+        MaintenanceJobs jobs = MaintenanceJobs.SessionStart,
+        OSPlatform? platform = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(executablePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(homeRoot);
@@ -141,7 +143,7 @@ public static class MaintenanceLauncher
         // stays open for as long as the slowest job runs — which is the whole of what this
         // redirection exists to prevent. `exec` with no command replaces sh's own descriptors,
         // so the inherited pipe has no writer left the moment the shell starts.
-        return Redirect + Priority + PlatformPriority() + claim + command.Append("}").ToString();
+        return Redirect + Priority + PlatformPriority(platform ?? RuntimePlatform()) + claim + command.Append("}").ToString();
     }
 
     /// <summary>
@@ -191,10 +193,15 @@ public static class MaintenanceLauncher
     /// </summary>
     internal const string LinuxPriority = "ionice -c2 -n7 -p $$ >/dev/null 2>&1 || :; ";
 
-    internal static string PlatformPriority() =>
-        OperatingSystem.IsMacOS() ? MacPriority
-        : OperatingSystem.IsLinux() ? LinuxPriority
+    internal static string PlatformPriority(OSPlatform platform) =>
+        platform == OSPlatform.OSX ? MacPriority
+        : platform == OSPlatform.Linux ? LinuxPriority
         : string.Empty;
+
+    private static OSPlatform RuntimePlatform() =>
+        OperatingSystem.IsMacOS() ? OSPlatform.OSX
+        : OperatingSystem.IsLinux() ? OSPlatform.Linux
+        : OSPlatform.Windows;
 
     /// <summary>Ends the chain when the claim reports contention (exit 1), and only then.</summary>
     internal const string SkipOnContention = "rc=$?; [ \"$rc\" -eq 1 ] && exit 0; ";
