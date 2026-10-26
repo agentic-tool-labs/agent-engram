@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -222,7 +223,11 @@ public static class EmbedStatus
     }
 
     /// <summary>The report as one JSON object, built from the same view the text is rendered from.</summary>
-    public static string ToJson(EmbedStatusView view, DateTimeOffset now)
+    /// <param name="server">
+    /// The answering server's version and pid, set only when the report is served over HTTP, so a
+    /// caller there needs no second process to learn what is up.
+    /// </param>
+    public static string ToJson(EmbedStatusView view, DateTimeOffset now, EmbedServerJson? server = null)
     {
         ArgumentNullException.ThrowIfNull(view);
 
@@ -246,7 +251,8 @@ public static class EmbedStatus
             off ? null : EtaText(view),
             backlog,
             view.Note,
-            !off && view.Progress?.LastError is { Length: > 0 } error ? error : null);
+            !off && view.Progress?.LastError is { Length: > 0 } error ? error : null,
+            server);
 
         return JsonSerializer.Serialize(json, EmbedStatusJsonContext.Default.EmbedStatusJson);
     }
@@ -274,7 +280,43 @@ internal sealed record EmbedStatusJson(
     [property: JsonPropertyName("eta")] string? Eta,
     [property: JsonPropertyName("backlog")] EmbedBacklogJson Backlog,
     [property: JsonPropertyName("note")] string? Note,
-    [property: JsonPropertyName("last_error")] string? LastError);
+    [property: JsonPropertyName("last_error")] string? LastError,
+    [property: JsonPropertyName("server"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] EmbedServerJson? Server);
+
+public sealed record EmbedServerJson(
+    [property: JsonPropertyName("version")] string Version,
+    [property: JsonPropertyName("pid")] int Pid);
+
+/// <summary>
+/// Serves <c>/mod/v1/embed-status</c> from at most one store read per <see cref="Window"/>.
+/// </summary>
+/// <remarks>
+/// Every session runs a band that polls this every few seconds while a backlog drains, and the
+/// read opens the store and counts the vector table. Concurrent callers wait on the one read in
+/// flight rather than each starting their own.
+/// </remarks>
+internal sealed class EmbedStatusCache(Func<string> read)
+{
+    public static readonly TimeSpan Window = TimeSpan.FromSeconds(2);
+
+    private readonly Lock gate = new();
+    private string? json;
+    private long readAt;
+
+    public string Get()
+    {
+        lock (gate)
+        {
+            if (json is null || Stopwatch.GetElapsedTime(readAt) >= Window)
+            {
+                json = read();
+                readAt = Stopwatch.GetTimestamp();
+            }
+
+            return json;
+        }
+    }
+}
 
 internal sealed record EmbedBacklogJson(
     [property: JsonPropertyName("state")] string State,

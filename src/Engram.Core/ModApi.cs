@@ -41,7 +41,7 @@ public static class ModApi
     internal const int RetractionSlackSeconds = 10;
 
     private static readonly string[] Operations =
-        ["recall", "fact", "history", "forget", "remember", "captures", "path-facts", "tail"];
+        ["recall", "fact", "history", "forget", "remember", "captures", "path-facts", "tail", "embed-status"];
 
     public static bool IsKnownOp(string op) => Array.IndexOf(Operations, op) >= 0;
 
@@ -56,13 +56,18 @@ public static class ModApi
     /// The server's telemetry feed. Without one the <c>tail</c> op reports its activity part as
     /// null, which is what a caller that has no server behind it should see.
     /// </param>
+    /// <param name="embedStatus">
+    /// The server's <c>embed --status --json</c> report. Without one the <c>embed-status</c> op
+    /// answers 404, as an older server would.
+    /// </param>
     public static ModApiResult Execute(
         EngramHome home,
         LocalRuntime local,
         string op,
         string headerMod,
         ReadOnlySpan<byte> body,
-        TelemetryFeed? feed = null)
+        TelemetryFeed? feed = null,
+        Func<string>? embedStatus = null)
     {
         if (!IsKnownOp(op))
         {
@@ -105,6 +110,9 @@ public static class ModApi
                 "remember" => Remember(home, request),
                 "captures" => Captures(home, request),
                 "tail" => Tail(home, request, feed),
+                "embed-status" => embedStatus is null
+                    ? Error(404, "not_found", "embed status is served only by a running server")
+                    : new ModApiResult(200, embedStatus()),
                 _ => PathFacts(home, request),
             };
         }

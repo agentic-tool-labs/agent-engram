@@ -179,8 +179,13 @@ internal static class ServeCommand
             Results.Json(identity.ToHealthPayload(), HealthResponseJsonContext.Default.HealthResponsePayload));
 
         var localRuntime = app.Services.GetRequiredService<LocalRuntime>();
+        var embedStatus = new EmbedStatusCache(() =>
+        {
+            var now = DateTimeOffset.UtcNow;
+            return EmbedStatus.ToJson(EmbedStatus.Read(home, now), now, new EmbedServerJson(identity.Version, identity.Pid));
+        });
         app.Map("/mod/v1/{op}", (HttpContext context, string op) =>
-            HandleModCall(context, op, home, localRuntime, app.Services.GetRequiredService<TelemetryFeed>()));
+            HandleModCall(context, op, home, localRuntime, app.Services.GetRequiredService<TelemetryFeed>(), embedStatus));
 
         // On ApplicationStarted rather than beside app.Run(), so the event means the server is
         // accepting requests rather than about to try and possibly fail on a bound port.
@@ -250,7 +255,7 @@ internal static class ServeCommand
     /// check runs before the body is read, so a rejected request costs no parse and no write.
     /// </summary>
     private static async Task HandleModCall(
-        HttpContext context, string op, EngramHome home, LocalRuntime local, TelemetryFeed feed)
+        HttpContext context, string op, EngramHome home, LocalRuntime local, TelemetryFeed feed, EmbedStatusCache embedStatus)
     {
         var request = context.Request;
         if (!HttpMethods.IsPost(request.Method))
@@ -298,7 +303,7 @@ internal static class ServeCommand
             }
         }
 
-        await WriteModResult(context, ModApi.Execute(home, local, op, headerMod, buffer.GetBuffer().AsSpan(0, (int)buffer.Length), feed));
+        await WriteModResult(context, ModApi.Execute(home, local, op, headerMod, buffer.GetBuffer().AsSpan(0, (int)buffer.Length), feed, embedStatus.Get));
     }
 
     private static Task WriteModResult(HttpContext context, ModApiResult result)

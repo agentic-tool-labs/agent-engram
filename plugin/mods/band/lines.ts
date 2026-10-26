@@ -41,23 +41,34 @@ export function backlogText(backlog: EmbedStatus | undefined): string | undefine
 export function parseEmbedStatus(stdout: string | undefined): EmbedStatus | undefined {
   if (stdout === undefined) return undefined
   try {
-    const v = JSON.parse(stdout) as Partial<EmbedStatus> | null
-    if (
-      v !== null &&
-      typeof v === 'object' &&
-      typeof v.embedded === 'number' &&
-      typeof v.total === 'number' &&
-      typeof v.remaining === 'number' &&
-      typeof v.backlog === 'object' &&
-      v.backlog !== null &&
-      typeof v.backlog.state === 'string'
-    ) {
-      return v as EmbedStatus
-    }
+    return asEmbedStatus(JSON.parse(stdout))
   } catch {
     return undefined
   }
+}
+
+/** `undefined` when the value is not an embed status object. */
+export function asEmbedStatus(value: unknown): EmbedStatus | undefined {
+  const v = value as Partial<EmbedStatus> | null
+  if (
+    v !== null &&
+    typeof v === 'object' &&
+    typeof v.embedded === 'number' &&
+    typeof v.total === 'number' &&
+    typeof v.remaining === 'number' &&
+    typeof v.backlog === 'object' &&
+    v.backlog !== null &&
+    typeof v.backlog.state === 'string'
+  ) {
+    return v as EmbedStatus
+  }
   return undefined
+}
+
+/** The server answered `embed-status`, so it is running; its version rides along in `server`. */
+export function servedStatus(value: unknown): { server: string; version: string } {
+  const server = (value as { server?: { version?: unknown } } | null)?.server
+  return { server: 'Running', version: typeof server?.version === 'string' ? server.version : '' }
 }
 
 /** `status --json` exits 1 unless the server is running, so only its stdout is read. */

@@ -1,11 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
-import { SHARED_INITIAL, engramCli } from '../shared/client'
+import { SHARED_INITIAL, engramCli, modApi } from '../shared/client'
 import { ANY_SESSION_START } from '../shared/events'
 import type { ModIo } from '../shared/client'
+import type { EmbedStatus } from '../shared/state'
 import {
   BAND_INITIAL,
   LENS_INITIAL,
+  SLOW_POLL_MS,
+  asEmbedStatus,
   backlogText,
   coverageText,
   currentRecall,
@@ -13,6 +16,7 @@ import {
   parseServerStatus,
   pollIntervalMs,
   rememberPrompt,
+  servedStatus,
   statusText,
   wantsRememberButton,
 } from './lines'
@@ -33,16 +37,29 @@ const bindIo = ($: EngineInterface): ModIo => ({
   updateShared: (fn) => update($, SHARED, fn),
 })
 
-/** One look at the CLI; a failed or unparsable answer leaves nothing to show. */
+/**
+ * One look at the server, or at the CLI when the server cannot answer; a failed or unparsable
+ * answer leaves nothing to show. Only the server's answer may be polled fast: it is cached for every
+ * session, while the CLI is a process per session per poll.
+ */
 async function poll($: EngineInterface, wantsStatusEntry: boolean): Promise<number> {
   const io = bindIo($)
-  const embedRun = await engramCli(io, ['embed', '--status', '--json'])
-  const backlog = embedRun?.exitCode === 0 ? parseEmbedStatus(embedRun.stdout) : undefined
-  const status = wantsStatusEntry ? parseServerStatus((await engramCli(io, ['status', '--json']))?.stdout) : undefined
+  const served = await modApi<unknown>(io, 'embed-status', {}, { mod: 'band' })
+  const fromServer = served.ok ? asEmbedStatus(served.value) : undefined
+  let backlog: EmbedStatus | undefined
+  let status: { server: string; version: string } | undefined
+  if (fromServer !== undefined) {
+    backlog = fromServer
+    status = wantsStatusEntry ? servedStatus(fromServer) : undefined
+  } else {
+    const embedRun = await engramCli(io, ['embed', '--status', '--json'])
+    backlog = embedRun?.exitCode === 0 ? parseEmbedStatus(embedRun.stdout) : undefined
+    status = wantsStatusEntry ? parseServerStatus((await engramCli(io, ['status', '--json']))?.stdout) : undefined
+  }
   const polledAt = await io.now()
   await update($, BAND, (band) => ({ ...band, backlog, status, polledAt }))
   if (wantsStatusEntry) $.ui.status(statusText(status, backlog))
-  return pollIntervalMs(backlog)
+  return fromServer !== undefined ? pollIntervalMs(backlog) : SLOW_POLL_MS
 }
 
 export const register: Register = (on, options) => {
