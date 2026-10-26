@@ -855,7 +855,11 @@ text because the backlog and recall share one instance, so a query embed waits f
 flight, not a batch of 16. Session-start maintenance renices itself to 10 (and `taskpolicy -b` on
 macOS) from *inside* the script, after the redirect — never by launching through `nice` or
 `taskpolicy`, whose shell would hold the hook's pipe again — and claims the home-wide
-`maintenance` lock (`IndexLock.TryClaimNamed`, holder `$$`) so one chain runs at a time. Measured:
+`maintenance` lock (`IndexLock.TryClaimNamed`, holder `$$`) so one chain runs at a time. Only the
+claim's contention exit (1) skips the chain. An erroring claim (exit 2) runs the jobs, because a
+broken claim must not silently switch off backup, repair and drain. The band reads embed status
+over HTTP but takes its status entry from `status --json` every 60 s, because only the CLI can
+report a VersionMismatch. Measured:
 the unguarded `IndexLock` let two claimants forked in the same millisecond both win 3 times in 4,
 which is why the read/reap/create runs under a guard file now (D82).
 

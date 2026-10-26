@@ -5851,7 +5851,11 @@ A file-against-file self-calibration read 0.37 ms, so the difference is within n
 server is not reniced, because it is the process that answers the model.
 
 **2. One chain at a time per home.** The chain's first command is
-`engram maintenance claim --pid $$ || exit 0`. The claim is a hidden verb that opens no database.
+`engram maintenance claim --pid $$; rc=$?; [ "$rc" -eq 1 ] && exit 0`. The claim is a hidden
+verb that opens no database. It exits 0 when it claims, 1 only on contention, and 2 on error.
+Only exit 1 skips the chain. A claim that errors (tested with an unwritable `locks/` directory)
+runs the jobs: each keeps its own gate, and a broken claim must not silently disable backup,
+repair and drain on every session start.
 It uses `IndexLock.TryClaimNamed` with the name `maintenance` and the shell as the holder, so
 the lock frees itself however the chain ends, with no release and no timeout. Nothing is lost
 by skipping, because the spool is durable and the next `--drain-all` services it. Enrollment
@@ -5889,7 +5893,11 @@ but it shares the GPU with the batch. No measurement was taken against the pre-c
 the version and pid. It writes no telemetry. It is served from a 2 s single-flight cache,
 because `Read` costs about 145 ms over the process floor on a 1.37 GB copy of the real store
 (137,163 embeddable facts). The band asks the server first. When the server is down or does not
-know the op, the band falls back to the CLI at the 60 s cadence only, never at 5 s.
+know the op, the band falls back to the CLI at the 60 s cadence only, never at 5 s. The status
+entry does not use the HTTP answer. It comes from `status --json` at the 60 s cadence, because
+only the CLI can see that its version differs from the server's. Reading the answer as
+"Running" turned every VersionMismatch into Running, and the band no longer invents that
+state. The `server` block stays in the reply for other callers.
 
 Falsified against committed trees, with each break confirmed by `git diff --quiet` before it
 was trusted:
@@ -5901,3 +5909,15 @@ was trusted:
 - Removing the 10 s cap reddened the held-open test, which timed out at 60 s.
 - Reverting to a per-batch gate reddened the mid-batch query test.
 - Dropping the cache reddened the ten-concurrent test.
+
+Review round 1 added guards, and each was falsified the same way:
+
+- Deleting the MCP call-tool filter reddened an in-process test, which makes a real
+  `engram_remember` call blocked on the writer slot and observes `Active == 1`.
+- Raising the cap to 50 s reddened the liveness assertion, which samples the note during the
+  yield. It also reddened the bound check: busy interval + cap + the slowest measured batch
+  (28 s) must stay under 45 s.
+- Restoring `|| exit 0`, or returning 1 on error, reddened the erroring-claim test and the
+  script-text test.
+- Inventing "Running" from the HTTP answer, or asking the CLI on every poll, reddened the band
+  tests.
