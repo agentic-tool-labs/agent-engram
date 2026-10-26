@@ -65,12 +65,6 @@ export function asEmbedStatus(value: unknown): EmbedStatus | undefined {
   return undefined
 }
 
-/** The server answered `embed-status`, so it is running; its version rides along in `server`. */
-export function servedStatus(value: unknown): { server: string; version: string } {
-  const server = (value as { server?: { version?: unknown } } | null)?.server
-  return { server: 'Running', version: typeof server?.version === 'string' ? server.version : '' }
-}
-
 /** `status --json` exits 1 unless the server is running, so only its stdout is read. */
 export function parseServerStatus(stdout: string | undefined): { server: string; version: string } | undefined {
   if (stdout === undefined) return undefined

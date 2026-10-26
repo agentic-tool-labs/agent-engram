@@ -16,7 +16,6 @@ import {
   parseServerStatus,
   pollIntervalMs,
   rememberPrompt,
-  servedStatus,
   statusText,
   wantsRememberButton,
 } from './lines'
@@ -37,25 +36,33 @@ const bindIo = ($: EngineInterface): ModIo => ({
   updateShared: (fn) => update($, SHARED, fn),
 })
 
+type ServerStatus = { server: string; version: string }
+
 /**
  * One look at the server, or at the CLI when the server cannot answer; a failed or unparsable
  * answer leaves nothing to show. Only the server's answer may be polled fast: it is cached for every
  * session, while the CLI is a process per session per poll.
+ *
+ * The status entry always comes from `status --json`, because only the CLI can say its version
+ * differs from the server's, and it is asked at the slow cadence whatever the backlog is doing.
  */
-async function poll($: EngineInterface, wantsStatusEntry: boolean): Promise<number> {
+async function poll($: EngineInterface, wantsStatusEntry: boolean, cached: { status?: ServerStatus; at?: number }): Promise<number> {
   const io = bindIo($)
   const served = await modApi<unknown>(io, 'embed-status', {}, { mod: 'band' })
   const fromServer = served.ok ? asEmbedStatus(served.value) : undefined
   let backlog: EmbedStatus | undefined
-  let status: { server: string; version: string } | undefined
   if (fromServer !== undefined) {
     backlog = fromServer
-    status = wantsStatusEntry ? servedStatus(fromServer) : undefined
   } else {
     const embedRun = await engramCli(io, ['embed', '--status', '--json'])
     backlog = embedRun?.exitCode === 0 ? parseEmbedStatus(embedRun.stdout) : undefined
-    status = wantsStatusEntry ? parseServerStatus((await engramCli(io, ['status', '--json']))?.stdout) : undefined
   }
+  const now = await io.now()
+  if (wantsStatusEntry && (cached.at === undefined || now - cached.at >= SLOW_POLL_MS)) {
+    cached.status = parseServerStatus((await engramCli(io, ['status', '--json']))?.stdout)
+    cached.at = now
+  }
+  const status = wantsStatusEntry ? cached.status : undefined
   const polledAt = await io.now()
   await update($, BAND, (band) => ({ ...band, backlog, status, polledAt }))
   if (wantsStatusEntry) $.ui.status(statusText(status, backlog))
@@ -66,6 +73,7 @@ export const register: Register = (on, options) => {
   const wantsStatusEntry = options.status_entry === true
   let timer: Timer | undefined
   let generation = 0
+  const serverStatus: { status?: ServerStatus; at?: number } = {}
 
   const stop = () => {
     generation++
@@ -84,7 +92,7 @@ export const register: Register = (on, options) => {
         if (mine !== generation) return
         let delay = pollIntervalMs(undefined)
         try {
-          delay = await poll($, wantsStatusEntry)
+          delay = await poll($, wantsStatusEntry, serverStatus)
         } catch {
           // A failed poll must not end the loop; the slow cadence is the retry.
         }

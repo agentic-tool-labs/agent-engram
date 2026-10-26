@@ -426,12 +426,26 @@ test('status_entry on, status output not JSON: the entry is cleared', ON, async 
   expect(w.statuses).toEqual([undefined])
 })
 
-test('status_entry on, server answering: the version comes from the answer and status is run only to find the port', ON, async (eng, on) => {
+// The port lookup and the status entry each run `status --json` once at start.
+test('status_entry on, server answering: the state and version come from the CLI, asked every 60 s, not every 5', ON, async (eng, on) => {
   const w = world(on, lensOf([]), SERVED(embed()))
   await start(eng, w)
-  expect(w.statuses).toEqual(['engram Running 1.4.0 · embed 40/100'])
+  expect(w.statuses).toEqual(['engram Running 1.3.0 · embed 40/100'])
+  const statuses = () => w.processes().filter((a) => a === 'status --json').length
+  expect(statuses()).toBe(2)
+  await w.advance(55_000)
+  expect(w.fetches().filter((op) => op === 'embed-status').length).toBe(12)
+  expect(statuses()).toBe(2)
   await w.advance(5_000)
-  expect(w.processes().filter((a) => a === 'status --json').length).toBe(1)
+  expect(statuses()).toBe(3)
+})
+
+test('status_entry on: a CLI that sees a version mismatch says so, though the server answers embed-status', ON, async (eng, on) => {
+  const mismatch = cli({ Home: '/h', Server: 'VersionMismatch', Version: '1.2.0', Port: 7433 })
+  const w = world(on, lensOf([]), SERVED(embed(), { 'status --json': mismatch }))
+  await start(eng, w)
+  expect(w.fetches().filter((op) => op === 'embed-status').length).toBe(1)
+  expect(w.statuses).toEqual(['engram VersionMismatch 1.2.0 · embed 40/100'])
 })
 
 // `status --json` still runs once, from the shared client looking up the server's port.
