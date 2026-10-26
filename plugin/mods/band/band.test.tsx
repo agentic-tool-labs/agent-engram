@@ -48,7 +48,14 @@ const cli = (stdout: object | string, exitCode = 0) => ({
   stdout: typeof stdout === 'string' ? stdout : JSON.stringify(stdout),
 })
 
-type World = { setLens: (lens: LensState) => void; statuses: (string | undefined)[]; submits: string[]; processes: () => string[]; advance: (ms: number) => Promise<void> }
+type World = {
+  setLens: (lens: LensState) => void
+  statuses: (string | undefined)[]
+  submits: string[]
+  processes: () => string[]
+  fetches: () => string[]
+  advance: (ms: number) => Promise<void>
+}
 
 function world(on: On, lens: LensState | undefined, table: RoutingTable = { binary: BIN }, innerText?: string): World {
   const router = installFakeEngine(on, table)
@@ -78,6 +85,7 @@ function world(on: On, lens: LensState | undefined, table: RoutingTable = { bina
     statuses,
     submits,
     processes: () => router.processCalls.map((c) => c.argv.slice(1).join(' ')).filter((a) => a !== ''),
+    fetches: () => router.fetchCalls.map((c) => c.op),
     advance: (ms) => clock.advance(ms),
   }
 }
@@ -312,15 +320,59 @@ test('the poller outlives session.end, which also fires on /clear', async (eng, 
   expect(polls()).toBe(2)
 })
 
-test('while a backlog is draining under a running loop it is polled every 5 s', async (eng, on) => {
-  const w = world(on, lensOf([]), TABLE(embed()))
+// A running server: `status --json` names its port, and it answers `embed-status` itself.
+const SERVED = (status: EmbedStatus, extra: RoutingTable['cli'] = {}): RoutingTable => ({
+  binary: BIN,
+  cli: { 'status --json': cli({ Home: '/h', Server: 'Running', Version: '1.3.0', Port: 7433 }), ...extra },
+  ops: { 'embed-status': () => ({ status: 200, json: { ...status, server: { version: '1.4.0', pid: 9 } } }) },
+})
+
+test('while a backlog is draining under a running loop the server is asked every 5 s, and no CLI is spawned for it', async (eng, on) => {
+  const w = world(on, lensOf([]), SERVED(embed()))
+  await start(eng, w)
+  const asks = () => w.fetches().filter((op) => op === 'embed-status').length
+  expect(asks()).toBe(1)
+  await w.advance(5_000)
+  expect(asks()).toBe(2)
+  await w.advance(5_000)
+  expect(asks()).toBe(3)
+  expect(w.processes().filter((a) => a === 'embed --status --json').length).toBe(0)
+})
+
+test('the server answering draws the backlog line from its answer', async (eng, on) => {
+  const w = world(on, lensOf([]), SERVED(embed()))
+  await start(eng, w)
+  const ui = await draw(eng, 'terminal')
+  expect(await ui.find({ type: 'Text', text: 'embedding 40/100 · about 30s' })).toBeDefined()
+})
+
+test('server down: the CLI is the fallback, and only at the slow cadence even while draining', async (eng, on) => {
+  const w = world(on, lensOf([]), TABLE(embed(), { 'status --json': cli({ Home: '/h', Server: 'NotRunning' }, 1) }))
   await start(eng, w)
   const polls = () => w.processes().filter((a) => a === 'embed --status --json').length
   expect(polls()).toBe(1)
   await w.advance(5_000)
+  expect(polls()).toBe(1)
+  await w.advance(55_000)
   expect(polls()).toBe(2)
+})
+
+test('a server too old to know embed-status: the CLI is the fallback, at the slow cadence', async (eng, on) => {
+  const old: RoutingTable = {
+    binary: BIN,
+    cli: { 'embed --status --json': cli(embed()), 'status --json': cli({ Home: '/h', Server: 'Running', Version: '1.2.0', Port: 7433 }) },
+    ops: { 'embed-status': () => ({ status: 404, json: { error: 'not_found', detail: "unknown operation 'embed-status'" } }) },
+  }
+  const w = world(on, lensOf([]), old)
+  await start(eng, w)
+  const polls = () => w.processes().filter((a) => a === 'embed --status --json').length
+  expect(polls()).toBe(1)
   await w.advance(5_000)
-  expect(polls()).toBe(3)
+  expect(polls()).toBe(1)
+  await w.advance(55_000)
+  expect(polls()).toBe(2)
+  const ui = await draw(eng, 'terminal')
+  expect(await ui.find({ type: 'Text', text: 'embedding 40/100 · about 30s' })).toBeDefined()
 })
 
 test('with nothing left to embed it is polled every 60 s, not 5', async (eng, on) => {
@@ -374,10 +426,33 @@ test('status_entry on, status output not JSON: the entry is cleared', ON, async 
   expect(w.statuses).toEqual([undefined])
 })
 
-test('status_entry off (the default): the entry is cleared once at start, never written, and status is never run', async (eng, on) => {
+// The port lookup and the status entry each run `status --json` once at start.
+test('status_entry on, server answering: the state and version come from the CLI, asked every 60 s, not every 5', ON, async (eng, on) => {
+  const w = world(on, lensOf([]), SERVED(embed()))
+  await start(eng, w)
+  expect(w.statuses).toEqual(['engram Running 1.3.0 · embed 40/100'])
+  const statuses = () => w.processes().filter((a) => a === 'status --json').length
+  expect(statuses()).toBe(2)
+  await w.advance(55_000)
+  expect(w.fetches().filter((op) => op === 'embed-status').length).toBe(12)
+  expect(statuses()).toBe(2)
+  await w.advance(5_000)
+  expect(statuses()).toBe(3)
+})
+
+test('status_entry on: a CLI that sees a version mismatch says so, though the server answers embed-status', ON, async (eng, on) => {
+  const mismatch = cli({ Home: '/h', Server: 'VersionMismatch', Version: '1.2.0', Port: 7433 })
+  const w = world(on, lensOf([]), SERVED(embed(), { 'status --json': mismatch }))
+  await start(eng, w)
+  expect(w.fetches().filter((op) => op === 'embed-status').length).toBe(1)
+  expect(w.statuses).toEqual(['engram VersionMismatch 1.2.0 · embed 40/100'])
+})
+
+// `status --json` still runs once, from the shared client looking up the server's port.
+test('status_entry off (the default): the entry is cleared once at start, never written, and status is run only to find the port', async (eng, on) => {
   const w = world(on, lensOf([]), TABLE(embed(), { 'status --json': STATUS }))
   await start(eng, w)
   await w.advance(10_000)
   expect(w.statuses).toEqual([undefined])
-  expect(w.processes().filter((a) => a === 'status --json').length).toBe(0)
+  expect(w.processes().filter((a) => a === 'status --json').length).toBe(1)
 })

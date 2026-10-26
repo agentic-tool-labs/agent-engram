@@ -41,9 +41,17 @@ public static class ModApi
     internal const int RetractionSlackSeconds = 10;
 
     private static readonly string[] Operations =
-        ["recall", "fact", "history", "forget", "remember", "captures", "path-facts", "tail"];
+        ["recall", "fact", "history", "forget", "remember", "captures", "path-facts", "tail", "embed-status"];
 
     public static bool IsKnownOp(string op) => Array.IndexOf(Operations, op) >= 0;
+
+    private static readonly string[] Lookups = ["fact", "history", "captures", "path-facts", "tail", "embed-status"];
+
+    /// <summary>
+    /// Whether an op only reads. Lookups write no telemetry and are not foreground work: mods poll
+    /// them on timers, so counting them would pause the embedding backlog for as long as a pane is open.
+    /// </summary>
+    public static bool IsLookup(string op) => Array.IndexOf(Lookups, op) >= 0;
 
     /// <summary>Whether a value may name a mod: lowercase letters, digits and hyphens, 1–32 characters.</summary>
     public static bool IsModName(string? value) =>
@@ -56,13 +64,18 @@ public static class ModApi
     /// The server's telemetry feed. Without one the <c>tail</c> op reports its activity part as
     /// null, which is what a caller that has no server behind it should see.
     /// </param>
+    /// <param name="embedStatus">
+    /// The server's <c>embed --status --json</c> report. Without one the <c>embed-status</c> op
+    /// answers 404, as an older server would.
+    /// </param>
     public static ModApiResult Execute(
         EngramHome home,
         LocalRuntime local,
         string op,
         string headerMod,
         ReadOnlySpan<byte> body,
-        TelemetryFeed? feed = null)
+        TelemetryFeed? feed = null,
+        Func<string>? embedStatus = null)
     {
         if (!IsKnownOp(op))
         {
@@ -105,6 +118,9 @@ public static class ModApi
                 "remember" => Remember(home, request),
                 "captures" => Captures(home, request),
                 "tail" => Tail(home, request, feed),
+                "embed-status" => embedStatus is null
+                    ? Error(404, "not_found", "embed status is served only by a running server")
+                    : new ModApiResult(200, embedStatus()),
                 _ => PathFacts(home, request),
             };
         }

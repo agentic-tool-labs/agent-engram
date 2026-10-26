@@ -72,12 +72,62 @@ public sealed class IndexLock : IDisposable
     /// moment of the second look.
     /// </returns>
     public static (IndexLock? Lock, IndexLockRecord? BlockedBy) TryClaim(
-        EngramHome home, string identity, DateTimeOffset now)
+        EngramHome home, string identity, DateTimeOffset now) =>
+        TryClaimAt(home, PathFor(home, identity), identity, now, Environment.ProcessId);
+
+    /// <summary>Where the home-wide lock called <paramref name="name"/> lives.</summary>
+    /// <remarks>
+    /// Kept verbatim rather than hashed: a name is a short word chosen in code, and a repo identity
+    /// is an absolute path, so the two can never spell the same file.
+    /// </remarks>
+    public static string PathForName(EngramHome home, string name) =>
+        Path.Combine(home.IndexLockDir, name + ".lock");
+
+    /// <summary>
+    /// Claims the home-wide lock <paramref name="name"/> on behalf of <paramref name="holderPid"/>,
+    /// which need not be this process. The record names the holder, so the lock is released by that
+    /// process exiting and needs no explicit release — the caller may drop the returned handle.
+    /// </summary>
+    public static (IndexLock? Lock, IndexLockRecord? BlockedBy) TryClaimNamed(
+        EngramHome home, string name, DateTimeOffset now, int holderPid) =>
+        TryClaimAt(home, PathForName(home, name), name, now, holderPid);
+
+    /// <remarks>
+    /// The read, reap and create run under a guard file held exclusively for the length of the
+    /// decision and released by the claimant's exit however it ends. Without it, claimants arriving
+    /// in the same instant both won: one failed to read the other's half-written lock and reaped it
+    /// as unreadable, or both read one stale record and each reaped the other's fresh claim.
+    /// Measured: two chains forked in the same millisecond both ran their jobs in 3 runs of 4.
+    /// A claimant that finds the guard taken reports contention; whoever holds it is deciding.
+    /// The guard file is left in place after every claim. Deleting it is not safe: a claimant
+    /// that opened the old file before the unlink and one that creates a new file after it would
+    /// each hold an exclusive lock, on different files, at the same time.
+    /// </remarks>
+    private static (IndexLock? Lock, IndexLockRecord? BlockedBy) TryClaimAt(
+        EngramHome home, string path, string identity, DateTimeOffset now, int holderPid)
     {
         Directory.CreateDirectory(home.IndexLockDir);
-        var path = PathFor(home, identity);
 
-        if (TryCreateAndWrite(path, identity, now))
+        FileStream guard;
+        try
+        {
+            guard = new FileStream(path + ".guard", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException)
+        {
+            return (null, ReadRecord(path));
+        }
+
+        using (guard)
+        {
+            return TryClaimGuarded(path, identity, now, holderPid);
+        }
+    }
+
+    private static (IndexLock? Lock, IndexLockRecord? BlockedBy) TryClaimGuarded(
+        string path, string identity, DateTimeOffset now, int holderPid)
+    {
+        if (TryCreateAndWrite(path, identity, now, holderPid))
         {
             return (new IndexLock(path), null);
         }
@@ -88,7 +138,7 @@ public sealed class IndexLock : IDisposable
             return (null, holder);
         }
 
-        if (TryDelete(path) && TryCreateAndWrite(path, identity, now))
+        if (TryDelete(path) && TryCreateAndWrite(path, identity, now, holderPid))
         {
             return (new IndexLock(path), null);
         }
@@ -118,7 +168,7 @@ public sealed class IndexLock : IDisposable
         return liveToken is not null && string.Equals(liveToken, holder.StartToken, StringComparison.Ordinal);
     }
 
-    private static bool TryCreateAndWrite(string path, string identity, DateTimeOffset now)
+    private static bool TryCreateAndWrite(string path, string identity, DateTimeOffset now, int holderPid)
     {
         FileStream stream;
         try
@@ -132,7 +182,7 @@ public sealed class IndexLock : IDisposable
 
         using (stream)
         {
-            var record = new IndexLockRecord(Environment.ProcessId, identity, now, ProcessStartToken.ForSelf());
+            var record = new IndexLockRecord(holderPid, identity, now, ProcessStartToken.ForPid(holderPid));
             var bytes = JsonSerializer.SerializeToUtf8Bytes(record, IndexLockJsonContext.Default.IndexLockRecord);
             stream.Write(bytes);
         }
