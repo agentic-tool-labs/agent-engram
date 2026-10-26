@@ -16,6 +16,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The one MCP-over-HTTP test client, shared with tier 3 rather than copied. -->
+    <Compile Include="../Engram.EndToEnd.Tests/HttpMcpClient.cs" Link="HttpMcpClient.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../../src/Engram.Core/Engram.Core.csproj" />
     <ProjectReference Include="../../src/Engram.Cli/Engram.Cli.csproj" />
     <!-- Builds the sidecar so its tests can drive the real binary, without linking

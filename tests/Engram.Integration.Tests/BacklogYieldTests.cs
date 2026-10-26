@@ -18,12 +18,16 @@ public class BacklogYieldTests
         }
     }
 
+    /// <summary>The slowest single batch measured on a real backfill (CLAUDE.md, D54).</summary>
+    private static readonly TimeSpan SlowestMeasuredBatch = TimeSpan.FromSeconds(28);
+
     /// <summary>
     /// A request left open past the cap delays the batch by the cap and then lets it through, so a
-    /// session abandoned mid-call slows vector production instead of stopping it.
+    /// session abandoned mid-call slows vector production instead of stopping it — and for the
+    /// whole of the wait the loop's note still reads as alive.
     /// </summary>
     [Fact]
-    public async Task AForegroundRequestHeldPastTheCap_DelaysTheBatchByTheCap_ThenItProceeds()
+    public async Task AForegroundRequestHeldPastTheCap_DelaysTheBatchByTheCap_ThenItProceeds_NeverReadingStalled()
     {
         Assert.SkipUnless(VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
 
@@ -35,40 +39,49 @@ public class BacklogYieldTests
         var held = foreground.RunAsync(() => release.Task);
 
         var clock = Stopwatch.StartNew();
-        TimeSpan? embeddedAt = null;
-        var activeWhenEmbedded = -1;
-        var embedder = new ObservingEmbedder(() =>
-        {
-            embeddedAt ??= clock.Elapsed;
-            activeWhenEmbedded = foreground.Active;
-        });
+        var embedded = new TaskCompletionSource<(TimeSpan At, int Active)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var embedder = new ObservingEmbedder(() => embedded.TrySetResult((clock.Elapsed, foreground.Active)));
         var backlog = new EmbeddingBacklog(
             sandbox.Home, embedder, EmbeddingSettings.Disabled with { MaxBatch = 16 }, log: null, foreground);
 
-        var result = await backlog.DrainOnceAsync(TestContext.Current.CancellationToken)
-            .WaitAsync(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var loop = backlog.RunAsync(stop.Token);
 
-        Assert.Equal(2, result.Embedded);
-        Assert.Equal(1, activeWhenEmbedded);
-        Assert.True(embeddedAt >= EmbeddingBacklog.ForegroundYieldCap, $"the batch went ahead after {embeddedAt}");
+        // Sampled while the batch is yielding, which is the only time the loop publishes nothing.
+        var samples = 0;
+        while (!embedded.Task.IsCompleted && clock.Elapsed < TimeSpan.FromSeconds(90))
+        {
+            if (EmbeddingProgress.Read(sandbox.Home) is { } note)
+            {
+                Assert.True(note.LooksLive(DateTimeOffset.UtcNow), $"the note read stalled {clock.Elapsed} into the yield");
+                samples++;
+            }
 
-        var note = EmbeddingProgress.Read(sandbox.Home);
-        Assert.NotNull(note);
-        Assert.True(note.LooksLive(DateTimeOffset.UtcNow), "the note read stalled straight after a yielded batch");
+            await Task.Delay(250, TestContext.Current.CancellationToken);
+        }
 
+        Assert.True(embedded.Task.IsCompleted, "the batch never went ahead");
+        var (at, active) = await embedded.Task;
+        Assert.Equal(1, active);
+        Assert.True(at >= EmbeddingBacklog.ForegroundYieldCap, $"the batch went ahead after {at}");
+        Assert.True(samples > 0, "the note was never sampled during the yield");
+
+        await stop.CancelAsync();
+        await loop;
         release.SetResult(0);
         await held;
     }
 
     /// <summary>
-    /// A loop that yields a full cap, then waits its busy interval, has still reported in recently
-    /// enough to be believed.
+    /// The longest a working loop goes without publishing is the busy interval between passes, a
+    /// full yield, and then one batch embed before its commit publishes. That must still read as
+    /// alive, or a backlog stepping aside would be reported as stalled.
     /// </summary>
     [Fact]
-    public void AYieldOfTheWholeCap_StaysInsideTheStalenessWindow()
+    public void TheLongestSilence_AYieldPlusTheSlowestBatch_StaysInsideTheStalenessWindow()
     {
         var now = DateTimeOffset.UtcNow;
-        var lastReport = now - EmbeddingBacklog.ForegroundYieldCap - EmbeddingBacklog.BusyInterval - TimeSpan.FromSeconds(5);
+        var lastReport = now - EmbeddingBacklog.BusyInterval - EmbeddingBacklog.ForegroundYieldCap - SlowestMeasuredBatch;
         var note = new EmbeddingProgress(lastReport, lastReport, 1, "test-embedder", 0, 0, "running", null, []);
 
         Assert.True(note.LooksLive(now));

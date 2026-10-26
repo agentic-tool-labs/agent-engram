@@ -10,7 +10,15 @@ namespace Engram.Cli;
 
 internal static class ServeCommand
 {
-    public static int Run(string? homePath, string[] rest, TextWriter stdout, TextWriter stderr)
+    public static int Run(string? homePath, string[] rest, TextWriter stdout, TextWriter stderr) =>
+        Run(homePath, rest, stdout, stderr, started: null);
+
+    /// <param name="started">
+    /// Called with the server's services once it is accepting requests, so an in-process test can
+    /// reach the instances the requests it sends are served by, and stop the server.
+    /// </param>
+    internal static int Run(
+        string? homePath, string[] rest, TextWriter stdout, TextWriter stderr, Action<IServiceProvider>? started)
     {
         int? port = null;
 
@@ -210,6 +218,8 @@ internal static class ServeCommand
                     SessionId: "server",
                     Kind: TelemetryEventKind.ServerStart));
             }
+
+            started?.Invoke(app.Services);
         });
 
         // Leave no pid file behind claiming a process that has exited — but only ours.
