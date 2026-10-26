@@ -73,32 +73,23 @@ public sealed class MaintenanceChainTests : IDisposable
     }
 
     /// <summary>
-    /// A claim that cannot be made at all — here an unwritable lock directory — is not contention,
-    /// so the chain still runs its jobs rather than silently giving up backup, repair and drain.
+    /// A claim that cannot be made at all is not contention, so the chain still runs its jobs
+    /// rather than silently giving up backup, repair and drain. The error is a regular file where
+    /// the lock directory belongs, which fails for root too; a permission bit would not.
     /// </summary>
     [Fact]
     public void AClaimThatErrors_StillRunsTheJobs()
     {
         SkipOnWindows();
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
 
-        Directory.CreateDirectory(sandbox.Home.IndexLockDir);
-        File.SetUnixFileMode(sandbox.Home.IndexLockDir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
-        try
-        {
-            using var chain = StartChain();
-            Assert.True(chain.WaitForExit(TimeSpan.FromSeconds(60)), "the chain did not finish");
+        Assert.False(Directory.Exists(sandbox.Home.IndexLockDir), "the sandbox already has a lock directory");
+        File.WriteAllText(sandbox.Home.IndexLockDir, "not a directory");
 
-            Assert.Equal(0, chain.ExitCode);
-            Assert.Single(JobLines(), line => line.StartsWith("backup take", StringComparison.Ordinal));
-        }
-        finally
-        {
-            File.SetUnixFileMode(sandbox.Home.IndexLockDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        }
+        using var chain = StartChain();
+        Assert.True(chain.WaitForExit(TimeSpan.FromSeconds(60)), "the chain did not finish");
+
+        Assert.Equal(0, chain.ExitCode);
+        Assert.Single(JobLines(), line => line.StartsWith("backup take", StringComparison.Ordinal));
     }
 
     private Process StartChain()

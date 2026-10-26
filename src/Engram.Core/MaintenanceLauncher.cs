@@ -141,8 +141,7 @@ public static class MaintenanceLauncher
         // stays open for as long as the slowest job runs — which is the whole of what this
         // redirection exists to prevent. `exec` with no command replaces sh's own descriptors,
         // so the inherited pipe has no writer left the moment the shell starts.
-        return Redirect + Priority + (OperatingSystem.IsMacOS() ? MacPriority : string.Empty)
-            + claim + command.Append("}").ToString();
+        return Redirect + Priority + PlatformPriority() + claim + command.Append("}").ToString();
     }
 
     /// <summary>
@@ -183,6 +182,19 @@ public static class MaintenanceLauncher
     /// value <see cref="Priority"/> set; applying it first would leave the shell at 15.
     /// </summary>
     internal const string MacPriority = "taskpolicy -b -p $$ >/dev/null 2>&1 || :; ";
+
+    /// <summary>
+    /// Linux I/O priority for the shell: best-effort class at its lowest level. Not the idle class
+    /// (<c>-c3</c>), which is served only when the disk is otherwise idle and so can hold a backup
+    /// back indefinitely on a busy machine. Fails open where <c>ionice</c> is absent (busybox,
+    /// minimal images).
+    /// </summary>
+    internal const string LinuxPriority = "ionice -c2 -n7 -p $$ >/dev/null 2>&1 || :; ";
+
+    internal static string PlatformPriority() =>
+        OperatingSystem.IsMacOS() ? MacPriority
+        : OperatingSystem.IsLinux() ? LinuxPriority
+        : string.Empty;
 
     /// <summary>Ends the chain when the claim reports contention (exit 1), and only then.</summary>
     internal const string SkipOnContention = "rc=$?; [ \"$rc\" -eq 1 ] && exit 0; ";

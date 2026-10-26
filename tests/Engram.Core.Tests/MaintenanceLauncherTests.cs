@@ -200,6 +200,36 @@ public class MaintenanceLauncherTests
         }
     }
 
+    /// <summary>Each platform gets its own background line, and never the other's.</summary>
+    [Fact]
+    public void TheMacScriptCarriesBackgroundQos_AndNoIonice()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            Assert.Skip("asserts the script macOS builds");
+        }
+
+        var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null);
+
+        Assert.StartsWith(MaintenanceLauncher.Redirect + MaintenanceLauncher.Priority + MaintenanceLauncher.MacPriority, script, StringComparison.Ordinal);
+        Assert.DoesNotContain("ionice", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheLinuxScriptCarriesBestEffortLowestIo_AndNoTaskpolicy()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("asserts the script Linux builds");
+        }
+
+        var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null);
+
+        Assert.StartsWith(MaintenanceLauncher.Redirect + MaintenanceLauncher.Priority + MaintenanceLauncher.LinuxPriority, script, StringComparison.Ordinal);
+        Assert.Contains("ionice -c2 -n7 -p $$", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("taskpolicy", script, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// The claim comes after the priority lines and before the first job, and only its contention
     /// answer (exit 1) ends the chain: any other failure falls through to the jobs.

@@ -5838,8 +5838,11 @@ backlog drained. Four changes follow.
 
 **1. Maintenance runs at background priority.** The chain script runs
 `renice -n 10 -p $$ || :` right after the `exec` redirect. On macOS it then runs
-`taskpolicy -b -p $$ || :` (background QoS: throttled I/O and efficiency cores). Children
-inherit both. Measured as a non-root user: taskpolicy accepts an existing pid. The order
+`taskpolicy -b -p $$ || :` (background QoS: throttled I/O and efficiency cores). On Linux it
+then runs `ionice -c2 -n7 -p $$ || :`. That is the best-effort class at its lowest level, not
+the idle class (`-c3`). The idle class is served only when the disk is otherwise idle, so on a
+busy disk it can hold a backup back indefinitely. Like the other lines, it fails open where
+`ionice` is absent (busybox, minimal images). Children inherit all of these. Measured as a non-root user: taskpolicy accepts an existing pid. The order
 matters: taskpolicy first and renice second leaves the shell at nice 15. On a running chain,
 `ps` showed the shell and its `backup take` and `index --freshen` children at nice 10, pri 4.
 Each line fails open: with PATH stripped, every job still runs. **Rejected: launching through
@@ -5855,7 +5858,9 @@ server is not reniced, because it is the process that answers the model.
 verb that opens no database. It exits 0 when it claims, 1 only on contention, and 2 on error.
 Only exit 1 skips the chain. A claim that errors (tested with an unwritable `locks/` directory)
 runs the jobs: each keeps its own gate, and a broken claim must not silently disable backup,
-repair and drain on every session start.
+repair and drain on every session start. The test induces the error by putting a regular file
+named `locks` where the directory belongs. That fails with ENOTDIR for root as well, whereas a
+chmod would not stop root.
 It uses `IndexLock.TryClaimNamed` with the name `maintenance` and the shell as the holder, so
 the lock frees itself however the chain ends, with no release and no timeout. Nothing is lost
 by skipping, because the spool is durable and the next `--drain-all` services it. Enrollment

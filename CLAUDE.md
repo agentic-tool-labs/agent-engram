@@ -852,8 +852,10 @@ batch**, then proceeds anyway. The cap is load-bearing twice: without it an MCP 
 mid-call stops vector production with no reason recorded, and it must stay inside the 45 s window
 `LooksLive` applies or a yielding loop reads as stalled. `LLamaSharpEmbedder` takes its gate per
 text because the backlog and recall share one instance, so a query embed waits for the text in
-flight, not a batch of 16. Session-start maintenance renices itself to 10 (and `taskpolicy -b` on
-macOS) from *inside* the script, after the redirect — never by launching through `nice` or
+flight, not a batch of 16. Session-start maintenance renices itself to 10, adds `taskpolicy -b` on
+macOS, and adds `ionice -c2 -n7` on Linux: the best-effort class at its lowest level, never the
+idle class `-c3`, which on a busy disk can starve a backup indefinitely. It does all of this from
+*inside* the script, after the redirect — never by launching through `nice` or
 `taskpolicy`, whose shell would hold the hook's pipe again — and claims the home-wide
 `maintenance` lock (`IndexLock.TryClaimNamed`, holder `$$`) so one chain runs at a time. Only the
 claim's contention exit (1) skips the chain. An erroring claim (exit 2) runs the jobs, because a
