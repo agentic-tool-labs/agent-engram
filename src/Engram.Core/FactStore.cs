@@ -134,6 +134,40 @@ public static class FactStore
     }
 
     /// <summary>
+    /// Replaces the live fact <paramref name="liveId"/> with <paramref name="write"/> inside a
+    /// caller's transaction, recording <paramref name="reason"/> on the supersession row.
+    /// </summary>
+    /// <param name="sync">
+    /// Null inherits the old fact's always-sync flag; a value overrides it. Without the carry, a fact
+    /// someone flagged to always sync would stop syncing the moment it was revised.
+    /// </param>
+    /// <remarks>
+    /// The flag is read before <see cref="Remember(SqliteConnection, SqliteTransaction, FactWrite, DateTimeOffset, string)"/>
+    /// closes the incumbent, because the flag keys on the old row's id and stays on it. The close, the
+    /// insert, the link and the flag land in the caller's transaction together.
+    /// </remarks>
+    public static RememberResult Revise(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long liveId,
+        FactWrite write,
+        DateTimeOffset at,
+        string reason,
+        bool? sync = null)
+    {
+        var carriesSyncFlag = sync ?? FactSyncRequests.IsFlagged(connection, transaction, liveId);
+
+        var result = Remember(connection, transaction, write, at, reason);
+
+        if (carriesSyncFlag)
+        {
+            FactSyncRequests.Insert(connection, transaction, result.FactId, at.ToUnixTimeSeconds());
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Closes a fact without replacing it. The fact is not deleted — a forgotten belief is
     /// still a belief that was held, and D8 forbids destroying authored truth.
     /// </summary>

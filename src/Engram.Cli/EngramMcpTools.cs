@@ -453,10 +453,6 @@ public sealed class EngramMcpTools
 
         var now = DateTimeOffset.UtcNow;
 
-        // Read before Remember closes the incumbent: FactSyncRequests keys on fact_id, and the
-        // old row stays exactly what it was (the flag never moves to a closed fact).
-        var carriesSyncFlag = sync ?? FactSyncRequests.IsFlagged(connection, null, factId);
-
         RememberResult result;
         using (var transaction = EngramDatabase.BeginWrite(connection))
         {
@@ -467,9 +463,10 @@ public sealed class EngramMcpTools
             // The store's own collision rule does the revision: one live fact per
             // (subject, predicate), so remembering the correction closes the incumbent and
             // records the reason on the supersession row.
-            result = FactStore.Remember(
+            result = FactStore.Revise(
                 connection,
                 transaction,
+                factId,
                 new FactWrite(
                     target.SubjectPath,
                     "concept",
@@ -482,16 +479,8 @@ public sealed class EngramMcpTools
                     SessionId: sessionId,
                     Details: details),
                 now,
-                reason.Trim());
-
-            // Without this, a fact someone deliberately flagged to always sync would silently
-            // stop syncing the moment they revised it (docs/memory-expansion/01-sync-spec.md,
-            // "Per-fact opt-in") — landed in the same transaction as the write it flags, so a
-            // crash between the two can never leave one without the other.
-            if (carriesSyncFlag)
-            {
-                FactSyncRequests.Insert(connection, transaction, result.FactId, now.ToUnixTimeSeconds());
-            }
+                reason.Trim(),
+                sync);
 
             if (reviewAfterUnix is { } revisedReviewAfter)
             {
