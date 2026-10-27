@@ -310,7 +310,8 @@ public static class BackupCommand
         TextWriter stderr,
         bool includeRelations = false,
         bool includeSyncRequests = false,
-        bool includeReview = false)
+        bool includeReview = false,
+        bool revise = false)
     {
         if (!File.Exists(path))
         {
@@ -338,6 +339,11 @@ public static class BackupCommand
         if (facts.Count == 0)
         {
             stdout.WriteLine("Nothing to replay — " + path + " holds no facts.");
+            if (revise)
+            {
+                stdout.WriteLine(ReviseSummary(apply, new ReplayResult(0, 0, 0, 0), skipped));
+            }
+
             return 0;
         }
 
@@ -347,7 +353,7 @@ public static class BackupCommand
         IReadOnlyDictionary<long, long> idMap;
         try
         {
-            result = FactJournal.Replay(connection, facts, apply, out idMap);
+            result = FactJournal.Replay(connection, facts, apply, revise, out idMap);
         }
         catch (Microsoft.Data.Sqlite.SqliteException exception)
         {
@@ -355,9 +361,27 @@ public static class BackupCommand
             return 1;
         }
 
-        stdout.WriteLine(
-            $"{(apply ? "Wrote" : "Would write")} {result.Written} {(result.Written == 1 ? "fact" : "facts")}"
-                + $", leaving {result.AlreadyPresent} already in the store.");
+        if (revise)
+        {
+            var added = result.Written - result.Revised;
+            stdout.WriteLine(
+                $"{(apply ? "Wrote" : "Would write")} {result.Written} {(result.Written == 1 ? "fact" : "facts")}"
+                    + $" ({added} new, {result.Revised} {(result.Revised == 1 ? "revision" : "revisions")})"
+                    + $", leaving {result.AlreadyPresent} unchanged.");
+
+            if (result.Stale > 0)
+            {
+                stdout.WriteLine(
+                    $"  {result.Stale} {(result.Stale == 1 ? "fact was" : "facts were")} older than the belief "
+                        + "it would replace and was left out.");
+            }
+        }
+        else
+        {
+            stdout.WriteLine(
+                $"{(apply ? "Wrote" : "Would write")} {result.Written} {(result.Written == 1 ? "fact" : "facts")}"
+                    + $", leaving {result.AlreadyPresent} already in the store.");
+        }
 
         // Named separately from AlreadyPresent, because nothing was recovered for these and the
         // difference is the question someone running a recovery tool is actually asking.
@@ -409,8 +433,22 @@ public static class BackupCommand
             stdout.WriteLine("Dry run only — nothing was changed. Re-run with --apply to write them.");
         }
 
+        if (revise)
+        {
+            stdout.WriteLine(ReviseSummary(apply, result, skipped));
+        }
+
         return 0;
     }
+
+    /// <summary>
+    /// The machine-readable last line of a revising import. Keys are only ever appended, so a
+    /// reader has to ignore the ones it does not know.
+    /// </summary>
+    private static string ReviseSummary(bool applied, ReplayResult result, int unreadable) =>
+        $"import: applied={(applied ? "true" : "false")} new={result.Written - result.Revised} "
+            + $"revised={result.Revised} unchanged={result.AlreadyPresent} stale={result.Stale} "
+            + $"conflicted={result.Conflicted} unreadable={unreadable}";
 
     /// <summary>
     /// The review-marker half of <c>backup replay</c> — not <c>import</c>, which is a legacy

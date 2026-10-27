@@ -121,7 +121,8 @@ public static class CliApp
         writer.WriteLine("  review <list|clear <id>> [--apply]  list facts with a review date set, or clear one");
         writer.WriteLine("  compact [--path <prefix>] [--apply]  prune regenerable code facts: closed ones, or a whole subtree with --path");
         writer.WriteLine("  export [--path <prefix>] [--out <file>]  write facts as a portable JSONL bundle (stdout by default)");
-        writer.WriteLine("  import <file> [--apply]            add a bundle's facts; never rewrites or closes what the store already has");
+        writer.WriteLine("  import <file> [--apply] [--revise] add a bundle's facts; never rewrites or closes what the store already has");
+        writer.WriteLine("                                     --revise: a changed fact revises the live belief instead of being left out");
         writer.WriteLine("  sync <export|import|status> [--apply]  exchange facts with other machines through a shared directory");
         writer.WriteLine("  profile <show|set <default|full>>  which MCP tools this server connection advertises");
         writer.WriteLine("  report [--out <path>|-] [--authored-only] [--force]  a readable, untruncated Markdown report of every fact");

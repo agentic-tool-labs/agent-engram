@@ -12,6 +12,7 @@ internal static class ImportCommand
     public static int Run(string? homePath, string[] rest, TextWriter stdout, TextWriter stderr)
     {
         var apply = rest.Contains("--apply");
+        var revise = rest.Contains("--revise");
         var file = rest.FirstOrDefault(a => !a.StartsWith('-'));
 
         if (file is null)
@@ -20,9 +21,9 @@ internal static class ImportCommand
             return 1;
         }
 
-        if (rest.Any(a => a.StartsWith('-') && a != "--apply"))
+        if (rest.Any(a => a.StartsWith('-') && a != "--apply" && a != "--revise"))
         {
-            stderr.WriteLine($"error: unexpected argument '{rest.First(a => a.StartsWith('-') && a != "--apply")}'");
+            stderr.WriteLine($"error: unexpected argument '{rest.First(a => a.StartsWith('-') && a != "--apply" && a != "--revise")}'");
             return 1;
         }
 
@@ -34,6 +35,7 @@ internal static class ImportCommand
             apply,
             $"error: no bundle at {file}",
             stdout,
-            stderr);
+            stderr,
+            revise: revise);
     }
 }

@@ -36,7 +36,21 @@ public sealed record JournalFact(
 /// supersession edge the target disagreed with (D68) — the second also counts
 /// <paramref name="AlreadyPresent"/>, since both statements are true of it.
 /// </param>
-public sealed record ReplayResult(int Written, int AlreadyPresent, int Unresolved, int Conflicted);
+/// <param name="Revised">
+/// Only a revising replay sets this: the part of <paramref name="Written"/> that closed a live belief
+/// rather than adding a new one.
+/// </param>
+/// <param name="Stale">
+/// Only a revising replay sets this: live records older than the belief they would replace, written
+/// nowhere.
+/// </param>
+public sealed record ReplayResult(
+    int Written,
+    int AlreadyPresent,
+    int Unresolved,
+    int Conflicted,
+    int Revised = 0,
+    int Stale = 0);
 
 /// <summary>
 /// The store's facts as plain text, and the way back from it.
@@ -317,6 +331,31 @@ public static class FactJournal
         SqliteConnection connection,
         IReadOnlyList<JournalFact> facts,
         bool apply,
+        out IReadOnlyDictionary<long, long> idMap) =>
+        Replay(connection, facts, apply, revise: false, out idMap);
+
+    /// <summary>
+    /// Replay, optionally revising: with <paramref name="revise"/> a live record that disagrees with the
+    /// store's live belief on the same subject, predicate and object closes that belief and becomes the
+    /// new head, where plain replay leaves the record out.
+    /// </summary>
+    /// <remarks>
+    /// <para>Each live record is classified in file order against the live belief at that moment, so a
+    /// later record sees an earlier one's write and a batch of A, B, C on one key becomes a chain. Bodies
+    /// are compared exactly and <c>valid_from</c> is ignored: a producer that stamps <c>valid_from</c>
+    /// with the time it forwarded would otherwise turn every re-forward into a revision. A record older
+    /// than the belief it would replace is counted stale and written nowhere — storing it as closed
+    /// history would invent its end date.</para>
+    ///
+    /// <para>Closed records, and live ones that already carry a successor, take the plain path
+    /// unchanged. A dry run keeps the heads it would have written in memory so it chains the way the
+    /// apply does.</para>
+    /// </remarks>
+    public static ReplayResult Replay(
+        SqliteConnection connection,
+        IReadOnlyList<JournalFact> facts,
+        bool apply,
+        bool revise,
         out IReadOnlyDictionary<long, long> idMap)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -326,6 +365,9 @@ public static class FactJournal
         var present = 0;
         var unresolved = 0;
         var conflicted = 0;
+        var revised = 0;
+        var stale = 0;
+        var wallClock = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var idMapBuilder = new Dictionary<long, long>();
 
         // Journal ids whose target row this replay inserted. Link may write superseded_by into
@@ -345,8 +387,40 @@ public static class FactJournal
 
         if (!apply)
         {
+            var plannedHeads = new Dictionary<(string Subject, string Predicate, string? Object), (string Body, long ValidFrom)>();
+
             foreach (var fact in facts)
             {
+                if (revise && IsPlainLive(fact))
+                {
+                    var key = (fact.Subject, fact.Predicate, fact.Object);
+                    (long Id, string Body, long ValidFrom)? live = plannedHeads.TryGetValue(key, out var head)
+                        ? (0, head.Body, head.ValidFrom)
+                        : LiveBelief(connection, null, fact);
+                    var at = fact.ValidFrom != 0 ? fact.ValidFrom : wallClock;
+
+                    switch (ClassifyLive(connection, null, fact, at, live))
+                    {
+                        case LiveClass.Unchanged:
+                            present++;
+                            break;
+                        case LiveClass.Stale:
+                            stale++;
+                            break;
+                        case LiveClass.New:
+                            plannedHeads[key] = (fact.Body, at);
+                            written++;
+                            break;
+                        default:
+                            plannedHeads[key] = (fact.Body, at);
+                            written++;
+                            revised++;
+                            break;
+                    }
+
+                    continue;
+                }
+
                 if (Existing(connection, null, fact) is not null)
                 {
                     present++;
@@ -362,13 +436,58 @@ public static class FactJournal
             }
 
             idMap = idMapBuilder;
-            return new ReplayResult(written, present, 0, conflicted);
+            return new ReplayResult(written, present, 0, conflicted, revised, stale);
         }
 
         using var transaction = EngramDatabase.BeginWrite(connection);
 
         foreach (var fact in facts)
         {
+            if (revise && IsPlainLive(fact))
+            {
+                var live = LiveBelief(connection, transaction, fact);
+                var at = fact.ValidFrom != 0 ? fact.ValidFrom : wallClock;
+
+                switch (ClassifyLive(connection, transaction, fact, at, live))
+                {
+                    case LiveClass.Unchanged:
+                        present++;
+                        break;
+                    case LiveClass.Stale:
+                        stale++;
+                        break;
+                    case LiveClass.New:
+                        idMapBuilder[fact.Id] = Insert(connection, transaction, fact);
+                        inserted.Add(fact.Id);
+                        written++;
+                        break;
+                    default:
+                        idMapBuilder[fact.Id] = FactStore.Revise(
+                            connection,
+                            transaction,
+                            live!.Value.Id,
+                            new FactWrite(
+                                fact.Subject,
+                                fact.SubjectKind,
+                                fact.Predicate,
+                                fact.Body,
+                                fact.Scope,
+                                fact.LearnedVia,
+                                fact.Evidence,
+                                fact.Regenerable,
+                                Details: fact.Details,
+                                ObjectPath: fact.Object,
+                                ObjectKind: fact.ObjectKind),
+                            DateTimeOffset.FromUnixTimeSeconds(at),
+                            fact.SupersessionReason ?? "import revise").FactId;
+                        written++;
+                        revised++;
+                        break;
+                }
+
+                continue;
+            }
+
             var existing = Existing(connection, transaction, fact);
             if (existing is { } match)
             {
@@ -434,7 +553,67 @@ public static class FactJournal
 
         transaction.Commit();
         idMap = idMapBuilder;
-        return new ReplayResult(written, present, unresolved, conflicted);
+        return new ReplayResult(written, present, unresolved, conflicted, revised, stale);
+    }
+
+    private enum LiveClass { New, Unchanged, Stale, Revised }
+
+    /// <summary>A live record with no successor of its own — the only kind a revising replay classifies.</summary>
+    private static bool IsPlainLive(JournalFact fact) => fact.ValidTo is null && fact.SupersededBy is null;
+
+    private static LiveClass ClassifyLive(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        JournalFact fact,
+        long at,
+        (long Id, string Body, long ValidFrom)? live)
+    {
+        if (live is not { } head)
+        {
+            return Existing(connection, transaction, fact) is not null ? LiveClass.Unchanged : LiveClass.New;
+        }
+
+        if (string.Equals(head.Body, fact.Body, StringComparison.Ordinal))
+        {
+            return LiveClass.Unchanged;
+        }
+
+        return at < head.ValidFrom ? LiveClass.Stale : LiveClass.Revised;
+    }
+
+    /// <summary>The live belief on the record's subject, predicate and object, if any.</summary>
+    private static (long Id, string Body, long ValidFrom)? LiveBelief(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        JournalFact fact)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = fact.Object is null
+            ? """
+              SELECT f.id, f.body, f.valid_from FROM fact f
+              JOIN entity e ON e.id = f.subject_id
+              WHERE e.path = $path AND f.predicate = $predicate AND f.object_id IS NULL
+                AND f.valid_to IS NULL
+              LIMIT 1;
+              """
+            : """
+              SELECT f.id, f.body, f.valid_from FROM fact f
+              JOIN entity e ON e.id = f.subject_id
+              JOIN entity o ON o.id = f.object_id
+              WHERE e.path = $path AND f.predicate = $predicate AND o.path = $object
+                AND f.valid_to IS NULL
+              LIMIT 1;
+              """;
+        command.Parameters.AddWithValue("$path", fact.Subject);
+        command.Parameters.AddWithValue("$predicate", fact.Predicate);
+        if (fact.Object is not null)
+        {
+            command.Parameters.AddWithValue("$object", fact.Object);
+        }
+
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? (reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2)) : null;
     }
 
     /// <summary>
