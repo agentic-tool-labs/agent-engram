@@ -165,6 +165,43 @@ public class McpBrowseExpandReviseTests
     }
 
     [Fact]
+    public void Revise_OnAFlaggedFact_CarriesTheSyncFlagToTheNewHead()
+    {
+        using var sandbox = new SandboxHome();
+        long oldId;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            oldId = Write(connection, "/projects/revise-flag", "deploys-with", "jenkins on fridays");
+            FactSyncRequests.Insert(connection, null, oldId, 1);
+        }
+
+        EngramMcpTools.Revise(
+            sandbox.Home, new McpSessionId("flag-session"), Initialized, $"f{oldId}", "github actions on merge", "decommissioned");
+
+        using var check = EngramDatabase.OpenInitialized(sandbox.Home);
+        var head = FactStore.ReadById(check, oldId)!.SupersededBy!.Value;
+        Assert.True(FactSyncRequests.IsFlagged(check, null, head));
+    }
+
+    [Fact]
+    public void Revise_OnAnUnflaggedFact_LeavesTheNewHeadUnflagged()
+    {
+        using var sandbox = new SandboxHome();
+        long oldId;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            oldId = Write(connection, "/projects/revise-noflag", "deploys-with", "jenkins on fridays");
+        }
+
+        EngramMcpTools.Revise(
+            sandbox.Home, new McpSessionId("noflag-session"), Initialized, $"f{oldId}", "github actions on merge", "decommissioned");
+
+        using var check = EngramDatabase.OpenInitialized(sandbox.Home);
+        var head = FactStore.ReadById(check, oldId)!.SupersededBy!.Value;
+        Assert.False(FactSyncRequests.IsFlagged(check, null, head));
+    }
+
+    [Fact]
     public void Revise_OnAClosedFact_RefusesToRewriteHistory()
     {
         using var sandbox = new SandboxHome();
