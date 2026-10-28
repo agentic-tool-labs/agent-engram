@@ -391,17 +391,18 @@ public partial class ImportReviseTests
         {
             ["subject"] = "/ledger/k",
             ["predicate"] = "states",
-            ["body"] = "A",
+            ["body"] = "B",
             ["valid_from"] = T0Unix + 50,
             ["valid_to"] = T0Unix + 60,
         }.ToJsonString();
-        var bundle = WriteBundle(sandbox, closed, Record("/ledger/k", "B", T0Unix + 1200).Json);
+        var bundle = WriteBundle(sandbox, closed, Record("/ledger/k", "C", T0Unix + 1200).Json);
 
         var dry = Run(sandbox, bundle, apply: false, revise: true);
         var applied = Run(sandbox, bundle, apply: true, revise: true);
 
+        // Counted in the sequence, the closed B would match the head B and make C look like a resend.
         Assert.Equal(applied.Last.Replace("applied=true", "applied=false"), dry.Last);
-        Assert.Contains("new=1 revised=0 unchanged=1", applied.Last);
+        Assert.Contains("new=1 revised=1 unchanged=0", applied.Last);
     }
 
     [Fact]
