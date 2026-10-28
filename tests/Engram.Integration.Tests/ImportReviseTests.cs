@@ -246,11 +246,11 @@ public partial class ImportReviseTests
         using (var transaction = EngramDatabase.BeginWrite(connection))
         {
             var inherited = FactStore.Revise(
-                connection, transaction, first,
+                connection, transaction,
                 new FactWrite("/ledger/inherit", "concept", "states", "v2", "project", "stated"),
                 T0.AddSeconds(10), "why");
             var overridden = FactStore.Revise(
-                connection, transaction, second,
+                connection, transaction,
                 new FactWrite("/ledger/override", "concept", "states", "v2", "project", "stated"),
                 T0.AddSeconds(10), "why", sync: false);
             transaction.Commit();
@@ -452,24 +452,50 @@ public partial class ImportReviseTests
     }
 
     [Fact]
-    public void FactStoreRevise_WhenTheLiveFactOnTheKeyIsNotTheOneNamed_ThrowsAndWritesNothing()
+    public void FactStoreRevise_WhenTheBeliefMovedSinceTheCallerLooked_CarriesTheFlagOfWhatWasReplaced()
     {
         using var sandbox = new SandboxHome();
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
-        Seed(connection, "/ledger/x", "states", "x1");
-        var other = Seed(connection, "/ledger/y", "states", "y1");
-        var before = Scalar(connection, "SELECT count(*) FROM fact");
+        var stale = Seed(connection, "/ledger/x", "states", "x1");
+        Assert.False(FactSyncRequests.IsFlagged(connection, null, stale));
 
+        // The belief moves from the unflagged x1 to a flagged x2 after a caller read x1 as live.
+        RememberResult moved;
+        RememberResult revised;
         using (var transaction = EngramDatabase.BeginWrite(connection))
         {
-            Assert.Throws<InvalidOperationException>(() => FactStore.Revise(
-                connection, transaction, other,
+            moved = FactStore.Revise(
+                connection, transaction,
                 new FactWrite("/ledger/x", "concept", "states", "x2", "project", "stated"),
-                T0.AddSeconds(10), "why"));
+                T0.AddSeconds(10), "moved", sync: true);
+            revised = FactStore.Revise(
+                connection, transaction,
+                new FactWrite("/ledger/x", "concept", "states", "x3", "project", "stated"),
+                T0.AddSeconds(20), "revised");
+            transaction.Commit();
         }
 
-        Assert.Equal(before, Scalar(connection, "SELECT count(*) FROM fact"));
-        Assert.Equal(1L, Scalar(connection, "SELECT count(*) FROM fact WHERE path = '/ledger/x' AND valid_to IS NULL AND body = 'x1'"));
+        Assert.Equal(moved.FactId, revised.SupersededFactId);
+        Assert.NotEqual(stale, revised.SupersededFactId);
+        Assert.True(FactSyncRequests.IsFlagged(connection, null, revised.FactId));
+    }
+
+    [Fact]
+    public void ImportRevise_ACrossKeySupersessionRowOnTheHead_DoesNotLendItsBodyToTheOverlap()
+    {
+        using var sandbox = new SandboxHome();
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            var foreign = Seed(connection, "/ledger/other", "states", "A");
+            var head = Seed(connection, "/ledger/k", "states", "B");
+            Execute(
+                connection,
+                $"INSERT INTO supersession (old_fact_id, new_fact_id, reason, created_at) VALUES ({foreign}, {head}, 'foreign', {T0Unix});");
+        }
+
+        var run = DryThenApply(sandbox, Record("/ledger/k", "A", T0Unix + 100), Record("/ledger/k", "B", T0Unix + 200));
+
+        Assert.Contains("new=0 revised=2 unchanged=0", run.Last);
     }
 
     private static RunResult DryThenApply(SandboxHome sandbox, params Rec[] records)

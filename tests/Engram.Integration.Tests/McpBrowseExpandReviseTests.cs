@@ -184,6 +184,34 @@ public class McpBrowseExpandReviseTests
     }
 
     [Fact]
+    public void Revise_OnAnEdgeFact_RefusesReadablyAndWritesNothing()
+    {
+        using var sandbox = new SandboxHome();
+        long edgeId;
+        long facts;
+        long supersessions;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            edgeId = FactStore.Remember(
+                connection,
+                new FactWrite("/projects/edge-a", "concept", "depends-on", "a needs b", "project", "stated", ObjectPath: "/projects/edge-b"),
+                T0).FactId;
+            facts = Scalar(connection, "SELECT count(*) FROM fact");
+            supersessions = Scalar(connection, "SELECT count(*) FROM supersession");
+        }
+
+        var result = EngramMcpTools.Revise(
+            sandbox.Home, new McpSessionId("edge-session"), Initialized, $"f{edgeId}", "a needs c", "changed");
+
+        Assert.Contains($"f{edgeId}", result, StringComparison.Ordinal);
+        Assert.Contains("Nothing was written", result, StringComparison.Ordinal);
+        using var check = EngramDatabase.OpenInitialized(sandbox.Home);
+        Assert.Null(FactStore.ReadById(check, edgeId)!.ValidTo);
+        Assert.Equal(facts, Scalar(check, "SELECT count(*) FROM fact"));
+        Assert.Equal(supersessions, Scalar(check, "SELECT count(*) FROM supersession"));
+    }
+
+    [Fact]
     public void Revise_OnAnUnflaggedFact_LeavesTheNewHeadUnflagged()
     {
         using var sandbox = new SandboxHome();
@@ -1110,6 +1138,13 @@ public class McpBrowseExpandReviseTests
             connection,
             new FactWrite(path, "concept", predicate, body, "project", "stated"),
             T0).FactId;
+
+    private static long Scalar(SqliteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToInt64(command.ExecuteScalar()!);
+    }
 
     private static long Count(SqliteConnection connection)
     {
