@@ -451,6 +451,11 @@ public sealed class EngramMcpTools
                 + "correct a belief. Call engram_recall to find the live fact that replaced it.";
         }
 
+        if (FactStore.HasObject(connection, factId))
+        {
+            return $"[{fact_id}] links two entities, and engram_revise cannot revise a link. Nothing was written.";
+        }
+
         var now = DateTimeOffset.UtcNow;
 
         RememberResult result;
@@ -466,7 +471,6 @@ public sealed class EngramMcpTools
             result = FactStore.Revise(
                 connection,
                 transaction,
-                factId,
                 new FactWrite(
                     target.SubjectPath,
                     "concept",

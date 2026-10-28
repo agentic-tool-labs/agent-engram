@@ -481,10 +481,9 @@ public static class FactJournal
                         written++;
                         break;
                     default:
-                        idMapBuilder[fact.Id] = FactStore.Revise(
+                        var replaced = FactStore.Revise(
                             connection,
                             transaction,
-                            live!.Value.Id,
                             new FactWrite(
                                 fact.Subject,
                                 fact.SubjectKind,
@@ -498,7 +497,18 @@ public static class FactJournal
                                 ObjectPath: fact.Object,
                                 ObjectKind: fact.ObjectKind),
                             DateTimeOffset.FromUnixTimeSeconds(at),
-                            fact.SupersessionReason ?? "import revise").FactId;
+                            fact.SupersessionReason ?? "import revise");
+
+                        // The head was read in this transaction and nothing wrote in between, so the
+                        // fact closed must be the one classified against. Anything else is a bug here,
+                        // and throwing rolls the whole batch back.
+                        if (replaced.SupersededFactId != live!.Value.Id)
+                        {
+                            throw new InvalidOperationException(
+                                $"revise closed fact {replaced.SupersededFactId?.ToString() ?? "none"} but classified against {live.Value.Id}");
+                        }
+
+                        idMapBuilder[fact.Id] = replaced.FactId;
                         claimed.Add(key);
                         written++;
                         revised++;
@@ -676,6 +686,9 @@ public static class FactJournal
             SELECT f.id, f.body FROM supersession s
             JOIN fact f ON f.id = s.old_fact_id
             WHERE s.new_fact_id = $id
+              AND f.subject_id = (SELECT subject_id FROM fact WHERE id = $id)
+              AND f.predicate = (SELECT predicate FROM fact WHERE id = $id)
+              AND f.object_id IS (SELECT object_id FROM fact WHERE id = $id)
             ORDER BY f.id DESC
             LIMIT 1;
             """;

@@ -134,41 +134,36 @@ public static class FactStore
     }
 
     /// <summary>
-    /// Replaces the live fact <paramref name="liveId"/> with <paramref name="write"/> inside a
-    /// caller's transaction, recording <paramref name="reason"/> on the supersession row.
+    /// Writes <paramref name="write"/> over whatever is live on its key inside a caller's transaction,
+    /// recording <paramref name="reason"/> on the supersession row, and carries the replaced fact's
+    /// always-sync flag to the new head.
     /// </summary>
     /// <param name="sync">
-    /// Null inherits the old fact's always-sync flag; a value overrides it. Without the carry, a fact
-    /// someone flagged to always sync would stop syncing the moment it was revised.
+    /// Null inherits the replaced fact's always-sync flag; a value overrides it. Without the carry, a
+    /// fact someone flagged to always sync would stop syncing the moment it was revised.
     /// </param>
+    /// <returns>
+    /// What <see cref="Remember(SqliteConnection, SqliteTransaction, FactWrite, DateTimeOffset, string)"/>
+    /// returns, so a caller can see which fact was actually replaced. That can differ from the one it
+    /// looked at earlier if the belief moved in between; the flag follows the fact that was replaced,
+    /// and nothing is inherited when none was.
+    /// </returns>
     /// <remarks>
-    /// The flag is read before <see cref="Remember(SqliteConnection, SqliteTransaction, FactWrite, DateTimeOffset, string)"/>
-    /// closes the incumbent, because the flag keys on the old row's id and stays on it. The close, the
-    /// insert, the link and the flag land in the caller's transaction together.
+    /// The flag is read after the close: a closed row keeps its flag because facts are append-only.
+    /// The close, the insert, the link and the flag land in the caller's transaction together.
     /// </remarks>
     public static RememberResult Revise(
         SqliteConnection connection,
         SqliteTransaction transaction,
-        long liveId,
         FactWrite write,
         DateTimeOffset at,
         string reason,
         bool? sync = null)
     {
-        var carriesSyncFlag = sync ?? FactSyncRequests.IsFlagged(connection, transaction, liveId);
-
         var result = Remember(connection, transaction, write, at, reason);
 
-        // Remember closes whatever is live on the write's key. If that is not the fact the caller
-        // meant to replace, the flag read above belongs to a different fact and the caller's
-        // account of what changed is wrong; refusing rolls the caller's transaction back.
-        if (result.SupersededFactId != liveId)
-        {
-            throw new InvalidOperationException(
-                $"Revise was asked to replace fact {liveId} but the live fact on that key is "
-                + (result.SupersededFactId is { } closed ? closed.ToString(System.Globalization.CultureInfo.InvariantCulture) : "absent")
-                + ".");
-        }
+        var carriesSyncFlag = sync
+            ?? (result.SupersededFactId is { } replaced && FactSyncRequests.IsFlagged(connection, transaction, replaced));
 
         if (carriesSyncFlag)
         {
@@ -368,6 +363,14 @@ public static class FactStore
                 ("$path", subjectPath),
                 ("$predicate", predicate),
                 ("$object", objectPath));
+
+    /// <summary>Whether the fact links two entities (it has an object) rather than stating something about one.</summary>
+    public static bool HasObject(SqliteConnection connection, long factId) =>
+        ScalarLong(
+            connection,
+            null,
+            "SELECT count(*) FROM fact WHERE id = $id AND object_id IS NOT NULL;",
+            ("$id", factId)) > 0;
 
     public static StoredFact? ReadById(SqliteConnection connection, long factId)
     {
