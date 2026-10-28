@@ -388,12 +388,19 @@ public static class FactJournal
         if (!apply)
         {
             var plannedHeads = new Dictionary<(string Subject, string Predicate, string? Object), (string Body, long ValidFrom)>();
+            var resend = ResendOverlap(connection, null, revise ? facts : []);
 
             foreach (var fact in facts)
             {
                 if (revise && IsPlainLive(fact))
                 {
                     var key = (fact.Subject, fact.Predicate, fact.Object);
+                    if (SkipsAsResend(resend, key))
+                    {
+                        present++;
+                        continue;
+                    }
+
                     (long Id, string Body, long ValidFrom)? live = plannedHeads.TryGetValue(key, out var head)
                         ? (0, head.Body, head.ValidFrom)
                         : LiveBelief(connection, null, fact);
@@ -408,11 +415,13 @@ public static class FactJournal
                             stale++;
                             break;
                         case LiveClass.New:
-                            plannedHeads[key] = (fact.Body, at);
+                            plannedHeads[key] = (fact.Body, fact.ValidFrom);
+                            claimed.Add(key);
                             written++;
                             break;
                         default:
                             plannedHeads[key] = (fact.Body, at);
+                            claimed.Add(key);
                             written++;
                             revised++;
                             break;
@@ -441,10 +450,19 @@ public static class FactJournal
 
         using var transaction = EngramDatabase.BeginWrite(connection);
 
+        var resendApplied = ResendOverlap(connection, transaction, revise ? facts : []);
+
         foreach (var fact in facts)
         {
             if (revise && IsPlainLive(fact))
             {
+                var key = (fact.Subject, fact.Predicate, fact.Object);
+                if (SkipsAsResend(resendApplied, key))
+                {
+                    present++;
+                    continue;
+                }
+
                 var live = LiveBelief(connection, transaction, fact);
                 var at = fact.ValidFrom != 0 ? fact.ValidFrom : wallClock;
 
@@ -459,6 +477,7 @@ public static class FactJournal
                     case LiveClass.New:
                         idMapBuilder[fact.Id] = Insert(connection, transaction, fact);
                         inserted.Add(fact.Id);
+                        claimed.Add(key);
                         written++;
                         break;
                     default:
@@ -480,6 +499,7 @@ public static class FactJournal
                                 ObjectKind: fact.ObjectKind),
                             DateTimeOffset.FromUnixTimeSeconds(at),
                             fact.SupersessionReason ?? "import revise").FactId;
+                        claimed.Add(key);
                         written++;
                         revised++;
                         break;
@@ -557,6 +577,113 @@ public static class FactJournal
     }
 
     private enum LiveClass { New, Unchanged, Stale, Revised }
+
+    /// <summary>
+    /// For each key, how many leading revise-path records are a resend of what the store's chain on
+    /// that key already ends with.
+    /// </summary>
+    /// <remarks>
+    /// <para>A producer that restamps <c>valid_from</c> on every forward resends a batch with new
+    /// timestamps and the same bodies, and a resend can carry extra lines at the end. Comparing a
+    /// record with the live head alone would treat A,B resent against head B as a change to A and
+    /// then back to B, growing the history on every retry. The one thing a restamp leaves intact is
+    /// the sequence of bodies, so the longest prefix of the batch's bodies that equals a suffix of
+    /// the chain ending at the head is declined.</para>
+    ///
+    /// <para>Read before the batch writes anything, so earlier records of the batch cannot disturb
+    /// the chain, and called by both the apply and the dry run so the two cannot disagree. The
+    /// backward step goes through <c>supersession.new_fact_id</c>, which is indexed. A batch that
+    /// genuinely re-emits the sequence already at the head of the chain is indistinguishable from a
+    /// resend and collapses the same way: the head stays right, the repeated flip-flop is not
+    /// recorded.</para>
+    /// </remarks>
+    private static Dictionary<(string Subject, string Predicate, string? Object), int> ResendOverlap(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        IReadOnlyList<JournalFact> facts)
+    {
+        var sequences = new Dictionary<(string Subject, string Predicate, string? Object), List<JournalFact>>();
+        foreach (var fact in facts.Where(IsPlainLive))
+        {
+            var key = (fact.Subject, fact.Predicate, fact.Object);
+            if (!sequences.TryGetValue(key, out var sequence))
+            {
+                sequences[key] = sequence = [];
+            }
+
+            sequence.Add(fact);
+        }
+
+        var overlap = new Dictionary<(string Subject, string Predicate, string? Object), int>();
+        foreach (var (key, sequence) in sequences)
+        {
+            if (LiveBelief(connection, transaction, sequence[0]) is not { } head)
+            {
+                continue;
+            }
+
+            // Oldest first, head last. Never read further back than the batch could overlap.
+            var chain = new List<string> { head.Body };
+            var cursor = head.Id;
+            while (chain.Count < sequence.Count && PredecessorOf(connection, transaction, cursor) is { } previous)
+            {
+                chain.Insert(0, previous.Body);
+                cursor = previous.Id;
+            }
+
+            for (var length = Math.Min(sequence.Count, chain.Count); length > 0; length--)
+            {
+                var offset = chain.Count - length;
+                var matches = true;
+                for (var i = 0; i < length && matches; i++)
+                {
+                    matches = string.Equals(sequence[i].Body, chain[offset + i], StringComparison.Ordinal);
+                }
+
+                if (matches)
+                {
+                    overlap[key] = length;
+                    break;
+                }
+            }
+        }
+
+        return overlap;
+    }
+
+    private static bool SkipsAsResend(
+        Dictionary<(string Subject, string Predicate, string? Object), int> remaining,
+        (string Subject, string Predicate, string? Object) key)
+    {
+        if (!remaining.TryGetValue(key, out var left) || left == 0)
+        {
+            return false;
+        }
+
+        remaining[key] = left - 1;
+        return true;
+    }
+
+    private static (long Id, string Body)? PredecessorOf(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        long factId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT f.id, f.body FROM supersession s
+            JOIN fact f ON f.id = s.old_fact_id
+            WHERE s.new_fact_id = $id
+            ORDER BY f.id DESC
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$id", factId);
+
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? (reader.GetInt64(0), reader.GetString(1)) : null;
+    }
 
     /// <summary>A live record with no successor of its own — the only kind a revising replay classifies.</summary>
     private static bool IsPlainLive(JournalFact fact) => fact.ValidTo is null && fact.SupersededBy is null;

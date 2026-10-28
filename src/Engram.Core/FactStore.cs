@@ -159,6 +159,17 @@ public static class FactStore
 
         var result = Remember(connection, transaction, write, at, reason);
 
+        // Remember closes whatever is live on the write's key. If that is not the fact the caller
+        // meant to replace, the flag read above belongs to a different fact and the caller's
+        // account of what changed is wrong; refusing rolls the caller's transaction back.
+        if (result.SupersededFactId != liveId)
+        {
+            throw new InvalidOperationException(
+                $"Revise was asked to replace fact {liveId} but the live fact on that key is "
+                + (result.SupersededFactId is { } closed ? closed.ToString(System.Globalization.CultureInfo.InvariantCulture) : "absent")
+                + ".");
+        }
+
         if (carriesSyncFlag)
         {
             FactSyncRequests.Insert(connection, transaction, result.FactId, at.ToUnixTimeSeconds());
