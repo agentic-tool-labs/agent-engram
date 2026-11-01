@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using Engram.Core;
 
 namespace Engram.Core.Tests;
@@ -172,5 +174,122 @@ public class MaintenanceLauncherTests
         var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: true, "/repo", jobs);
 
         Assert.StartsWith(MaintenanceLauncher.Redirect, script, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The priority lines come after the descriptors are replaced, so a <c>renice</c> that lingers
+    /// can never hold the hook's pipe, and before the first job, so every job inherits them.
+    /// </summary>
+    [Theory]
+    [InlineData(MaintenanceLauncher.MaintenanceJobs.SessionStart)]
+    [InlineData(MaintenanceLauncher.MaintenanceJobs.EnrollmentIndex)]
+    public void PriorityFollowsTheRedirect_AndPrecedesTheFirstJob(MaintenanceLauncher.MaintenanceJobs jobs)
+    {
+        var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: true, "/repo", jobs);
+
+        var priorityAt = script.IndexOf(MaintenanceLauncher.Priority, StringComparison.Ordinal);
+        Assert.Equal(MaintenanceLauncher.Redirect.Length, priorityAt);
+        Assert.True(
+            script.IndexOf(Executable, StringComparison.Ordinal) > priorityAt,
+            $"every job must start after the priority line: {script}");
+
+        if (OperatingSystem.IsMacOS())
+        {
+            Assert.Equal(
+                priorityAt + MaintenanceLauncher.Priority.Length,
+                script.IndexOf(MaintenanceLauncher.MacPriority, StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>Each platform gets its own background line, and never the other's.</summary>
+    [Fact]
+    public void TheMacScriptCarriesBackgroundQos_AndNoIonice()
+    {
+        var script = MaintenanceLauncher.BuildScript(
+            Executable, Home, syncEnabled: false, indexRoot: null, platform: OSPlatform.OSX);
+
+        Assert.StartsWith(MaintenanceLauncher.Redirect + MaintenanceLauncher.Priority + MaintenanceLauncher.MacPriority, script, StringComparison.Ordinal);
+        Assert.Contains("taskpolicy -b -p $$", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("ionice", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheLinuxScriptCarriesBestEffortLowestIo_AndNoTaskpolicy()
+    {
+        var script = MaintenanceLauncher.BuildScript(
+            Executable, Home, syncEnabled: false, indexRoot: null, platform: OSPlatform.Linux);
+
+        Assert.StartsWith(MaintenanceLauncher.Redirect + MaintenanceLauncher.Priority + MaintenanceLauncher.LinuxPriority, script, StringComparison.Ordinal);
+        Assert.Contains("ionice -c2 -n7 -p $$", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("taskpolicy", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>Left unstated, the platform is the one the script will run on.</summary>
+    [Fact]
+    public void TheDefaultPlatform_IsTheRuntimes()
+    {
+        var host = OperatingSystem.IsMacOS() ? OSPlatform.OSX
+            : OperatingSystem.IsLinux() ? OSPlatform.Linux
+            : OSPlatform.Windows;
+
+        Assert.Equal(
+            MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null, platform: host),
+            MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null));
+    }
+
+    /// <summary>
+    /// The claim comes after the priority lines and before the first job, and only its contention
+    /// answer (exit 1) ends the chain: any other failure falls through to the jobs.
+    /// </summary>
+    [Fact]
+    public void TheClaimPrecedesTheJobs_AndSkipsThemOnlyOnContention()
+    {
+        var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null);
+
+        var claim = $"'{Executable}' maintenance claim --pid $$ --home '{Home}'; " + MaintenanceLauncher.SkipOnContention;
+        var claimAt = script.IndexOf(claim, StringComparison.Ordinal);
+        Assert.True(claimAt > script.IndexOf(MaintenanceLauncher.Priority, StringComparison.Ordinal), $"claim missing or before priority: {script}");
+        Assert.True(script.IndexOf(" backup take", StringComparison.Ordinal) > claimAt, $"a job runs before the claim: {script}");
+        Assert.Equal("rc=$?; [ \"$rc\" -eq 1 ] && exit 0; ", MaintenanceLauncher.SkipOnContention);
+        Assert.DoesNotContain("|| exit", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A host with neither <c>renice</c> nor <c>taskpolicy</c> on its PATH still runs every job:
+    /// background priority is a courtesy to the foreground, never a precondition for the work.
+    /// </summary>
+    [Fact]
+    public void TheJobsStillRun_WhenThePriorityToolsAreMissing()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Skip("the maintenance chain is a POSIX shell script");
+            return;
+        }
+
+        var dir = Directory.CreateTempSubdirectory("engram-maint-");
+        try
+        {
+            var log = Path.Combine(dir.FullName, "jobs.log");
+            var fake = Path.Combine(dir.FullName, "engram");
+            File.WriteAllText(fake, $"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n");
+            File.SetUnixFileMode(fake, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+            var info = new ProcessStartInfo("/bin/sh") { UseShellExecute = false };
+            info.ArgumentList.Add("-c");
+            info.ArgumentList.Add(MaintenanceLauncher.BuildScript(fake, dir.FullName, syncEnabled: false, indexRoot: null));
+            info.Environment["PATH"] = Path.Combine(dir.FullName, "no-such-dir");
+
+            using var process = Process.Start(info)!;
+            Assert.True(process.WaitForExit(TimeSpan.FromSeconds(30)), "the chain did not finish");
+
+            var ran = File.ReadAllText(log);
+            Assert.Contains("backup take --if-due", ran, StringComparison.Ordinal);
+            Assert.Contains("repair --apply --tokens", ran, StringComparison.Ordinal);
+        }
+        finally
+        {
+            dir.Delete(recursive: true);
+        }
     }
 }

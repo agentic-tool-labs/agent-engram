@@ -58,6 +58,7 @@ public static class CliApp
             "backup" => BackupCommand.Run(homePath, rest, stdout, stderr),
             "repo" => RepoCommand.Run(homePath, rest, stdout, stderr),
             "queue" => QueueCommand.Run(homePath, rest, stdout, stderr),
+            "maintenance" => MaintenanceCommand.Run(homePath, rest, stdout, stderr),
             "repair" => RepairCommand.Run(homePath, rest, stdout, stderr),
             "review" => ReviewCommand.Run(homePath, rest, stdout, stderr),
             "compact" => CompactCommand.Run(homePath, rest, stdout, stderr),

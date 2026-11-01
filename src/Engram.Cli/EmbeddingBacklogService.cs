@@ -21,6 +21,7 @@ namespace Engram.Cli;
 internal sealed class EmbeddingBacklogService(
     EngramHome home,
     LocalRuntime local,
+    ForegroundWork foreground,
     ILogger<EmbeddingBacklogService> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -63,7 +64,8 @@ internal sealed class EmbeddingBacklogService(
                 home,
                 embedder,
                 settings,
-                message => logger.LogInformation("{Message}", message))
+                message => logger.LogInformation("{Message}", message),
+                foreground)
             .RunAsync(stoppingToken)
             .ConfigureAwait(false);
     }

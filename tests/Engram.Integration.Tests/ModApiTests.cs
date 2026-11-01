@@ -283,6 +283,69 @@ public class ModApiTests
         Assert.Equal("bad_request", JsonNode.Parse(result.Json)!["error"]!.GetValue<string>());
     }
 
+    /// <summary>
+    /// The same object <c>embed --status --json</c> prints, plus who answered, and nothing in the
+    /// telemetry log: a band polls this every few seconds from every session.
+    /// </summary>
+    [Fact]
+    public void EmbedStatus_ReturnsTheStatusReport_AndWritesNoTelemetry()
+    {
+        using var sandbox = new SandboxHome();
+        var now = DateTimeOffset.UtcNow;
+        string Report() => EmbedStatus.ToJson(EmbedStatus.Read(sandbox.Home, now), now, new EmbedServerJson("9.9.9", 4242));
+
+        var result = ModApi.Execute(
+            sandbox.Home, new LocalRuntime(sandbox.Home), "embed-status", "band", """{"mod":"band"}"""u8, embedStatus: Report);
+
+        Assert.Equal(200, result.Status);
+        var body = JsonNode.Parse(result.Json)!;
+        Assert.Equal("not-running", body["backlog"]!["state"]!.GetValue<string>());
+        Assert.Equal("9.9.9", body["server"]!["version"]!.GetValue<string>());
+        Assert.Equal(4242, body["server"]!["pid"]!.GetValue<int>());
+        Assert.Empty(Telemetry(sandbox, TelemetryEventKind.ModCall));
+    }
+
+    /// <summary>The CLI's own report carries no server block; only the HTTP answer does.</summary>
+    [Fact]
+    public void EmbedStatus_CliJson_OmitsTheServerBlock()
+    {
+        using var sandbox = new SandboxHome();
+        var now = DateTimeOffset.UtcNow;
+
+        Assert.Null(JsonNode.Parse(EmbedStatus.ToJson(EmbedStatus.Read(sandbox.Home, now), now))!["server"]);
+    }
+
+    /// <summary>A server handed no report answers as an older server would, so a band falls back.</summary>
+    [Fact]
+    public void EmbedStatus_WithNoReportBehindIt_Is404()
+    {
+        using var sandbox = new SandboxHome();
+
+        var result = ModApi.Execute(sandbox.Home, new LocalRuntime(sandbox.Home), "embed-status", "band", """{"mod":"band"}"""u8);
+
+        Assert.Equal(404, result.Status);
+    }
+
+    /// <summary>
+    /// Ten sessions polling inside one window cost one store read, and the ones that arrive while
+    /// it is in flight wait for it rather than starting their own.
+    /// </summary>
+    [Fact]
+    public void EmbedStatus_TenConcurrentCallsInsideTheWindow_ReadTheStoreOnce()
+    {
+        var reads = 0;
+        var cache = new EmbedStatusCache(() =>
+        {
+            Interlocked.Increment(ref reads);
+            Thread.Sleep(50);
+            return "{}";
+        });
+
+        Parallel.For(0, 10, new ParallelOptions { MaxDegreeOfParallelism = 10 }, _ => cache.Get());
+
+        Assert.Equal(1, reads);
+    }
+
     [Fact]
     public void UnknownOp_Is404Json()
     {

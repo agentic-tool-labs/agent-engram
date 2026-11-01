@@ -56,13 +56,19 @@ public static class VectorBackfill
     /// eight of them — long enough that anything watching would see one update a minute and conclude
     /// nothing was happening. Called after the commit, so it only ever reports work that is durable.
     /// </param>
+    /// <param name="beforeBatch">
+    /// Awaited before each batch is embedded, which is where the backlog yields to foreground work.
+    /// After the read, so an empty queue never waits; a fact closed during the wait is a vector the
+    /// next pass's reconcile removes, the same as one closed while a slow batch embeds.
+    /// </param>
     public static async Task<BackfillResult> RunAsync(
         SqliteConnection connection,
         IEmbedder embedder,
         int batchSize = DefaultBatchSize,
         int maxBatches = int.MaxValue,
         CancellationToken cancellationToken = default,
-        Action<IReadOnlyList<string>>? onBatchWritten = null)
+        Action<IReadOnlyList<string>>? onBatchWritten = null,
+        Func<CancellationToken, Task>? beforeBatch = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(embedder);
@@ -101,6 +107,11 @@ public static class VectorBackfill
             if (pending.Count == 0)
             {
                 return new BackfillResult(BackfillOutcome.Completed, embedded, failed, Remaining: 0);
+            }
+
+            if (beforeBatch is not null)
+            {
+                await beforeBatch(cancellationToken).ConfigureAwait(false);
             }
 
             var texts = new string[pending.Count];

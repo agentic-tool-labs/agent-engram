@@ -14,7 +14,12 @@ export type RoutingTable = {
   binary?: string
   /** Keyed by the CLI arguments joined with a space, e.g. `'status --json'`. */
   cli?: Readonly<Record<string, ProcessResult | ((argv: readonly string[]) => ProcessResult)>>
-  /** Keyed by op; an op with no handler answers 404, i.e. "unsupported". */
+  /**
+   * Keyed by op. With no ops at all every request answers a bare 404, i.e. "unsupported": a server
+   * without the mod API. Once any op is routed, an unrouted one answers 404 `not_found`, as a real
+   * server does for an op it does not know — so one mod asking for an op a test never routed cannot
+   * mark the whole API unsupported for every other mod.
+   */
   ops?: Readonly<Record<string, FetchHandler>>
   sessionId?: string
 }
@@ -49,7 +54,13 @@ export function createRouter(table: RoutingTable): Router {
       }
       router.fetchCalls.push(call)
       const handler = table.ops?.[call.op]
-      const reply = handler === undefined ? { status: 404 } : await handler(call)
+      const knowsTheApi = table.ops !== undefined && Object.keys(table.ops).length > 0
+      const reply =
+        handler !== undefined
+          ? await handler(call)
+          : knowsTheApi
+            ? { status: 404, json: { error: 'not_found', detail: `unknown operation '${call.op}'` } }
+            : { status: 404 }
       const text = reply.text ?? (reply.json === undefined ? '' : JSON.stringify(reply.json))
       return { status: reply.status, ok: reply.status >= 200 && reply.status < 300, text }
     },

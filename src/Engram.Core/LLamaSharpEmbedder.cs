@@ -18,7 +18,11 @@ namespace Engram.Core;
 /// <see cref="LLamaEmbedder"/> does not serialize for us, so concurrent calls would corrupt the
 /// KV cache rather than merely contend. The batch API above it is still the right shape — it is
 /// what keeps callers from embedding in a loop on the write path (D4) — but the batching happens
-/// in the queue, not in the call: this loop is where a batch turns back into single inferences.</para>
+/// in the queue, not in the call: this loop is where a batch turns back into single inferences.
+/// The gate is taken per text, not per batch, because the backlog and recall share this one
+/// instance: a query embed arriving mid-batch waits for the text in flight, never for the rest of
+/// the batch. <see cref="SemaphoreSlim"/> hands a released slot to the longest waiter, so the
+/// batch's next text queues behind the query rather than retaking the gate.</para>
 ///
 /// <para><b>A failure on one text is that text's failure.</b> Per <see cref="IEmbedder"/>, one
 /// input that will not embed returns null and stays in the backfill queue; it must not take the
@@ -29,14 +33,18 @@ namespace Engram.Core;
 public sealed class LLamaSharpEmbedder : IEmbedder
 {
     private readonly SemaphoreSlim gate = new(1, 1);
-    private readonly LLamaEmbedder inner;
+    private readonly Func<string, CancellationToken, Task<IReadOnlyList<float[]>>> embedOne;
 
     public LLamaSharpEmbedder(EmbeddingSpace space, LLamaEmbedder inner)
+        : this(space, (inner ?? throw new ArgumentNullException(nameof(inner))).GetEmbeddings)
     {
-        ArgumentNullException.ThrowIfNull(inner);
+    }
 
+    /// <summary>Takes the single inference directly, so the gating can be driven without a model.</summary>
+    internal LLamaSharpEmbedder(EmbeddingSpace space, Func<string, CancellationToken, Task<IReadOnlyList<float[]>>> embedOne)
+    {
         Space = space;
-        this.inner = inner;
+        this.embedOne = embedOne;
     }
 
     public EmbeddingSpace Space { get; }
@@ -52,21 +60,21 @@ public sealed class LLamaSharpEmbedder : IEmbedder
             return [];
         }
 
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        var results = new float[]?[texts.Count];
+        for (var i = 0; i < texts.Count; i++)
         {
-            var results = new float[]?[texts.Count];
-            for (var i = 0; i < texts.Count; i++)
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
                 results[i] = await EmbedOneAsync(texts[i], cancellationToken).ConfigureAwait(false);
             }
+            finally
+            {
+                gate.Release();
+            }
+        }
 
-            return results;
-        }
-        finally
-        {
-            gate.Release();
-        }
+        return results;
     }
 
     private async Task<float[]?> EmbedOneAsync(string text, CancellationToken cancellationToken)
@@ -74,7 +82,7 @@ public sealed class LLamaSharpEmbedder : IEmbedder
         IReadOnlyList<float[]> vectors;
         try
         {
-            vectors = await inner.GetEmbeddings(text, cancellationToken).ConfigureAwait(false);
+            vectors = await embedOne(text, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
