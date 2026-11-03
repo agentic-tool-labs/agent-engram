@@ -11,6 +11,7 @@ public sealed record ModRequest(
     [property: JsonPropertyName("mod")] string? Mod = null,
     [property: JsonPropertyName("session_id")] string? SessionId = null,
     [property: JsonPropertyName("query")] string? Query = null,
+    [property: JsonPropertyName("text")] string? Text = null,
     [property: JsonPropertyName("budget_tokens")] int? BudgetTokens = null,
     [property: JsonPropertyName("mode")] string? Mode = null,
     [property: JsonPropertyName("fact_id")] string? FactId = null,
@@ -92,6 +93,9 @@ public sealed record ModRememberResponse(
     [property: JsonPropertyName("id")] long Id,
     [property: JsonPropertyName("created")] bool Created);
 
+public sealed record ModPromptCaptureResponse(
+    [property: JsonPropertyName("context")] string? Context);
+
 public sealed record ModCapture(
     [property: JsonPropertyName("handle")] string Handle,
     [property: JsonPropertyName("id")] long Id,
@@ -168,6 +172,7 @@ public sealed record ModTailResponse(
 [JsonSerializable(typeof(ModForgetResponse))]
 [JsonSerializable(typeof(ModRememberResponse))]
 [JsonSerializable(typeof(ModCapturesResponse))]
+[JsonSerializable(typeof(ModPromptCaptureResponse))]
 [JsonSerializable(typeof(ModPathFactsResponse))]
 [JsonSerializable(typeof(ModTailResponse))]
 public sealed partial class ModApiJsonContext : JsonSerializerContext;

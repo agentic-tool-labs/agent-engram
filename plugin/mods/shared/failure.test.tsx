@@ -28,7 +28,7 @@ type Rig = {
 
 const CORE_TEXT = 'core answered'
 
-function inject(on: On, mode: Mode, classicCore: () => unknown = () => ({})): Rig {
+function inject(on: On, mode: Mode, submitCore: () => unknown = () => ({ text: CORE_TEXT })): Rig {
   const rig: Rig = { attempts: {}, registered: [], core: {} }
   const fail = (noun: string) => {
     rig.attempts[noun] = (rig.attempts[noun] ?? 0) + 1
@@ -70,12 +70,11 @@ function inject(on: On, mode: Mode, classicCore: () => unknown = () => ({})): Ri
   answer('session.start', { cwd: '/work' })
   answer('turn.start', { turnId: 't1' })
   answer('turn.complete', { text: CORE_TEXT })
-  answer('prompt.submit', { text: CORE_TEXT })
-  answer('tool.call', { result: {}, text: CORE_TEXT })
-  on('classic.UserPromptSubmit' as never, (() => {
-    rig.core['classic.UserPromptSubmit'] = (rig.core['classic.UserPromptSubmit'] ?? 0) + 1
-    return classicCore()
+  on('prompt.submit' as never, (() => {
+    rig.core['prompt.submit'] = (rig.core['prompt.submit'] ?? 0) + 1
+    return submitCore()
   }) as never)
+  answer('tool.call', { result: {}, text: CORE_TEXT })
   answer('command.run', { text: CORE_TEXT })
   on('ui.render', (($: any, e: any) => {
     rig.core['ui.render'] = (rig.core['ui.render'] ?? 0) + 1
@@ -127,7 +126,7 @@ const EVENTS: { name: string; drive: ($: Engine) => Promise<unknown>; expected: 
     expected: { result: {}, text: CORE_TEXT },
     core: 'tool.call',
   },
-  { name: 'classic.UserPromptSubmit', drive: ($) => $.classic.UserPromptSubmit({ prompt: 'remember that I like tea' }), expected: {}, core: 'classic.UserPromptSubmit' },
+  { name: 'prompt.submit from the composer', drive: ($) => $.prompt.submit({ text: 'remember that I like tea', wait: false, origin: { kind: 'composer' } } as never), expected: { text: CORE_TEXT }, core: 'prompt.submit' },
 ]
 
 // A command a mod answers itself may answer from its own state without touching a failing noun, or
@@ -201,7 +200,7 @@ for (const mode of MODES) {
   // handler to calling `next` only through it; this row holds that the failure surfaces unchanged.
   test(`${mode}: a slash prompt whose next rejects runs the core once (its failure surfaces; it is not retried)`, async (eng, on) => {
     const rig = inject(on, mode, () => Promise.reject(new Error('core failed')))
-    await expect(eng.classic.UserPromptSubmit({ prompt: '/clear' })).rejects.toThrow()
-    expect(rig.core['classic.UserPromptSubmit']).toBe(1)
+    await expect(eng.prompt.submit({ text: '/clear', wait: false, origin: { kind: 'composer' } } as never)).rejects.toThrow()
+    expect(rig.core['prompt.submit']).toBe(1)
   })
 }

@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
-import { ANY_SESSION_START } from '../shared/events'
+import { ANY_PROMPT_SUBMIT, ANY_SESSION_START, isOwnPrompt } from '../shared/events'
 import { once } from '../shared/guard'
 import { forSession } from '../shared/session'
 
@@ -59,13 +59,16 @@ export const register: Register = (on, options) => {
       }
     })
 
-    on('classic.UserPromptSubmit', async ($, e, next) => {
+    // prompt.submit, not classic.UserPromptSubmit: where an organization manages Claude Code a
+    // user-installed mod's classic.* hooks do not run. next(e) still runs the settings hooks, so the
+    // capture has been written by the time it resolves.
+    on('prompt.submit', ANY_PROMPT_SUBMIT, async ($, e, next) => {
       const go = once(next)
       try {
         let io: ModIo
         let since: number
         try {
-          if (e.prompt.startsWith('/')) return go(e)
+          if (!isOwnPrompt(e)) return go(e)
           io = bindIo($)
           since = Math.floor((await io.now()) / 1000) - 1
         } catch {

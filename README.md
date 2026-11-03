@@ -322,7 +322,8 @@ Every other path into memory waits for the model to volunteer a tool call, and t
 telemetry says that is not something to rely on — `engram_recall` has fired 7 times across
 the life of the instance that has been running this repo, every one of them opt-in. A fact
 the user states in passing is lost unless something that is not the model writes it down.
-`UserPromptSubmit` is the only place every message passes through.
+The `capture` mod's `prompt.submit` hook is the only place every message passes through, and it
+captures only while the server is running.
 
 The catchable shape is grammatical, not lexical. *"I went to see a Spiderman movie last
 Saturday"* contains no memory keyword at all — matching on "remember" or "always" would

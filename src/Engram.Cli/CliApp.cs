@@ -93,7 +93,7 @@ public static class CliApp
         writer.WriteLine("  status [--json]                    report whether the MCP server is running");
         writer.WriteLine("  doctor [options]                   check the whole instance, and say what to type about it");
         writer.WriteLine("  activity [--since <window>] [--json]  when Engram last did anything");
-        writer.WriteLine("  hook <event>                       hook entrypoint: session-start|subagent-start|pre-compact|user-prompt|file-touched");
+        writer.WriteLine("  hook <event>                       hook entrypoint: session-start|subagent-start|pre-compact|file-touched");
         writer.WriteLine("  probe [options]                    summarize telemetry and store density for the M0 adoption probe");
         writer.WriteLine("  permissions [options]              allow Claude Code to call Engram's memory tools unprompted");
         writer.WriteLine("  model <list|install|path>          list the local embedding models, or download one");

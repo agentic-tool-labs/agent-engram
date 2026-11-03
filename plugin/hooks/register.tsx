@@ -3,6 +3,7 @@ import { register as shared } from '../mods/shared/index'
 import { register as lens } from '../mods/lens/index'
 import { register as band } from '../mods/band/index'
 import { register as toasts } from '../mods/toasts/index'
+import { register as capture } from '../mods/capture/index'
 import { register as primer } from '../mods/primer/index'
 import { register as sentinel } from '../mods/sentinel/index'
 import { register as beliefDiff } from '../mods/belief-diff/index'
@@ -14,7 +15,9 @@ export const register: Register = (on, options) => {
   shared(on, options)
   lens(on, options)
   band(on, options)
+  // Beneath toasts: the toast reads what this wrote once next(e) resolves.
   toasts(on, options)
+  capture(on, options)
   primer(on, options)
   sentinel(on, options)
   beliefDiff(on, options)

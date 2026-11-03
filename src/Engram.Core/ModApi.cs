@@ -41,7 +41,7 @@ public static class ModApi
     internal const int RetractionSlackSeconds = 10;
 
     private static readonly string[] Operations =
-        ["recall", "fact", "history", "forget", "remember", "captures", "path-facts", "tail", "embed-status"];
+        ["recall", "fact", "history", "forget", "remember", "capture", "captures", "path-facts", "tail", "embed-status"];
 
     public static bool IsKnownOp(string op) => Array.IndexOf(Operations, op) >= 0;
 
@@ -116,6 +116,7 @@ public static class ModApi
                 "history" => History(home, request),
                 "forget" => Forget(home, request),
                 "remember" => Remember(home, request),
+                "capture" => Capture(home, request),
                 "captures" => Captures(home, request),
                 "tail" => Tail(home, request, feed),
                 "embed-status" => embedStatus is null
@@ -288,6 +289,18 @@ public static class ModApi
 
         RecordCall(home, request, sessionId, "remember");
         return Ok(JsonSerializer.Serialize(new ModRememberResponse(FactCatalog.HandleFor(factId), factId, !isRepeat), ModApiJsonContext.Default.ModRememberResponse));
+    }
+
+    private static ModApiResult Capture(EngramHome home, ModRequest request)
+    {
+        var sessionId = RequireSession(request);
+        if (string.IsNullOrWhiteSpace(request.Text))
+        {
+            throw Bad("text is required");
+        }
+
+        var context = UserPromptCapture.Run(home, request.Text, sessionId);
+        return Ok(JsonSerializer.Serialize(new ModPromptCaptureResponse(context), ModApiJsonContext.Default.ModPromptCaptureResponse));
     }
 
     private static ModApiResult Captures(EngramHome home, ModRequest request)
