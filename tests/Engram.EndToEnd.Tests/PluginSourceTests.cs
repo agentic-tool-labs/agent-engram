@@ -60,6 +60,18 @@ public class PluginSourceTests
         Assert.Empty(McpCalls(sources));
     }
 
+    // Where an organization manages Claude Code, a user-installed mod's classic.* hooks do not run,
+    // and nothing fails: the feature is simply absent there. A mod hooks the event's own name.
+    [Fact]
+    public void ShippedModSources_HookNoClassicEvent()
+    {
+        var hooks = ModSourceFiles(PluginSandbox.PluginDirectory)
+            .Where(file => Regex.IsMatch(File.ReadAllText(file), @"\bon\(\s*['""]classic\."))
+            .ToList();
+
+        Assert.Empty(hooks);
+    }
+
     [Theory]
     [InlineData("const r = await $.mcp.call('s', 't', {})")]
     [InlineData("const r = await io.mcp.call('s', 't', {})")]

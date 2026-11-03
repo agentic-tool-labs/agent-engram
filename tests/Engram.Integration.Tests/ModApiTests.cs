@@ -56,6 +56,31 @@ public class ModApiTests
         }).Body["handle"]!;
 
     [Fact]
+    public void Capture_MissingTextOrSession_IsRejected()
+    {
+        using var sandbox = new SandboxHome();
+
+        Assert.Equal(400, Call(sandbox, "capture", new JsonObject { ["session_id"] = Session }).Status);
+        Assert.Equal(400, Call(sandbox, "capture", new JsonObject { ["text"] = "I moved to Seattle." }).Status);
+    }
+
+    [Fact]
+    public void Capture_WritesAUserPromptRecordUnderTheCallersSession_AndNoModCall()
+    {
+        using var sandbox = new SandboxHome();
+
+        var (status, body) = Call(sandbox, "capture", new JsonObject { ["session_id"] = Session, ["text"] = "I moved to Seattle in March." });
+
+        Assert.Equal(200, status);
+        Assert.Contains("I moved to Seattle in March.", (string)body["context"]!);
+        Assert.Equal(Session, Assert.Single(Telemetry(sandbox, "user-prompt")).SessionId);
+        Assert.Empty(Telemetry(sandbox, "mod-call"));
+
+        var captures = Call(sandbox, "captures", new JsonObject { ["session_id"] = Session, ["since"] = 0 }).Body["captures"]!.AsArray();
+        Assert.Equal("I moved to Seattle in March.", (string)Assert.Single(captures)!["body"]!);
+    }
+
+    [Fact]
     public void Recall_Valid_WritesOneModCallAndNeitherRecallNorSessionOpen()
     {
         using var sandbox = new SandboxHome();

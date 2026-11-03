@@ -36,11 +36,11 @@ function rig(on: On, ops: RoutingTable['ops'] = {}, table: RoutingTable = {}): R
   on('ui.toast', (_$, e) => (r.toasts.push(e.text), { value: undefined }))
   on('audio.play', (_$, e) => (r.deny.audio ? { deny: 'refused' } : (r.clips.push(e.clip), { value: undefined })))
   on('command.register', (_$, e) => (r.deny.register ? { deny: 'taken' } : (r.commands.push(e.name), { value: undefined })) as never)
-  on('classic.UserPromptSubmit', () => (r.order.push('next'), {}))
+  on('prompt.submit', (_$, e) => (r.order.push('next'), { text: e.text }))
   return r
 }
 
-const submit = ($: Engine, prompt: string) => $.classic.UserPromptSubmit({ prompt })
+const submit = ($: Engine, text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
 const undo = ($: Engine) =>
   $.command.run({
     command: 'engram-undo-capture',
@@ -104,7 +104,7 @@ test('a new handle beside an already shown one is toasted alone', async ($, on) 
 
 test('the hook returns the next result unchanged', async ($, on) => {
   rig(on, { captures: reply(capture('f1', 'a')) })
-  expect(await submit($, 'I like tea')).toEqual({})
+  expect(await submit($, 'I like tea')).toEqual({ text: 'I like tea' })
 })
 
 test('a slash command makes no API call; a slash mid-prompt does', async ($, on) => {
@@ -115,11 +115,11 @@ test('a slash command makes no API call; a slash mid-prompt does', async ($, on)
   expect(calls(r, 'captures').length).toBe(1)
 })
 
-test('toasts_enabled false: no API calls at all', { options: { toasts_enabled: false } }, async ($, on) => {
-  const r = rig(on, { captures: reply(capture('f1', 'a')) })
+test('toasts_enabled false: no captures call, and the capture itself still runs', { options: { toasts_enabled: false } }, async ($, on) => {
+  const r = rig(on, { capture: () => ({ status: 200, json: { context: null } }), captures: reply(capture('f1', 'a')) })
   await submit($, 'I like tea')
-  expect(r.router.fetchCalls.length).toBe(0)
-  expect(r.router.processCalls.length).toBe(0)
+  expect(calls(r, 'captures').length).toBe(0)
+  expect(calls(r, 'capture').length).toBe(1)
   expect(r.toasts).toEqual([])
 })
 
@@ -135,7 +135,8 @@ test('API unsupported (404): no toast, no retry on the next prompt', async ($, o
   await submit($, 'I like tea')
   await submit($, 'and coffee')
   expect(r.toasts).toEqual([])
-  expect(calls(r, 'captures').length).toBe(1)
+  // The first bare 404 backs off every mod's calls, whichever op drew it.
+  expect(r.router.fetchCalls.length).toBe(1)
 })
 
 test('undo forgets exactly the most recent capture and says so', async ($, on) => {
@@ -296,17 +297,10 @@ test('toasts_enabled false registers no command', { options: { toasts_enabled: f
   expect(undoRegs(r)).toEqual([])
 })
 
-test('a prompt event with no text still reaches next and throws nothing', async ($, on) => {
-  const r = rig(on, { captures: reply(capture('f1', 'a')) })
-  await $.classic.UserPromptSubmit({ prompt: undefined } as never)
-  expect(r.order).toEqual(['next'])
-  expect(r.router.fetchCalls.length).toBe(0)
-})
-
 test('an unavailable session id costs the toast, never the chain', async ($, on) => {
   const r = rig(on, { captures: reply(capture('f1', 'a')) })
   r.boom = true
-  expect(await submit($, 'I like tea')).toEqual({})
+  expect(await submit($, 'I like tea')).toEqual({ text: 'I like tea' })
   expect(r.toasts).toEqual([])
 })
 
@@ -320,10 +314,11 @@ test('undo with an unavailable session id answers nothing and throws nothing', a
   expect(calls(r, 'forget').length).toBe(0)
 })
 
-test('a system-sourced prompt with no new capture: one captures call, no toast', async ($, on) => {
-  const r = rig(on, { captures: reply() })
-  await $.classic.UserPromptSubmit({ prompt: 'task finished', source: 'system' })
-  expect(calls(r, 'captures').length).toBe(1)
+test('a prompt the person did not type: no captures call, no toast', async ($, on) => {
+  const r = rig(on, { captures: reply(capture('f1', 'a')) })
+  await $.prompt.submit({ text: 'task finished', wait: false, origin: { kind: 'task-notification' } } as never)
+  expect(r.order).toEqual(['next'])
+  expect(calls(r, 'captures').length).toBe(0)
   expect(r.toasts).toEqual([])
 })
 

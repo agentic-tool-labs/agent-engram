@@ -153,9 +153,9 @@ a whole record rather than tear one (D56).
 This rule is about that hook, not about hooks: D4 justifies it entirely by per-edit
 frequency and write contention. The primer hooks — `session-start`, `subagent-start` —
 do take a short read and close it, because a primer that reports memory from a hardcoded
-list disagrees with recall the moment a fact is forgotten. `user-prompt` writes, once per
-message the user sends: it is the only place a fact stated in passing can be caught, and a
-capture the model has to opt into is a capture that does not happen. Each of those was
+list disagrees with recall the moment a fact is forgotten. The `capture` mod writes through the
+server, once per message the user sends: it is the only place a fact stated in passing can be caught,
+and a capture the model has to opt into is a capture that does not happen (D83). Each of those was
 measured against the version it replaced — a hook that opens the database is a decision
 with a number behind it, never a default.
 
@@ -864,6 +864,16 @@ over HTTP but takes its status entry from `status --json` every 60 s, because on
 report a VersionMismatch. Measured:
 the unguarded `IndexLock` let two claimants forked in the same millisecond both win 3 times in 4,
 which is why the read/reap/create runs under a guard file now (D82).
+
+**No shipped mod hooks a `classic.*` event, and capture needs the server.** Where an organization
+manages Claude Code, a user-installed mod's `classic.*` hooks do not run and nothing fails: the feature
+is just absent there. That took the capture toast out silently, so `ShippedModSources_HookNoClassicEvent`
+holds the rule. Capture moved with it: the `capture` mod sends the person's own prompt to
+`POST /mod/v1/capture`, and provenance is the engine's `origin.kind`, not a read of the private transcript
+format, which D78's rule retires. The mod sits **beneath** toasts in `register.tsx`, because the toast
+reads what the capture wrote once `next(e)` resolves. `hook user-prompt` is kept as a silent no-op for
+plugins older than the binary. The costs are real and accepted: no server means no capture, and
+`allowManagedModsOnly` or mods switched off means none either (D83).
 
 ## Build constraints
 

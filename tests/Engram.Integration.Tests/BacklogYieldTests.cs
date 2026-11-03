@@ -112,6 +112,7 @@ public class BacklogYieldTests
     [Theory]
     [InlineData("recall")]
     [InlineData("remember")]
+    [InlineData("capture")]
     [InlineData("forget")]
     public async Task AnOpThatActsForTheModel_IsForegroundWork_UntilItReturns(string op)
     {

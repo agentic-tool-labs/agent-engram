@@ -76,6 +76,8 @@ export type RememberResponse = { handle: string; id: number; created: boolean }
 
 export type CapturesRequest = { session_id: string; since: number }
 export type Capture = { handle: string; id: number; body: string; created_at: number }
+export type CaptureRequest = { session_id: string; text: string }
+export type CaptureResponse = { context: string | null }
 export type CapturesResponse = { captures: Capture[] }
 
 export type PathFactsRequest = { path: string; predicate?: string }
@@ -159,6 +161,7 @@ export type ModOps = {
   history: { request: HistoryRequest; response: HistoryResponse }
   forget: { request: ForgetRequest; response: ForgetResponse }
   remember: { request: RememberRequest; response: RememberResponse }
+  capture: { request: CaptureRequest; response: CaptureResponse }
   captures: { request: CapturesRequest; response: CapturesResponse }
   'path-facts': { request: PathFactsRequest; response: PathFactsResponse }
   tail: { request: TailRequest; response: TailResponse }

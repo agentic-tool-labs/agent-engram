@@ -5556,6 +5556,8 @@ uses a git checkout. The resolver belongs to the mod API stream.
 
 ## D78 — User-prompt provenance is bound to the submission by its text, not by its position
 
+**Superseded by D83:** capture no longer reads the transcript. Kept for the measurements.
+
 `user-prompt` captured nothing in Claude Code 2.1.294 interactive sessions: the real instance's last
 `user-prompt` record is 2026-08-10T00:40:25Z against 3,271 `session-start` records since. The hook
 accepted a prompt only when the **last** transcript line carried `promptSource == "typed"`, and Claude
@@ -5929,3 +5931,41 @@ Review round 1 added guards, and each was falsified the same way:
   script-text test.
 - Inventing "Running" from the HTTP answer, or asking the CLI on every poll, reddened the band
   tests.
+
+## D83 — Capture runs from a mod on `prompt.submit`, not from the `UserPromptSubmit` hook
+
+An organization-managed Claude Code reported that Engram's hooks on `classic.UserPromptSubmit` do not
+run, because a user-installed mod's `classic.*` hooks are skipped there. The one such registration was
+the capture toast in the toasts mod. The command hook doing the capture is not a mod hook, and the docs
+say `allowManagedModsOnly` does not affect `hooks.json`, so capture itself was probably still running.
+It moved anyway, by the owner's decision: a mod is the path the managed-settings docs do not list as
+skipped, and one capture path is simpler than one per hook type.
+
+**The rule.** The `capture` mod sends the person's own prompt (`isOwnPrompt`: `origin.kind` is
+`composer` and it is not a slash command) to `POST /mod/v1/capture`, which runs
+`UserPromptCapture.Run` and answers the context for the model, or null. The mod attaches that with
+`next({ ...e, context })`. It is registered beneath toasts, whose lookup runs after `next(e)` resolves.
+
+**Provenance is the engine's stamp.** D78 inferred it from `promptSource` in a private transcript format
+through two read windows. `origin.kind` is documented and needs no file read, and a server op must not
+accept a transcript path from a request anyway. Peer messages, task notifications and `claude -p` carry
+other origin kinds.
+
+**Telemetry is unchanged in meaning (D56).** `capture` writes `user-prompt` only when a fact was stored,
+and never `mod-call`, which would add a line per prompt. It is not a lookup, so it counts as foreground
+work (D82).
+
+**What this costs.** Capture now needs a running server; the hook opened the store itself. A server older
+than the plugin answers `not_found`, so there is no capture until the binary is upgraded. An organization
+setting `allowManagedModsOnly`, or mods being off (before v2.1.286), means no capture at all. A prompt over
+the API's 64 KiB body limit is not captured. A capture slower than the mod's 2 s timeout may land without
+its context reaching the model.
+
+**Rejected.** Running `engram hook user-prompt` through `$.process.run` would have kept capture working
+with the server down, but D76 routes mods through `/mod/v1`, and it would have needed a transcript path or
+a second provenance rule. Keeping the classic hook beside the mod is safe, since capture dedupes by content,
+but leaves two paths and the transcript reader to maintain. `hook user-prompt` stays as a silent no-op,
+because a plugin older than the binary still registers it and an unknown verb prints usage on every prompt.
+
+**Not measured.** Nothing here has run on an organization-managed install. That `prompt.submit` reaches a
+user-installed mod there rests on the docs not listing it as skipped.

@@ -502,6 +502,55 @@ public class ModApiE2ETests
         Assert.Equal(logBefore, ReadLog(home));
     }
 
+    // Tier 3 for the reason the hook had one: a classifier that works under test and not in the AOT
+    // binary would fail silently and forever. The second call is what holds "the event means a fact
+    // was written": a restatement does all the work and stores nothing (D56, D83).
+    [Fact]
+    public async Task Capture_StoresOnlyTheStatedSentence_TellsTheModel_AndRecordsOnlyWhatItWrote()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        using var server = StartedServer.Begin(home);
+        using var http = new HttpClient();
+        var prompt = new JsonObject { ["session_id"] = Session, ["text"] = "I moved to Seattle in March. Now fix the failing test and push it." };
+
+        var first = await Post(http, server.Port, "capture", prompt.DeepClone().AsObject());
+        Assert.Equal(HttpStatusCode.OK, first.Status);
+        var context = (string)first.Body["context"]!;
+        Assert.Contains("I moved to Seattle in March.", context);
+        Assert.DoesNotContain("failing test", context);
+        Assert.Contains("supersedes", context);
+        Assert.Equal(1, KindCount(home, "user-prompt"));
+
+        var repeat = await Post(http, server.Port, "capture", prompt.DeepClone().AsObject());
+        Assert.Equal(HttpStatusCode.OK, repeat.Status);
+        Assert.Null(repeat.Body["context"]);
+        Assert.Equal(1, KindCount(home, "user-prompt"));
+
+        var ordinary = await Post(http, server.Port, "capture", new JsonObject { ["session_id"] = Session, ["text"] = "run the tests and tell me which ones fail" });
+        Assert.Null(ordinary.Body["context"]);
+        Assert.Equal(1, KindCount(home, "user-prompt"));
+        Assert.Equal(0, KindCount(home, "mod-call"));
+    }
+
+    // A plugin older than the binary still registers this verb. Usage on stderr would surface as a
+    // hook error on every prompt, and a capture here would bypass the mod's check that the person typed it.
+    [Fact]
+    public void HookUserPromptVerb_FromAnOlderPlugin_ExitsQuietlyAndCapturesNothing()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        var (exitCode, stdout, stderr) = EngramProcess.RunWithStdin(
+            home.Root, """{"session_id":"s1","prompt":"I moved to Seattle in March."}""", "hook", "user-prompt");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal(string.Empty, stderr);
+        Assert.Equal(0, KindCount(home, "user-prompt"));
+    }
+
     private static string PaddedCapturesBody(int bytes)
     {
         const string prefix = """{"mod":"lens","session_id":"s","since":0,"pad":"{0}"}""";

@@ -316,12 +316,15 @@ test('a binding that throws passes the prompt on untouched and calls next once',
   expect(seen[0]).toBe(e)
 })
 
+// Every mod loads in these tests, and the toasts mod asks for captures on the same prompt.
+const recalls = (router: ReturnType<typeof installFakeEngine>) => router.fetchCalls.filter((c) => c.op === 'recall')
+
 test('manifest default is off: a plugin loaded with defaults makes no recall', async ($, on) => {
   const router = installFakeEngine(on, { ...RUNNING, ops: { recall: reply('high') } })
   mock.clock(on)
   answerSubmit(on)
   await $.prompt.submit(prompt())
-  expect(router.fetchCalls.length).toBe(0)
+  expect(recalls(router).length).toBe(0)
 })
 
 test('engine: a plugin-origin prompt is skipped even in inject mode', { options: { jit_mode: 'inject' } }, async ($, on) => {
@@ -329,7 +332,7 @@ test('engine: a plugin-origin prompt is skipped even in inject mode', { options:
   mock.clock(on)
   answerSubmit(on)
   await $.prompt.submit(prompt(PROMPT, { origin: { kind: 'plugin', name: 'other' } as never }))
-  expect(router.fetchCalls.length).toBe(0)
+  expect(recalls(router).length).toBe(0)
 })
 
 test('real binding: a composer prompt in inject mode reaches the API and gains one block', { options: { jit_mode: 'inject' } }, async ($, on) => {
@@ -337,9 +340,9 @@ test('real binding: a composer prompt in inject mode reaches the API and gains o
   mock.clock(on)
   answerSubmit(on)
   const entered = await $.prompt.submit(prompt())
-  expect(router.fetchCalls.length).toBe(1)
-  expect(router.fetchCalls[0]!.url).toBe('http://127.0.0.1:7433/mod/v1/recall')
-  expect((router.fetchCalls[0]!.body as { session_id: string }).session_id).toBe('claude-session-1')
+  expect(recalls(router).length).toBe(1)
+  expect(recalls(router)[0]!.url).toBe('http://127.0.0.1:7433/mod/v1/recall')
+  expect((recalls(router)[0]!.body as { session_id: string }).session_id).toBe('claude-session-1')
   expect(entered.context).toEqual(['Memory relevant to this message (recalled automatically):\n' + DIGEST])
 })
 
@@ -348,8 +351,8 @@ test('real binding: shadow mode calls the API and attaches nothing', { options: 
   mock.clock(on)
   answerSubmit(on)
   const entered = await $.prompt.submit(prompt())
-  for (let i = 0; i < 100 && router.fetchCalls.length === 0; i++) await pause(5)
-  expect(router.fetchCalls.length).toBe(1)
-  expect((router.fetchCalls[0]!.body as { mode: string }).mode).toBe('shadow')
+  for (let i = 0; i < 100 && recalls(router).length === 0; i++) await pause(5)
+  expect(recalls(router).length).toBe(1)
+  expect((recalls(router)[0]!.body as { mode: string }).mode).toBe('shadow')
   expect(entered.context).toBeUndefined()
 })
