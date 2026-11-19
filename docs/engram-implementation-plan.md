@@ -6042,3 +6042,60 @@ observed` before the real `--ledger --apply`, or new rows keep landing at `/ah2`
 safe to re-run, and once wrangl writes the new address, a re-recorded path converges through the
 newer-target rule. Engram adds no import-time remap and special-cases `ah2` nowhere but this step. A
 forward fix for misfiled captures waits on E7.
+
+## D93 — Scheduled snapshots leave out the vector index; the journal holds authored truth, from the snapshot
+
+`backups/` had reached 7.3 GB: three 2.45 GB snapshots and a ~531 MB journal per take. Two thirds of
+each snapshot was `fact_vec`, which the server's backlog regenerates from `fact`, and 822k of the
+journal's 891k lines were code facts that every snapshot also holds and an index run regenerates.
+Spec: `backup-derived-state.md` (eng-20), phases 1 and 2a; adr-1 accepted, adr-2 proposed.
+
+**Scope is the caller's, with no default.** `BackupStore.Take` takes `BackupScope.Full` or
+`Authored`. Full: `pre-vN` (D31) and `pre-restore`, whose whole job is to be the thing you wanted
+back. Authored: `backup take`, `pre-compact`, `pre-repair`, `pre-reorganize` — each rewrites only
+what an authored copy fully protects. An authored take runs the same `VACUUM INTO`, then on the
+`.partial` copy only: `VectorIndex.Drop` when sqlite-vec loads (a `vec0` table whose module cannot
+load is kept and marked `authored+vectors`), stamp `backup_scope` and `backup_omitted
+{"vectors": n}`, `VACUUM`, release the pool, rename. A guard refuses `home.DatabasePath` before
+anything opens. **Every live fact stays**, code facts included: a restore needs no re-index and a
+repo gone from disk loses nothing. Pruning live code facts (the spec's R2) was measured and dropped:
+22.8 s against an 8 s gate, 4,823 aliases deleted by cascade, and re-index parity unproven.
+
+**A slimming failure takes the copy again.** The spec's "rename the unslimmed partial" is false after
+a late failure: `Drop` commits in its own transaction before the stamp, so the copy on disk is
+neither full nor marked. Re-running `VACUUM INTO` costs ~4 s on a path that should never run, and is
+what makes "a backup is never lost to slimming" a guarantee. A test plants a trigger that aborts the
+stamp and asserts the vectors are still in the snapshot.
+
+**The journal is authored truth, written from the snapshot.** `FactJournal.Write(…, Authored)`
+keeps `regenerable = 0` facts and any regenerable fact `StoreCompactor.AuthoredDependencySql`
+protects — a supersession edge to an authored fact, or a relation, review or sync request naming
+it. One predicate, defined once beside compact's target selection, so every relation, review and
+sync line resolves to a fact line in the same journal. `TakeNow` opens the renamed snapshot and
+writes all four journals from it; a test writes a fact into the live store between the two and
+asserts the journal does not carry it. Headers gain `"scope"`; `FormatVersion` stays 1, since
+readers ignore unknown fields. `export` keeps the unfiltered path and writes no scope. Replay prints
+the scope — a header without one reads as `full` — and for `authored` says code facts come from a
+snapshot or `engram index`.
+
+**Restore says what it left out.** For a marked snapshot it prints the live lane-eligible facts with
+no vector (only when there are any, so an `authored+vectors` snapshot at full coverage prints
+nothing), and clears both markers from the restored store; the dry run reports that and writes
+nothing. Until the backlog finishes, recall's vector lane runs on partial coverage and recall does not
+say so — the D60 note fires only on `Unavailable`; `embed --status` and doctor show the pending count.
+`backup list` gains a scope column; an unmarked snapshot reads `full`.
+
+**Measured** on a copy of the real store (890,829 facts, 68,613 authored), published binary:
+`backup take` 10.7–11.1 s wall over three runs, against the spec's 7.8 s estimate: `VACUUM INTO`
+alone measured 4.34 s in the same session, the journal filter 0.49 s, so slimming (drop plus vacuum)
+is about 5.5 s here against E1a's 3.52 s. Snapshot 2,446,798,848 → **830,271,488 B** (366,789
+vectors dropped); `facts.jsonl` **39,944,804 B**, 68,613 lines, against ~531 MB. Restore into a fresh
+home 1.36 s and reports 261,513 facts to embed. The authored-truth digest (every authored fact,
+authored-touching supersession, relations, reviews, sync requests, enrollment, aliases, sessions) and
+the live regenerable set, registry and file state are identical between source and restored store;
+the live copy's digest is unchanged by the take. The journal replayed into an empty home (26.7 s)
+reproduces the journalled subset exactly and writes no regenerable fact, since none is depended on.
+
+**Found, not changed.** Replay rebuilds a supersession row only through `superseded_by`, so a forget
+row (`new_fact_id` NULL) is not reproduced by any replay, full or authored. Replay semantics were out
+of scope here.
