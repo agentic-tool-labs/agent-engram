@@ -159,8 +159,10 @@ public class StoreRepairerTests
         {
             var unqualified = sql.Replace("new.", string.Empty, StringComparison.Ordinal)
                 .Replace("old.", string.Empty, StringComparison.Ordinal);
+            // Anchored on BEGIN so a conjunct appended after the condition — which would make
+            // the trigger index less than the constant claims — reddens too.
             Assert.True(
-                unqualified.Contains(EngramDatabase.LexicallyIndexed, StringComparison.Ordinal),
+                unqualified.Contains(EngramDatabase.LexicallyIndexed + " BEGIN", StringComparison.Ordinal),
                 $"{name} does not carry '{EngramDatabase.LexicallyIndexed}'");
         }
     }
