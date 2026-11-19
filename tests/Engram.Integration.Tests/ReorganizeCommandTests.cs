@@ -157,8 +157,15 @@ public class ReorganizeCommandTests
 
         Assert.Equal(0, exit);
         var snapshot = Assert.Single(BackupStore.List(sandbox.Home), s => s.Name.Contains("pre-reorganize", StringComparison.Ordinal));
-        using var copy = EngramDatabase.Open(snapshot.Path);
-        Assert.Equal(BackupMarkers.AuthoredScope, BackupMarkers.Read(copy).Scope);
+        try
+        {
+            using var copy = EngramDatabase.Open(snapshot.Path);
+            Assert.Equal(BackupMarkers.AuthoredScope, BackupMarkers.Read(copy).Scope);
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(snapshot.Path);
+        }
     }
 
     [Fact]

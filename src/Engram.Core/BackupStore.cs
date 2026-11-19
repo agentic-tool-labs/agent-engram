@@ -399,18 +399,30 @@ public static class BackupStore
         var final = Path.Combine(home.BackupDir, Unique(home.BackupDir, now, version, label));
         var partial = final + PartialSuffix;
 
+        if (scope == BackupScope.Authored)
+        {
+            // Before the try, so a refusal is a refusal and never quietly becomes a full snapshot.
+            RefuseLiveStore(partial, home);
+        }
+
         string? warning = null;
         try
         {
             Copy(connection, partial);
 
-            if (scope == BackupScope.Authored)
+            if (scope == BackupScope.Full)
+            {
+                // A full snapshot's label must say full. Markers can reach the live store (an older
+                // binary's restore, or a clear that failed) and VACUUM INTO would copy them across.
+                StripMarkersIfPresent(connection, partial);
+            }
+            else
             {
                 try
                 {
                     warning = Slim(partial, home);
                 }
-                catch (Exception exception) when (exception is SqliteException or IOException or System.Text.Json.JsonException)
+                catch (Exception exception)
                 {
                     // Slimming may have committed part of its work before failing, so the copy on
                     // disk is no longer known to be the full one. Taking it again is what makes
@@ -455,21 +467,68 @@ public static class BackupStore
     /// by two spellings is not caught, and no caller passes anything but a fresh name under
     /// <c>backups/</c>.
     /// </remarks>
-    internal static string? Slim(string path, EngramHome home)
-    {
-        ArgumentNullException.ThrowIfNull(path);
-        ArgumentNullException.ThrowIfNull(home);
+    /// <summary>
+    /// A test-only fault injected after the copy is opened, standing in for whatever a slimming step
+    /// might throw. Async-local, so a test sets it for its own flow and no other test's take sees it.
+    /// </summary>
+    internal static readonly AsyncLocal<Action?> SlimFault = new();
 
+    private static void RefuseLiveStore(string path, EngramHome home)
+    {
         if (string.Equals(Path.GetFullPath(path), Path.GetFullPath(home.DatabasePath), StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
                 "Refusing to slim " + path + ": it is the live store, and slimming only ever runs on a snapshot copy.");
         }
+    }
+
+    /// <summary>
+    /// Deletes both markers from a full copy, when the store it was copied from carried any. Checked
+    /// on the live connection first, so the ordinary full take opens nothing extra.
+    /// </summary>
+    private static void StripMarkersIfPresent(SqliteConnection live, string partial)
+    {
+        if (EngramDatabase.ReadMeta(live, BackupMarkers.ScopeKey) is null
+            && EngramDatabase.ReadMeta(live, BackupMarkers.OmittedKey) is null)
+        {
+            return;
+        }
+
+        try
+        {
+            using var copy = EngramDatabase.Open(partial);
+            DeleteMarkers(copy);
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(partial);
+        }
+    }
+
+    private static void DeleteMarkers(SqliteConnection connection)
+    {
+        using var transaction = EngramDatabase.BeginWrite(connection);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "DELETE FROM schema_meta WHERE key IN ($scope, $omitted);";
+        command.Parameters.AddWithValue("$scope", BackupMarkers.ScopeKey);
+        command.Parameters.AddWithValue("$omitted", BackupMarkers.OmittedKey);
+        command.ExecuteNonQuery();
+        transaction.Commit();
+    }
+
+    internal static string? Slim(string path, EngramHome home)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(home);
+
+        RefuseLiveStore(path, home);
 
         string? warning = null;
         try
         {
             using var copy = EngramDatabase.Open(path, home.LibDir);
+            SlimFault.Value?.Invoke();
 
             var scope = BackupMarkers.AuthoredScope;
             long vectors = 0;
@@ -706,19 +765,12 @@ public static class BackupStore
         try
         {
             using var connection = EngramDatabase.Open(home);
-            using var transaction = EngramDatabase.BeginWrite(connection);
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = "DELETE FROM schema_meta WHERE key IN ($scope, $omitted);";
-            command.Parameters.AddWithValue("$scope", BackupMarkers.ScopeKey);
-            command.Parameters.AddWithValue("$omitted", BackupMarkers.OmittedKey);
-            command.ExecuteNonQuery();
-            transaction.Commit();
+            DeleteMarkers(connection);
         }
         catch (SqliteException)
         {
-            // The store is already in place. A marker left behind mislabels a later snapshot of it
-            // in 'backup list'; reporting the restore as failed would be a lie about the store.
+            // The store is already in place, and reporting the restore as failed would be a lie
+            // about it. A marker left behind is harmless: a full take strips it from its copy.
         }
         finally
         {

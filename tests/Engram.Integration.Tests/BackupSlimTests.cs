@@ -313,6 +313,118 @@ public class BackupSlimTests
         Assert.False(Markers(snapshot.Path).IsMarked);
     }
 
+    /// <summary>
+    /// Review round 1, n3: ANY slimming failure keeps a full snapshot, not only the exception types
+    /// SQLite and the file system happen to throw.
+    /// </summary>
+    [Fact]
+    public void SlimmingThatThrowsAnyException_StillLeavesAFullRestorableSnapshot()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        IReadOnlyDictionary<string, IReadOnlyList<string>> source;
+        BackupSnapshot snapshot;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Seed(connection);
+            source = AuthoredDigest.Read(connection);
+            BackupStore.SlimFault.Value = () => throw new UnauthorizedAccessException("planted");
+            try
+            {
+                snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Authored);
+            }
+            finally
+            {
+                BackupStore.SlimFault.Value = null;
+            }
+        }
+
+        Assert.Contains("planted", snapshot.Warning, StringComparison.Ordinal);
+        Assert.False(Markers(snapshot.Path).IsMarked);
+
+        SqliteConnection.ClearAllPools();
+        Assert.Equal(0, Cli(sandbox.Home, "restore", snapshot.Name, "--apply").Exit);
+        AuthoredDigest.Equal(source, DigestOf(sandbox.Home.DatabasePath));
+    }
+
+    /// <summary>Review round 1, n4: a full snapshot of a store carrying stale markers lists and restores as full.</summary>
+    [Fact]
+    public void FullTake_OfAStoreCarryingStaleMarkers_IsLabelledFull()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        BackupSnapshot full;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Seed(connection);
+            using (var transaction = EngramDatabase.BeginWrite(connection))
+            {
+                EngramDatabase.WriteMeta(connection, transaction, BackupMarkers.ScopeKey, BackupMarkers.AuthoredScope);
+                EngramDatabase.WriteMeta(connection, transaction, BackupMarkers.OmittedKey, "{\"vectors\":5}");
+                transaction.Commit();
+            }
+
+            full = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
+
+            // The live store's own stale rows are not this take's to touch.
+            Assert.Equal(BackupMarkers.AuthoredScope, EngramDatabase.ReadMeta(connection, BackupMarkers.ScopeKey));
+        }
+
+        Assert.False(Markers(full.Path).IsMarked);
+        using (var copy = EngramDatabase.Open(full.Path))
+        {
+            Assert.Null(EngramDatabase.ReadMeta(copy, BackupMarkers.OmittedKey));
+        }
+
+        EngramDatabase.ReleasePooledConnections(full.Path);
+        Assert.Contains(" full ", Cli(sandbox.Home, "list").Stdout, StringComparison.Ordinal);
+        var dry = Cli(sandbox.Home, "restore", full.Name);
+        Assert.DoesNotContain("leaves out", dry.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("marker", dry.Stdout, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// §9 "provider = off with a stale fact_vec" and review round 1, n5: the vectors are dropped,
+    /// restore promises no server-side embedding, and doctor reads embedding as Off afterwards.
+    /// </summary>
+    [Fact]
+    public void ProviderOffWithAStaleVectorIndex_IsDropped_AndRestoreSaysEmbeddingIsOff()
+    {
+        Assert.SkipUnless(VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
+        using var sandbox = new SandboxHome(initialize: false);
+        VectorExtensionFile.InstallInto(sandbox.Home);
+        File.WriteAllText(sandbox.Home.ConfigPath, "[embedding]\nprovider = \"none\"\n");
+        BackupSnapshot slim;
+        int embeddable;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            var seeded = Seed(connection);
+            Embed(connection, seeded.Coffee);
+            embeddable = VectorIndex.CountEmbeddable(connection);
+            slim = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Authored);
+        }
+
+        SqliteConnection.ClearAllPools();
+        Assert.False(HasTable(slim.Path, VectorIndex.TableName));
+
+        var restore = Cli(sandbox.Home, "restore", slim.Name, "--apply");
+
+        Assert.Equal(0, restore.Exit);
+        Assert.Contains(
+            $"{embeddable} facts have no vector; embedding is off in this home, so recall uses the lexical and overlap lanes only",
+            restore.Stdout,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("the server embeds them", restore.Stdout, StringComparison.Ordinal);
+
+        var report = Diagnostics.Run(
+            sandbox.Home,
+            _ => null,
+            lifecycle: new ServerLifecycle(new FakeProcessInspector(), new FakeServerHealthChecker(), new FakeServerLauncher()),
+            reachOut: false,
+            executablePath: "/nonexistent/engram",
+            claudeSettingsPath: Path.Combine(sandbox.Home.Root, "claude-settings.json"));
+        Assert.Equal(DiagnosisState.Off, Assert.Single(report.Checks, c => c.Name == "embedding").State);
+        EngramDatabase.ReleasePooledConnections(sandbox.Home.DatabasePath);
+    }
+
     [Fact]
     public void AVectorIndexSqliteVecCannotLoad_IsKeptAndTheSnapshotSaysSo()
     {
@@ -410,11 +522,13 @@ public class BackupSlimTests
         }
 
         SqliteConnection.ClearAllPools();
+        File.WriteAllText(sandbox.Home.ConfigPath, "[embedding]\nprovider = \"local\"\n");
 
         var dry = Cli(sandbox.Home, "restore", slim.Name);
         Assert.Equal(0, dry.Exit);
         Assert.Contains("This snapshot leaves out state Engram rebuilds:", dry.Stdout, StringComparison.Ordinal);
         Assert.Contains($"{embeddable} facts to embed", dry.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("embedding is off", dry.Stdout, StringComparison.Ordinal);
         Assert.Contains("would be cleared", dry.Stdout, StringComparison.Ordinal);
         Assert.Single(BackupStore.List(sandbox.Home));
 
@@ -555,6 +669,7 @@ public class BackupSlimTests
         Assert.Equal(0, replay.Exit);
         Assert.DoesNotContain("could not", replay.Stdout, StringComparison.Ordinal);
         Assert.DoesNotContain("pointed outside", replay.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("outside this journal", replay.Stdout, StringComparison.Ordinal);
 
         IReadOnlyDictionary<string, IReadOnlyList<string>> seeded;
         using (var fresh = EngramDatabase.OpenInitialized(baseline.Home))

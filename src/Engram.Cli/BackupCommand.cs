@@ -290,10 +290,22 @@ public static class BackupCommand
             {
                 stdout.WriteLine();
                 stdout.WriteLine("This snapshot leaves out state Engram rebuilds:");
-                stdout.WriteLine(
-                    $"  vector index   {unembedded} {(unembedded == 1 ? "fact" : "facts")} to embed; the server embeds them after 'engram start'");
-                stdout.WriteLine("                 (several hours for a large store: 'engram embed --status' shows progress;");
-                stdout.WriteLine("                  until it finishes, recall's vector lane covers only what is embedded)");
+
+                // What happens next depends on this home, not the snapshot: with embedding off there
+                // is no server-side backlog to promise.
+                if (EmbeddingSettings.Read(ConfigFile.Load(home.ConfigPath)).Provider == EmbeddingProvider.None)
+                {
+                    stdout.WriteLine(
+                        $"  vector index   {unembedded} {(unembedded == 1 ? "fact has" : "facts have")} no vector; embedding is off in this home, "
+                            + "so recall uses the lexical and overlap lanes only");
+                }
+                else
+                {
+                    stdout.WriteLine(
+                        $"  vector index   {unembedded} {(unembedded == 1 ? "fact" : "facts")} to embed; the server embeds them after 'engram start'");
+                    stdout.WriteLine("                 (several hours for a large store: 'engram embed --status' shows progress;");
+                    stdout.WriteLine("                  until it finishes, recall's vector lane covers only what is embedded)");
+                }
             }
 
             stdout.WriteLine(apply
