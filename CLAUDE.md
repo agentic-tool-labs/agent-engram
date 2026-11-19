@@ -50,7 +50,7 @@ index-vs-fact set difference compares `fact` against itself and calls any desync
 read the real index). And FTS5's own `'rebuild'` command re-reads the whole content
 table, closed beliefs included, while the index deliberately holds live facts only —
 rebuild through `EngramDatabase.RebuildFactFts`, which is the one implementation of what
-belongs in the index. The detector's "missing" side must expect only that, which is
+belongs in the index. Both sides of the detector, "missing" and "extra", measure against only that, which is
 `EngramDatabase.LexicallyIndexed` — live code edges are excluded by design, and a detector
 counting them called **360,391** facts missing on a real store, so every `repair --apply`
 rebuilt the whole index and none converged.

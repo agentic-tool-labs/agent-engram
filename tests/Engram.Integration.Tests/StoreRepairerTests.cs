@@ -116,6 +116,7 @@ public class StoreRepairerTests
 
         var dry = StoreRepairer.Repair(connection, sandbox.Home, apply: false, T0.AddMinutes(5));
         Assert.Equal(1, dry.FtsMissing);
+        Assert.Equal(0, dry.FtsExtra);
         Assert.True(dry.FtsNeedsRebuild);
 
         Assert.True(StoreRepairer.Repair(connection, sandbox.Home, apply: true, T0.AddMinutes(5)).FtsRebuilt);
@@ -126,6 +127,65 @@ public class StoreRepairerTests
         Assert.Equal(0, after.FtsMissing);
         Assert.Equal(0, after.FtsExtra);
         Assert.False(after.AnythingToFix);
+    }
+
+    /// <summary>
+    /// The extra side uses the same definition as the missing side: an entry for a fact the
+    /// index must not hold — a live code edge, or a closed fact — is extra, and a rebuild
+    /// removes it.
+    /// </summary>
+    [Theory]
+    [InlineData("regenerable-edge")]
+    [InlineData("closed")]
+    public void EntryForAFactTheIndexMustNotHold_IsReportedExtra_AndRepairConverges(string which)
+    {
+        using var sandbox = new SandboxHome();
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        var ids = SeedMixedStore(connection);
+        var target = which == "regenerable-edge" ? ids.RegenerableEdge : ids.Closed;
+
+        Assert.False(IsIndexed(connection, target));
+        using (var plant = connection.CreateCommand())
+        {
+            plant.CommandText =
+                "INSERT INTO fact_fts(rowid, body, predicate, path) "
+                + "SELECT id, body, predicate, path FROM fact WHERE id = $id;";
+            plant.Parameters.AddWithValue("$id", target);
+            Assert.Equal(1, plant.ExecuteNonQuery());
+        }
+
+        Assert.True(IsIndexed(connection, target));
+
+        var dry = StoreRepairer.Repair(connection, sandbox.Home, apply: false, T0.AddMinutes(5));
+        Assert.Equal(0, dry.FtsMissing);
+        Assert.Equal(1, dry.FtsExtra);
+        Assert.True(dry.FtsNeedsRebuild);
+
+        Assert.True(StoreRepairer.Repair(connection, sandbox.Home, apply: true, T0.AddMinutes(5)).FtsRebuilt);
+        Assert.False(IsIndexed(connection, target));
+
+        var after = StoreRepairer.Repair(connection, sandbox.Home, apply: false, T0.AddMinutes(6));
+        Assert.Equal(0, after.FtsMissing);
+        Assert.Equal(0, after.FtsExtra);
+        Assert.False(after.AnythingToFix);
+    }
+
+    /// <summary>
+    /// An authored fact with an object is an edge in shape but not regenerable, so it belongs in
+    /// the index: its entry is neither extra nor, while present, missing.
+    /// </summary>
+    [Fact]
+    public void AuthoredFactWithAnObject_PresentInTheIndex_IsNotReportedExtra()
+    {
+        using var sandbox = new SandboxHome();
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        var ids = SeedMixedStore(connection);
+
+        Assert.True(IsIndexed(connection, ids.AuthoredEdge));
+
+        var report = StoreRepairer.Repair(connection, sandbox.Home, apply: false, T0.AddMinutes(5));
+        Assert.Equal(0, report.FtsMissing);
+        Assert.Equal(0, report.FtsExtra);
     }
 
     /// <summary>

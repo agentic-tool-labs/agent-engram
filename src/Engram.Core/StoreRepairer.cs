@@ -91,7 +91,9 @@ public static class StoreRepairer
             ftsExtra = Scalar(
                 connection,
                 "SELECT count(*) FROM (SELECT DISTINCT doc FROM temp.repair_fts_vocab "
-                + "EXCEPT SELECT id FROM fact WHERE valid_to IS NULL);");
+                + "EXCEPT SELECT id FROM fact WHERE valid_to IS NULL AND "
+                + EngramDatabase.LexicallyIndexed
+                + ");");
         }
         finally
         {
