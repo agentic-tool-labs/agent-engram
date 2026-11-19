@@ -484,7 +484,9 @@ public static class VectorIndex
     /// on the measured store), so a seek plus a rowid lookup per row loses to one pass: the inner
     /// select ran 586.03 ms seeking against 210.08 ms with the plus, the whole statement
     /// 952.29 ms against 446.22 ms (medians of seven alternated warm runs). Not
-    /// <c>NOT INDEXED</c>, which would also refuse a better index later.
+    /// <c>NOT INDEXED</c>, which would also refuse a better index later. One caller,
+    /// <c>engram embed --prune --apply</c>: typed by a person, and it reaches this only when
+    /// ineligible vectors were counted.
     /// </remarks>
     internal const string PruneIneligibleSql =
         $"""

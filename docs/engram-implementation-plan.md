@@ -5990,7 +5990,10 @@ the partial indexes, and every compact call completed. The full-index fallback t
 not used. Built on the real-store copy: 0.11 s and 0.21 s.
 
 **`ix_fact_object` is untouched.** Widening it would add every closed row to the index recall reads.
-`RecallRankerPlanTests` and `ForeignKeyIndexPlanTests` hold recall's plans. On the real-store copy the
+`RecallRankerPlanTests` and `ForeignKeyIndexPlanTests` hold recall's plans. Most of the latter's
+statements are copies of private inline SQL, so an edit to one of those sites leaves the guard planning
+the old text. Only `BackfillBatchSql`, `PendingCountSql` and `PruneIneligibleSql` are read from
+production. On the real-store copy the
 statements C4 lists, and every other carrier of the regenerable-edge predicate, plan the same with and
 without v20, with one exception.
 
@@ -6002,9 +6005,10 @@ loses to one sequential pass. Medians of seven alternated warm runs on the real-
 run measured 530.96 against 198.37 and 806.62 against 404.04. A unary plus on that one term
 (`+object_id IS NOT NULL`) restores the v19 plan. `NOT INDEXED` was rejected because it would also refuse
 a better index a later schema adds. Its one caller is `engram embed --prune --apply`, which someone types,
-and which reaches the delete only when ineligible vectors were counted. The same run also found that an
-earlier measurement was invalid: `backup take` opens the store without migrating it, so both arms of
-that first timing scanned.
+and which reaches the delete only when ineligible vectors were counted. One earlier measurement was
+invalid: 172.05 against 171.75 ms, taken after `backup take`, which opens the store without migrating
+it, so neither arm had the index. The 530.96/198.37 run above did differ by plan, and its "scan" arm
+was `NOT INDEXED` rather than the unary plus.
 
 **The split in P2 is no longer what removes the scan.** With `ix_fact_object_ref` present, the old `OR`
 form also seeks, as a `MULTI-INDEX OR` over `ix_fact_thread` and the new index. The split is kept because
@@ -6016,7 +6020,7 @@ and no index run rebuilds rename history. The dry run and the apply report "enti
 history". A regenerable fact that `fact_relation` (either end), `fact_review` or `fact_sync_request` names is
 kept too. None of those cascades, so deleting the fact used to fail the whole call on a foreign key. Both
 side-table checks and the authored supersession edge form one predicate, `StoreCompactor.AuthoredDependencySql`,
-which the backup journal filter reuses.
+which the backup journal filter is to reuse (the backup-slim stream cherry-picks 6b4e992).
 
 **Acceptance on a copy of the real store** (published binary, WAL mode):
 - All 46 calls complete. `foreign_key_check` is clean. A digest over authored facts, their supersessions,
@@ -6029,10 +6033,13 @@ which the backup journal filter reuses.
   commit.
 - The spec's target was a summed transaction time under 30 s. That is **not shown**: 44.52 s is an upper
   bound, because it includes `BackupStore.PruneAfterWrite`, which runs between the snapshot and the
-  transaction and cannot be separated from outside the process.
+  transaction and cannot be separated from outside the process. Counting the selection before each
+  snapshot too, compaction work outside the snapshots and VACUUM is at most 60.65 s, against the
+  emulation's 19.28 s.
 - Re-index after a path compact (rocket, 65 aliases): 64 of 65 aliased entities are again the subject of a
-  live fact. No path is duplicated, so the indexer reuses the surviving entity. Why the 65th is not was
-  not investigated.
+  live fact. No path is duplicated, so the indexer reuses the surviving entity. The 65th,
+  `engine/view/main.gd.uid` (renamed from `src/view/main.gd.uid`), is no longer on disk. No second
+  entity holds its path, and no fact references it, so nothing was left to re-index.
 
 **Not measured.** Where those 44.52 s go inside each call. The outlier is `agent-tools-2`, which took 7.31 s
 from snapshot to commit for 15,261 facts, against 3.33 s for 248,389 facts in `wrangl-3`. The real-store
