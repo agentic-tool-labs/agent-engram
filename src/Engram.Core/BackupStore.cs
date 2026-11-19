@@ -401,7 +401,9 @@ public static class BackupStore
 
         if (scope == BackupScope.Authored)
         {
-            // Before the try, so a refusal is a refusal and never quietly becomes a full snapshot.
+            // Checked before the try as well as inside Slim, so that a refusal fails the take instead
+            // of being caught below and turned into a full snapshot. Take always passes a fresh name
+            // under backups/, so this cannot fire today; it covers a future caller with a bad path.
             RefuseLiveStore(partial, home);
         }
 
@@ -458,16 +460,6 @@ public static class BackupStore
     }
 
     /// <summary>
-    /// Drops what Engram rebuilds from a snapshot copy and stamps what was left out. Returns a
-    /// warning when something could not be dropped.
-    /// </summary>
-    /// <remarks>
-    /// The guard runs before anything is opened and is the one line that keeps this from being a
-    /// way to delete the live vector index. It compares full paths only: a symlinked home reached
-    /// by two spellings is not caught, and no caller passes anything but a fresh name under
-    /// <c>backups/</c>.
-    /// </remarks>
-    /// <summary>
     /// A test-only fault injected after the copy is opened, standing in for whatever a slimming step
     /// might throw. Async-local, so a test sets it for its own flow and no other test's take sees it.
     /// </summary>
@@ -517,6 +509,16 @@ public static class BackupStore
         transaction.Commit();
     }
 
+    /// <summary>
+    /// Drops what Engram rebuilds from a snapshot copy and stamps what was left out. Returns a
+    /// warning when something could not be dropped.
+    /// </summary>
+    /// <remarks>
+    /// The guard runs before anything is opened and is the one line that keeps this from being a
+    /// way to delete the live vector index. It compares full paths only: a symlinked home reached
+    /// by two spellings is not caught, and no caller passes anything but a fresh name under
+    /// <c>backups/</c>.
+    /// </remarks>
     internal static string? Slim(string path, EngramHome home)
     {
         ArgumentNullException.ThrowIfNull(path);
