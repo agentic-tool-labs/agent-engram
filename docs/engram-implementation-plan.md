@@ -6019,8 +6019,10 @@ because those arms are answered from the partial indexes alone. The candidate ar
 with no tool rows reads exactly as before.
 
 **Measured on a copy of the real store** (621,904 live facts, published binary). Live counts before were
-code 553,641, session 62,303, user 5,960. `--ledger --apply` re-filed 5,624 in 5.16 s wall, of which the
-snapshot is ~4.2 s (`VACUUM INTO` of the 2.4 GB store, timed alone). A second `--apply` found 0. On the
+code 553,641, session 62,303, user 5,960. `--ledger --apply` re-filed 5,624 in 12.30 s wall. Most of
+that is the `backup take` routine: the snapshot, with `VACUUM INTO` of the 2.4 GB store timed alone at
+~4.2 s, and an 890,829-fact journal. An earlier build that snapshotted without journals took 5.16 s, which
+puts the re-file itself at about 1 s. A second `--apply` found 0. On the
 captures, 299 were live and 60 suspect: R1 3, R2 0, R5 0, R3 5, R4 55, so tier A was 3 and tier B was 57.
 E6 counted R2 as 2, but both of those hits were the bare word `SubagentStart`, which the dropped clause
 matched. It counted R3 as 67 with identifier-shaped backtick spans included. `--tier a` closed 3, and a
