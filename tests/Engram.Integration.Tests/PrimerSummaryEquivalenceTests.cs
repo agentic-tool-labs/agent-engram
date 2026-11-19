@@ -171,6 +171,33 @@ public class PrimerSummaryEquivalenceTests
             DirectiveFacts.Add(connection, "Always answer in plain English.", T0.AddSeconds(15));
         });
 
+    /// <summary>
+    /// Tool-scope records (D87) are neither counted nor sampled, including a subject whose only
+    /// live facts are tool records and the lowest-id fact of the whole store being one — the cases
+    /// the histogram's negative arm, its HAVING, and both candidate arms each have to handle.
+    /// </summary>
+    [Fact]
+    public void ToolScopeRecordsAreNeitherCountedNorSampled()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Write(connection, "/tools/ah2/repo/t/train/1", "Ledger first in the catalog.", FactStore.ToolScope, 1);
+        Write(connection, "/tools/ah2/repo/t/train/2", "Another ledger row.", FactStore.ToolScope, 2);
+        Write(connection, "/knowledge/mixed/a", "A tool record shares this subject.", FactStore.ToolScope, 3);
+        FactStore.Remember(connection,
+            new FactWrite("/knowledge/mixed/a", "note", "decided", "A user belief on it.", "user", "stated"),
+            T0.AddSeconds(4));
+        Write(connection, "/knowledge/alpha/b", "Project body.", "project", 5);
+
+        AssertPrimersMatch(connection);
+
+        var summary = PrimerSummary.Read(connection, Now);
+        Assert.Equal(2, summary.FactCount);
+        Assert.Equal(2, summary.TopicCounts.Values.Sum());
+        Assert.DoesNotContain(summary.ExampleCandidates, fact => fact.Scope == FactStore.ToolScope);
+        Assert.DoesNotContain("Ledger", PrimerBuilder.Build(summary, MemorySettings.DefaultPrecedence), StringComparison.Ordinal);
+    }
+
     private static void AssertPrimersMatch(bool seeded, Action<SqliteConnection> arrange)
     {
         using var sandbox = new SandboxHome(initialize: false);
@@ -189,10 +216,12 @@ public class PrimerSummaryEquivalenceTests
     {
         // ReadLongTerm keeps directives as ordinary facts; the primer delivers them in their own
         // block instead (D-1), so the reference takes them out of the catalog and hands them over
-        // as Directives — a no-op for every fixture that writes none.
+        // as Directives — a no-op for every fixture that writes none. Tool-scope records stay in
+        // the catalog (recall reads it) but not in the primer (D87).
         var directivePrefix = DirectiveFacts.Root + "/";
         var reference = PrimerSummary.From(FactCatalog.ReadLongTerm(connection, Now)
                 .Where(fact => fact.SubjectPath?.StartsWith(directivePrefix, StringComparison.Ordinal) != true)
+                .Where(fact => fact.Scope != FactStore.ToolScope)
                 .ToList())
             with { Directives = DirectiveFacts.ReadLive(connection).Select(d => d.Body).ToList() };
         var summary = PrimerSummary.Read(connection, Now);

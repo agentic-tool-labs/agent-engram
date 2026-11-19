@@ -127,6 +127,7 @@ public sealed record PrimerSummary(
         command.Parameters.AddWithValue("$prefix", sessionPrefix);
         command.Parameters.AddWithValue("$dplen", directivePrefix.Length);
         command.Parameters.AddWithValue("$dprefix", directivePrefix);
+        command.Parameters.AddWithValue("$tool", FactStore.ToolScope);
     }
 
     // Counts per subject_id over the two live partial indexes first, then joins entity once per
@@ -137,6 +138,12 @@ public sealed record PrimerSummary(
     // groups — the same argument ExampleCandidatesSql makes for its version count. Measured on a
     // 621,904-live-fact snapshot: 305 ms for the per-fact join grouped on path, 85 ms for this,
     // identical 184,659 rows by EXCEPT both ways.
+    //
+    // Tool-scope facts (D87) are taken out by a third, negative arm rather than a scope filter on
+    // the first two: those arms are answered from the partial indexes alone, and a `scope` test
+    // there would read the table once per live fact. The negative arm reads only the tool rows,
+    // through ix_fact_scope, and HAVING drops a subject whose every live fact was a tool record —
+    // with no tool rows it yields nothing, so the result is unchanged.
     private const string TopicHistogramSql =
         """
         WITH c(sid, n) AS (
@@ -149,8 +156,14 @@ public sealed record PrimerSummary(
                   SELECT subject_id, COUNT(*) AS n
                     FROM fact INDEXED BY ux_fact_edge_live
                    WHERE valid_to IS NULL AND object_id IS NOT NULL
+                   GROUP BY subject_id
+                  UNION ALL
+                  SELECT subject_id, -COUNT(*) AS n
+                    FROM fact INDEXED BY ix_fact_scope
+                   WHERE valid_to IS NULL AND scope = $tool
                    GROUP BY subject_id)
-           GROUP BY subject_id)
+           GROUP BY subject_id
+          HAVING SUM(n) > 0)
         SELECT e.path, c.n
           FROM c
           JOIN entity e ON e.id = c.sid
@@ -210,13 +223,14 @@ public sealed record PrimerSummary(
                                  ORDER BY sf.id
                                  LIMIT 1)
                           FROM scopes
-                         WHERE s IS NOT NULL
+                         WHERE s IS NOT NULL AND s <> $tool
                         UNION
                         SELECT id
                           FROM (SELECT nf.id
                                   FROM fact nf
                                   JOIN entity ne ON ne.id = nf.subject_id
                                  WHERE nf.valid_to IS NULL
+                                   AND nf.scope <> $tool
                                    AND substr(ne.path, 1, $plen) <> $prefix
                                    AND substr(ne.path, 1, $dplen) <> $dprefix
                                  ORDER BY nf.id

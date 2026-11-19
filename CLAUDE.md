@@ -187,8 +187,18 @@ unparseable: bytes that could not be obtained are left alone, because deleting o
 `--if-large`, in the same fork as `backup take --if-due` — `MaintenanceLauncher` owns both, and a
 bound that depends on someone typing the command is not a bound (D41).
 
+**Moving a belief across scope is close-and-reassert, never an `UPDATE` of `scope`.** `FactStore.Refile`
+writes the same predicate, object, body and details at the new address through `Remember`, then closes the
+source onto it with a supersession row naming the move — so `fact_fts` and `fact_token` stay right by
+construction, and `scope` stays off the append-only exception list, where only `path` (D2) and
+`analyzer_tier` sit. It is idempotent: a closed source is skipped, an identical live target absorbs the
+source, and a *different* live target is left alone with the source, because re-asserting an older belief
+over a newer one is the wrong direction. The cost is accepted and stated: one extra row per move, and
+`History` of the new fact shows one version — the trail is the evidence suffix and the supersession row
+(D87).
+
 **Anything destructive is dry-run first.** `repair`, `compact`, `forget`, `backup prune`,
-`backup restore`, `backup replay`, `queue compact`, and `uninstall.sh` print what they would do and
+`backup restore`, `backup replay`, `queue compact`, `reorganize`, and `uninstall.sh` print what they would do and
 require an explicit flag to act. `install.sh` is the deliberate exception and the boundary is the
 word *destructive*: every verb on that list removes or rewrites something already there, while the
 installer only adds, and running an installer is already the request to install. It acts by default

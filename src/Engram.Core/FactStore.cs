@@ -39,6 +39,28 @@ public sealed record StoredFact(
 
 public sealed record RememberResult(long FactId, long? SupersededFactId);
 
+/// <summary>What <see cref="FactStore.Refile"/> did with one source fact.</summary>
+public enum RefileOutcome
+{
+    /// <summary>A new fact was written at the target and the source closed onto it.</summary>
+    Refiled,
+
+    /// <summary>The target already held the identical belief; the source was closed onto that.</summary>
+    AlreadyAtTarget,
+
+    /// <summary>The source was not live (closed, or no such fact); nothing was written.</summary>
+    SourceNotLive,
+
+    /// <summary>
+    /// The target holds a different live belief for the same predicate; nothing was written, so
+    /// the newer belief at the target is never superseded by the source's older one.
+    /// </summary>
+    TargetConflict,
+}
+
+/// <param name="TargetFactId">The fact the source now points at, when it was closed.</param>
+public sealed record RefileResult(RefileOutcome Outcome, long? TargetFactId);
+
 /// <summary>One FTS5 hit: which fact, how well it scored, and where that put it.</summary>
 public sealed record LexicalHit(long FactId, double Bm25, int Rank);
 
@@ -56,6 +78,12 @@ public sealed record LexicalHit(long FactId, double Bm25, int Rank);
 public static class FactStore
 {
     public const string DefaultSupersessionReason = "superseded by a newer statement";
+
+    /// <summary>
+    /// The scope of another tool's records filed under <c>/tools/&lt;tool&gt;/…</c> (D87): kept,
+    /// but never counted or sampled by the primer.
+    /// </summary>
+    public const string ToolScope = "tool";
 
     public static RememberResult Remember(
         SqliteConnection connection,
@@ -284,6 +312,117 @@ public static class FactStore
             ("$new", newPrefix));
 
         return moved;
+    }
+
+    /// <summary>
+    /// Moves one live belief to another address and scope by close-and-reassert (D87): a new fact
+    /// at <paramref name="targetPath"/> with the same predicate, object, body and details, then the
+    /// source closed with <c>superseded_by</c> pointing at it and a supersession row naming the move.
+    /// </summary>
+    /// <remarks>
+    /// <para>Never an <c>UPDATE</c> of <c>scope</c>: <see cref="MoveSubtree"/> is licensed for
+    /// <c>path</c> only (D2), and scope is belief content under the append-only rule. The new fact
+    /// goes through <see cref="Remember(SqliteConnection, SqliteTransaction, FactWrite, DateTimeOffset, string)"/>
+    /// and the close mirrors its close path, so <c>fact_fts</c> (trigger) and <c>fact_token</c>
+    /// (<see cref="FactTokenIndex"/>) are maintained at the same chokepoints as every other write.</para>
+    ///
+    /// <para>Idempotent: a source already closed is skipped; a target already holding the identical
+    /// body for the same predicate and object closes the source onto that fact and writes nothing new.
+    /// D57 <c>History</c> of the new fact shows one version — the trail is the evidence suffix and the
+    /// supersession row.</para>
+    /// </remarks>
+    public static RefileResult Refile(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long sourceFactId,
+        string targetPath,
+        string scope,
+        string learnedVia,
+        string reason,
+        DateTimeOffset now)
+    {
+        using var read = Build(
+            connection,
+            transaction,
+            """
+            SELECT e.path, e.kind, f.predicate, f.body, f.details, f.evidence, f.regenerable,
+                   f.session_id, f.analyzer_tier, o.path, o.kind
+              FROM fact f
+              JOIN entity e ON e.id = f.subject_id
+              LEFT JOIN entity o ON o.id = f.object_id
+             WHERE f.id = $id AND f.valid_to IS NULL;
+            """,
+            [("$id", sourceFactId)]);
+
+        FactWrite write;
+        using (var reader = read.ExecuteReader())
+        {
+            if (!reader.Read())
+            {
+                return new RefileResult(RefileOutcome.SourceNotLive, null);
+            }
+
+            var evidence = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var trail = "re-filed from " + FactCatalog.HandleFor(sourceFactId);
+            write = new FactWrite(
+                SubjectPath: targetPath,
+                SubjectKind: reader.GetString(1),
+                Predicate: reader.GetString(2),
+                Body: reader.GetString(3),
+                Scope: scope,
+                LearnedVia: learnedVia,
+                Evidence: evidence is null ? trail : evidence + "; " + trail,
+                Regenerable: reader.GetInt64(6) != 0,
+                SessionId: reader.IsDBNull(7) ? null : reader.GetInt64(7),
+                Details: reader.IsDBNull(4) ? null : reader.GetString(4),
+                ObjectPath: reader.IsDBNull(9) ? null : reader.GetString(9),
+                ObjectKind: reader.IsDBNull(10) ? null : reader.GetString(10),
+                AnalyzerTier: reader.IsDBNull(8) ? null : reader.GetInt32(8));
+        }
+
+        long targetId;
+        RefileOutcome outcome;
+        if (FindLiveFactId(connection, transaction, targetPath, write.Predicate, write.ObjectPath) is { } existing)
+        {
+            var existingBody = ScalarString(connection, transaction, "SELECT body FROM fact WHERE id = $id;", ("$id", existing));
+            if (!string.Equals(existingBody, write.Body, StringComparison.Ordinal))
+            {
+                return new RefileResult(RefileOutcome.TargetConflict, existing);
+            }
+
+            targetId = existing;
+            outcome = RefileOutcome.AlreadyAtTarget;
+        }
+        else
+        {
+            targetId = Remember(connection, transaction, write, now).FactId;
+            outcome = RefileOutcome.Refiled;
+        }
+
+        var timestamp = now.ToUnixTimeSeconds();
+        Execute(
+            connection,
+            transaction,
+            "UPDATE fact SET valid_to = $now, superseded_by = $new WHERE id = $id AND valid_to IS NULL;",
+            ("$now", timestamp),
+            ("$new", targetId),
+            ("$id", sourceFactId));
+
+        FactTokenIndex.Remove(connection, transaction, sourceFactId);
+
+        Execute(
+            connection,
+            transaction,
+            """
+            INSERT INTO supersession (old_fact_id, new_fact_id, reason, created_at)
+            VALUES ($old, $new, $reason, $now);
+            """,
+            ("$old", sourceFactId),
+            ("$new", targetId),
+            ("$reason", reason),
+            ("$now", timestamp));
+
+        return new RefileResult(outcome, targetId);
     }
 
     /// <summary>
@@ -891,6 +1030,16 @@ public static class FactStore
         var value = command.ExecuteScalar();
 
         return value is null or DBNull ? null : Convert.ToInt64(value);
+    }
+
+    private static string? ScalarString(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        using var command = Build(connection, transaction, sql, parameters);
+        return command.ExecuteScalar() as string;
     }
 
     private static SqliteCommand Build(
