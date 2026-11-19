@@ -80,10 +80,14 @@ public static class StoreRepairer
             "CREATE VIRTUAL TABLE IF NOT EXISTS temp.repair_fts_vocab USING fts5vocab('main', 'fact_fts', 'instance');");
         try
         {
+            // Only what the index is meant to hold can be missing from it: without the
+            // exclusion every live code edge read as missing, and since the rebuild never
+            // inserts one, every --apply rebuilt the whole index and the count never fell.
             ftsMissing = Scalar(
                 connection,
-                "SELECT count(*) FROM (SELECT id FROM fact WHERE valid_to IS NULL "
-                + "EXCEPT SELECT DISTINCT doc FROM temp.repair_fts_vocab);");
+                "SELECT count(*) FROM (SELECT id FROM fact WHERE valid_to IS NULL AND "
+                + EngramDatabase.LexicallyIndexed
+                + " EXCEPT SELECT DISTINCT doc FROM temp.repair_fts_vocab);");
             ftsExtra = Scalar(
                 connection,
                 "SELECT count(*) FROM (SELECT DISTINCT doc FROM temp.repair_fts_vocab "

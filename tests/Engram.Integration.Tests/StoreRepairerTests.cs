@@ -67,6 +67,165 @@ public class StoreRepairerTests
     }
 
     [Fact]
+    public void HealthyStoreWithEdgeFacts_ReportsNothingMissingFromTheLexicalIndex()
+    {
+        using var sandbox = new SandboxHome();
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        var ids = SeedMixedStore(connection);
+
+        // The two exclusions are real before the detector is asked about them: neither the
+        // live code edge nor the closed fact is in the index, and both kinds of authored
+        // fact — with and without an object — are.
+        Assert.False(IsIndexed(connection, ids.RegenerableEdge));
+        Assert.False(IsIndexed(connection, ids.Closed));
+        Assert.True(IsIndexed(connection, ids.Authored));
+        Assert.True(IsIndexed(connection, ids.AuthoredEdge));
+        Assert.True(IsIndexed(connection, ids.RegenerableNonEdge));
+
+        var report = StoreRepairer.Repair(connection, sandbox.Home, apply: false, T0.AddMinutes(5));
+
+        Assert.Equal(0, report.FtsMissing);
+        Assert.Equal(0, report.FtsExtra);
+        Assert.False(report.FtsNeedsRebuild);
+    }
+
+    [Theory]
+    [InlineData("authored")]
+    [InlineData("authored-edge")]
+    public void IndexedFactDroppedFromTheIndex_OnAStoreWithEdgeFacts_IsDetected_AndRepairConverges(string which)
+    {
+        using var sandbox = new SandboxHome();
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        var ids = SeedMixedStore(connection);
+        var target = which == "authored" ? ids.Authored : ids.AuthoredEdge;
+
+        var live = FactStore.ReadById(connection, target)!;
+        using (var desync = connection.CreateCommand())
+        {
+            desync.CommandText =
+                "INSERT INTO fact_fts(fact_fts, rowid, body, predicate, path) "
+                + "VALUES('delete', $id, $body, $predicate, $path);";
+            desync.Parameters.AddWithValue("$id", target);
+            desync.Parameters.AddWithValue("$body", live.Body);
+            desync.Parameters.AddWithValue("$predicate", live.Predicate);
+            desync.Parameters.AddWithValue("$path", live.SubjectPath);
+            desync.ExecuteNonQuery();
+        }
+
+        Assert.False(IsIndexed(connection, target));
+
+        var dry = StoreRepairer.Repair(connection, sandbox.Home, apply: false, T0.AddMinutes(5));
+        Assert.Equal(1, dry.FtsMissing);
+        Assert.True(dry.FtsNeedsRebuild);
+
+        Assert.True(StoreRepairer.Repair(connection, sandbox.Home, apply: true, T0.AddMinutes(5)).FtsRebuilt);
+        Assert.True(IsIndexed(connection, target));
+        Assert.False(IsIndexed(connection, ids.RegenerableEdge));
+
+        var after = StoreRepairer.Repair(connection, sandbox.Home, apply: false, T0.AddMinutes(6));
+        Assert.Equal(0, after.FtsMissing);
+        Assert.Equal(0, after.FtsExtra);
+        Assert.False(after.AnythingToFix);
+    }
+
+    /// <summary>
+    /// The detector's definition of "belongs in the index" is <see
+    /// cref="EngramDatabase.LexicallyIndexed"/>; the triggers that actually maintain the index
+    /// are SQL in the schema file. This holds the two to one condition, so tuning a trigger
+    /// without the constant reddens here instead of reporting phantom drift on every repair.
+    /// </summary>
+    [Fact]
+    public void LexicallyIndexed_MatchesTheConditionInEveryFtsTrigger()
+    {
+        using var sandbox = new SandboxHome();
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'fact_fts_%' ORDER BY name;";
+
+        var triggers = new List<(string Name, string Sql)>();
+        using (var reader = command.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                triggers.Add((reader.GetString(0), reader.GetString(1)));
+            }
+        }
+
+        Assert.Equal(
+            ["fact_fts_close", "fact_fts_delete", "fact_fts_insert", "fact_fts_repath"],
+            triggers.Select(t => t.Name));
+        foreach (var (name, sql) in triggers)
+        {
+            var unqualified = sql.Replace("new.", string.Empty, StringComparison.Ordinal)
+                .Replace("old.", string.Empty, StringComparison.Ordinal);
+            Assert.True(
+                unqualified.Contains(EngramDatabase.LexicallyIndexed, StringComparison.Ordinal),
+                $"{name} does not carry '{EngramDatabase.LexicallyIndexed}'");
+        }
+    }
+
+    private sealed record MixedStore(
+        long Authored, long AuthoredEdge, long RegenerableNonEdge, long RegenerableEdge, long Closed);
+
+    /// <summary>
+    /// One of every row shape the lexical index has an opinion about: authored with and without
+    /// an object (indexed), regenerable without an object (indexed), regenerable with one (a code
+    /// edge — never indexed), and a closed fact (un-indexed on close).
+    /// </summary>
+    private static MixedStore SeedMixedStore(SqliteConnection connection)
+    {
+        var authored = FactStore.Remember(
+            connection,
+            new FactWrite("/people/jim/preferences", "preference", "prefers", "tea over coffee", "user", "stated"),
+            T0).FactId;
+        var authoredEdge = FactStore.Remember(
+            connection,
+            new FactWrite(
+                "/projects/acme/team", "note", "reports-to", "alice reports to bob", "project", "stated",
+                ObjectPath: "/people/bob", ObjectKind: "person"),
+            T0).FactId;
+        var regenerableNonEdge = FactStore.Remember(
+            connection,
+            new FactWrite(
+                "/code/acme/src/Widget.cs", "file", "declares", "declares class Widget", "project", "observed",
+                Regenerable: true),
+            T0).FactId;
+        var regenerableEdge = FactStore.Remember(
+            connection,
+            new FactWrite(
+                "/code/acme/src/Widget.cs", "file", "calls", "Widget calls Gadget.Spin", "project", "observed",
+                Regenerable: true, ObjectPath: "/code/acme/src/Gadget.cs", ObjectKind: "symbol-name"),
+            T0).FactId;
+        var closed = FactStore.Remember(
+            connection,
+            new FactWrite("/people/jim/history", "note", "states", "an old belief since retracted", "user", "stated"),
+            T0).FactId;
+        Assert.True(FactStore.Forget(connection, closed, "retracted", T0.AddMinutes(1)));
+
+        return new MixedStore(authored, authoredEdge, regenerableNonEdge, regenerableEdge, closed);
+    }
+
+    /// <summary>Reads the real index through fts5vocab — a plain fact_fts query reads the content table.</summary>
+    private static bool IsIndexed(SqliteConnection connection, long factId)
+    {
+        using var create = connection.CreateCommand();
+        create.CommandText =
+            "CREATE VIRTUAL TABLE IF NOT EXISTS temp.test_fts_vocab USING fts5vocab('main', 'fact_fts', 'instance');";
+        create.ExecuteNonQuery();
+
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT EXISTS (SELECT 1 FROM temp.test_fts_vocab WHERE doc = $id);";
+        command.Parameters.AddWithValue("$id", factId);
+        var indexed = (long)command.ExecuteScalar()! == 1;
+
+        using var drop = connection.CreateCommand();
+        drop.CommandText = "DROP TABLE temp.test_fts_vocab;";
+        drop.ExecuteNonQuery();
+        return indexed;
+    }
+
+    [Fact]
     public void PathDrift_IsRederivedFromTheEntity_WithoutAnFtsRebuild()
     {
         using var sandbox = new SandboxHome();
