@@ -538,6 +538,11 @@ stopped at its ceiling in two seconds and classification then spent six more rea
 than in a separate pre-check, because two checks against one clock cannot be told apart by a test —
 whichever fires first answers for both, and the other can be deleted with the suite still green.
 2.0 s and 258 MB after, unchanged at 0.00 s inside a checkout where git answers (D53).
+A full index then paid per file for its reconcile read: `LiveCodeFacts.UnderFilePredicate` matched
+"path then `#`" with `substr`, which no index answers, so every file scanned all 624,635 live facts
+and `index --full --apply` of wrangl took **545 s, against 8.9 s** once the predicate became a byte
+range over `ix_fact_path` — identical summary, identical store. That range is exact only under BINARY
+comparison, so a `COLLATE` on `fact.path` breaks it silently (D95).
 
 **`embed --status` takes its counts from the store and everything else from the note.** The database
 is the authority on how many facts are embedded and how many wait, and it is right whether or not a

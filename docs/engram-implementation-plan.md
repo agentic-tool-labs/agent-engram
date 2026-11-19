@@ -5969,3 +5969,46 @@ because a plugin older than the binary still registers it and an unknown verb pr
 
 **Not measured.** Nothing here has run on an organization-managed install. That `prompt.submit` reaches a
 user-installed mod there rests on the docs not listing it as skipped.
+
+## D95 — The per-file fact read is a byte range over `ix_fact_path`
+
+`LiveCodeFacts.UnderFilePredicate` is the one definition of "facts about this file or a symbol in it",
+read by the indexer's per-file reconcile (`CodeIndexer.ReadLiveUnderSql`) and by the mod API's
+`path-facts` (`ModApi.PathFactsSql`). It matched "the path, then `#`" with `substr(fact.path, 1, $len)`,
+which SQLite cannot seek through, so both statements planned as `SCAN fact USING INDEX ix_fact_scope`:
+every live fact, once per file.
+
+**The rule.** The predicate is `fact.path = $p OR (fact.path >= $p || '#' AND fact.path < $p || '$')`,
+`$` being the code point after `#`. On the bundled SQLite (3.53.3) both statements plan as `MULTI-INDEX
+OR` over `ix_fact_path` (`path=?`, then `path>? AND path<?`). The range is exact only because
+`fact.path` declares no collation and compares BINARY over UTF-8: `$p#…` sorts inside it, and a sibling
+that extends the name (`Foo.cs2`, `Foo.cs$`, `Foo.csé`), a directory's children (`/`), and anything
+below `#` sort outside it. A `COLLATE` on the column or in the predicate changes what the bounds admit.
+No schema change and no index was added.
+
+**Measured**, on a copy of the real store (621,904 live facts at snapshot, 624,635 after the run):
+- One file: 255 ms → 0.6 ms (indexer statement), 85 ms → 0.1 ms (`path-facts`).
+- Identity, old predicate against new: all 5,360 distinct file paths with live facts under
+  `/projects/wrangl/code/wrangl-3` (248,389 rows) and 500 of the 32,086 elsewhere (seed 95, 8,339 rows):
+  zero ids in either EXCEPT direction. 468 s of old reads against 0.49 s of new.
+- `index --full --apply` of the wrangl checkout, published binaries, each on its own copy:
+  real/user/sys **545.1/327.1/197.3 s → 8.9/1.9/3.2 s**. Summary line identical (3,592 written,
+  12,614 unchanged, 234,914 closes skipped), and the two stores identical afterwards by count, id sum
+  and body length.
+- `index --drain --apply` of five touched files whose `file_state` rows were removed so all five are
+  analyzed: 0.52 s → 0.10 s, summary identical.
+
+**One divergence the identity run could not see.** The old form bound `$len` as the C# string length,
+UTF-16 code units, against SQLite's `substr`, which counts code points; for a path holding a surrogate
+pair (an emoji) the two disagree and the old predicate missed the file's symbols. The store holds no
+non-ASCII path, so the identity counts are unaffected. `LiveCodeFactsTests` covers it and reddens with
+the old form restored.
+
+**Guards.** `LiveCodeFactsTests` pins the matched set and the plan of both statements. Each was broken
+against the committed tree and went red: the old predicate restored (both plan pins and the non-ASCII
+case), `<` widened to `<=`, the upper bound widened to `%`, the lower bound widened to `>= $p`, and
+`COLLATE NOCASE` added (both plan pins and the matched set).
+
+**Rejected.** A `UNION ALL` of the two arms was not needed, since MULTI-INDEX OR appeared on the bundled
+SQLite. `LIKE $p || '#%'` was not tried: `LIKE` is case-insensitive by default, which disables the
+prefix optimization (see `DirectiveFacts.Read`), and `_` and `%` in a path would need escaping.
