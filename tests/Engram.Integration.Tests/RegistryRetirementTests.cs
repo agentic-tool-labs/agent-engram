@@ -367,6 +367,60 @@ public class RegistryRetirementTests
     }
 
     [Fact]
+    public void RemotePointedBack_AtTheSameCheckout_UnRetiresA_AndTheScanRetiresB()
+    {
+        using var sandbox = new SandboxHome();
+        var repo = Checkout(sandbox, "back", OriginA);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        var pathA = FullIndex(connection, sandbox, repo, apply: true).RepoPath;
+        RunGit(repo, "remote", "set-url", "origin", OriginB);
+        var pathB = FullIndex(connection, sandbox, repo, apply: true).RepoPath;
+        Assert.NotNull(Rows(connection).Single(r => r.RepoPath == pathA).DetachedAt);
+
+        RunGit(repo, "remote", "set-url", "origin", OriginA);
+        FullIndex(connection, sandbox, repo, apply: true);
+
+        var rows = Rows(connection);
+        Assert.Null(rows.Single(r => r.RepoPath == pathA).DetachedAt);
+        Assert.NotNull(rows.Single(r => r.RepoPath == pathB).DetachedAt);
+    }
+
+    [Fact]
+    public void ARetiredRowThatIsNotTheResolvedOne_StaysRetired()
+    {
+        using var sandbox = new SandboxHome();
+        var repo = Checkout(sandbox, "stays", OriginA);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        var pathA = FullIndex(connection, sandbox, repo, apply: true).RepoPath;
+        RunGit(repo, "remote", "set-url", "origin", OriginB);
+        FullIndex(connection, sandbox, repo, apply: true);
+        var retiredAt = Rows(connection).Single(r => r.RepoPath == pathA).DetachedAt;
+        Assert.NotNull(retiredAt);
+
+        FullIndex(connection, sandbox, repo, apply: true);
+
+        Assert.Equal(retiredAt, Rows(connection).Single(r => r.RepoPath == pathA).DetachedAt);
+    }
+
+    [Fact]
+    public void RemotePointedBack_DryRun_ClearsNothing()
+    {
+        using var sandbox = new SandboxHome();
+        var repo = Checkout(sandbox, "dry-back", OriginA);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        var pathA = FullIndex(connection, sandbox, repo, apply: true).RepoPath;
+        RunGit(repo, "remote", "set-url", "origin", OriginB);
+        FullIndex(connection, sandbox, repo, apply: true);
+        var before = Rows(connection);
+
+        RunGit(repo, "remote", "set-url", "origin", OriginA);
+        FullIndex(connection, sandbox, repo, apply: false);
+
+        Assert.Equal(before, Rows(connection));
+        Assert.NotNull(before.Single(r => r.RepoPath == pathA).DetachedAt);
+    }
+
+    [Fact]
     public void Retirement_KeysOnTheResolvedIdentity_NeverTheEnrolledOne()
     {
         using var sandbox = new SandboxHome();
@@ -445,8 +499,9 @@ public class RegistryRetirementTests
         Assert.Equal(DiagnosisState.Warn, diagnosis.State);
         Assert.Equal(
             $"1 superseded registry path(s) still hold indexed files ({files} file states); "
-                + "run `engram compact --retired` to see what removing them would free",
+                + "they are excluded from code lookup and will be removable in a later version",
             diagnosis.Detail);
+        Assert.Null(diagnosis.Fix);
         Assert.True(files > 0);
     }
 

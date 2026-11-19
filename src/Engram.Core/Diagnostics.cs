@@ -1269,7 +1269,7 @@ public static class Diagnostics
                 "indexing",
                 DiagnosisState.Warn,
                 $"{paths} superseded registry path(s) still hold indexed files ({files} file states); "
-                    + "run `engram compact --retired` to see what removing them would free");
+                    + "they are excluded from code lookup and will be removable in a later version");
     }
 
     /// <summary>

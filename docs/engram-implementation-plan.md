@@ -6010,11 +6010,25 @@ condition: `ScanStop.Complete`, not `empty-scan`, with `--apply`. It runs inside
 stamps the scan and clears the suppression reason (D69). It sets `detached_at = now` on every row whose
 canonical `disk_path` equals the scanned root's, whose identity differs from the one this run resolved
 (never `EnrolledIdentity`), whose `repo_path` differs, and which is not already detached. A dry run
-notes "would retire". Nothing is deleted; `EnsureRepo`'s re-home `UPDATE` already clears `detached_at`,
-so pointing a remote back un-retires the row with no new code. "Current" means what git resolves now,
+notes "would retire". Nothing is deleted. The row for the identity git resolves now is never retired:
+`EnsureRepo` clears `detached_at` on the row it reuses, in the statement that re-homes a moved checkout,
+whatever its `disk_path`, so pointing a remote back un-retires that row and its next complete scan
+retires the other. (The re-home `UPDATE` alone did not: it runs only when `disk_path` differs, so at an
+unmoved checkout the re-resolved row stayed retired while being the live one.) A dry run clears nothing.
+
+A root that stays Unknown is never stamped, so it would be the most overdue pick on every pass. Every
+"next due" pick (the server tick, `index --freshen`) goes through `RepoFreshness.NextDueResolvable`,
+which skips an Unknown candidate and takes the next one in the same pass; drain-all and
+`repo index --all` already visit every root and skip the Unknown one. "Current" means what git resolves now,
 not the newest row: on the real store `fx` (the newest row) retires in favour of the bundle identity, and
 `agent-tools-3` in favour of `agent-tools-2`. Doctor adds one store-wide `indexing` row while retired
-paths still hold `file_state`, counted from `repo_registry` and `file_state` only.
+paths still hold `file_state`, counted from `repo_registry` and `file_state` only. It names no command:
+until removal ships it says the paths are excluded from code lookup and removable in a later version,
+because a doctor that names a verb which does not exist teaches people to stop reading it (D37).
+
+**Known oddity, unchanged.** An in-repo `[remote "origin"]` section with no url (or an empty one) makes
+`git remote get-url origin` print `origin`, exit 0, so the identity is the literal string `origin`.
+This predates D94 and is recorded rather than changed.
 
 **Why `detached_at`.** Nothing set it before, and its two readers (`CodeEntityResolver`,
 `FileFreshness`) already exclude what a retired row must be excluded from. A new column would need a

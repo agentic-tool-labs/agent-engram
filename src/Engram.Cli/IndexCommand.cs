@@ -245,7 +245,9 @@ internal static class IndexCommand
 
         using var connection = EngramDatabase.OpenInitialized(home);
 
-        var candidate = RepoFreshness.NextDue(
+        // Ambient, so silent: an Unknown origin starts nothing, records nothing, and does not
+        // consume the pass (D94).
+        var candidate = RepoFreshness.NextDueResolvable(
             connection,
             IndexingSettings.FullScanIntervalMinutes,
             DateTimeOffset.UtcNow,
@@ -253,12 +255,6 @@ internal static class IndexCommand
             exclude);
 
         if (candidate is null)
-        {
-            return 0;
-        }
-
-        // Ambient, so silent: an Unknown origin starts nothing and records nothing (D94).
-        if (!CodeIndexer.TryResolveIdentity(candidate.Root, out _, out _))
         {
             return 0;
         }

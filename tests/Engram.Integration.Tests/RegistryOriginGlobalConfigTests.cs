@@ -164,6 +164,53 @@ public sealed class RegistryOriginGlobalConfigTests
         Assert.Empty(RepoEnrollment.ListAll(connection));
     }
 
+    [Fact]
+    public void ServerFreshnessTick_AnUnknownFirstPick_DoesNotConsumeTheTick()
+    {
+        using var sandbox = new SandboxHome();
+        var unknown = EnrolledUnknownCheckout(sandbox, "tick-first-unknown", out var global);
+        using var _ = global;
+        var next = EnrollResolvable(sandbox, "tick-second");
+
+        new IndexFreshness(sandbox.Home).TickOnce();
+
+        AssertOnlyIndexed(sandbox, next, unknown);
+    }
+
+    [Fact]
+    public void IndexFreshen_AnUnknownFirstPick_DoesNotConsumeThePass()
+    {
+        using var sandbox = new SandboxHome();
+        var unknown = EnrolledUnknownCheckout(sandbox, "freshen-first-unknown", out var global);
+        using var _ = global;
+        var next = EnrollResolvable(sandbox, "freshen-second");
+
+        var exit = IndexCommand.Run(sandbox.Home.Root, ["--freshen", "--apply"], new StringWriter(), new StringWriter());
+
+        Assert.Equal(0, exit);
+        AssertOnlyIndexed(sandbox, next, unknown);
+    }
+
+    /// <summary>
+    /// A due root that resolves under the global file too (a local origin, which get-url answers),
+    /// enrolled after the Unknown one so the most-neglected-first order picks the Unknown one first.
+    /// </summary>
+    private static string EnrollResolvable(SandboxHome sandbox, string name)
+    {
+        var repo = RegistryRetirementTests.Checkout(sandbox, name, $"git@example.com:acme/{name}");
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        RepoEnrollment.Enroll(connection, CodeIndexer.ResolveIdentity(repo), repo, DateTimeOffset.UtcNow.AddDays(-1));
+        return repo;
+    }
+
+    private static void AssertOnlyIndexed(SandboxHome sandbox, string indexed, string skipped)
+    {
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Assert.Equal(1L, (long)Scalar(connection, $"SELECT COUNT(*) FROM repo_registry WHERE disk_path = '{indexed}';"));
+        Assert.Equal(0L, (long)Scalar(connection, $"SELECT COUNT(*) FROM repo_registry WHERE disk_path = '{skipped}';"));
+        Assert.Null(RepoEnrollment.Get(connection, EnrolledIdentity)!.LastFullScanAt);
+    }
+
     private const string EnrolledIdentity = "git@example.com:acme/enrolled-earlier";
 
     /// <summary>Enrolled under an identity it once resolved to, never scanned, so it is due.</summary>

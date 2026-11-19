@@ -948,12 +948,18 @@ public static class CodeIndexer
 
         if (existing is { } registered)
         {
-            if (apply && registered.Second != root)
+            // The row for the identity git resolves now is never retired (D94): re-homing a moved
+            // checkout and un-retiring one whose remote was pointed back are one statement, which
+            // is a no-op when neither applies.
+            if (apply)
             {
                 Execute(
                     connection,
                     null,
-                    "UPDATE repo_registry SET disk_path = $disk, detached_at = NULL WHERE identity = $identity;",
+                    """
+                    UPDATE repo_registry SET disk_path = $disk, detached_at = NULL
+                    WHERE identity = $identity AND (disk_path IS NOT $disk OR detached_at IS NOT NULL);
+                    """,
                     ("$disk", root),
                     ("$identity", identity));
             }
