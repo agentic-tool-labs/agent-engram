@@ -67,7 +67,9 @@ public static class MemoryScopes
         var unknown = requested.Where(name => !All.Contains(name, StringComparer.Ordinal)).Distinct(StringComparer.Ordinal).ToList();
         if (requested.Count == 0 || unknown.Count > 0)
         {
-            error = (requested.Count == 0 ? "types must name at least one kind of memory" : $"unknown types: {string.Join(", ", unknown)}")
+            error = (requested.Count == 0 ? "types must name at least one kind of memory"
+                    : unknown.Any(string.IsNullOrWhiteSpace) ? "empty type name"
+                    : $"unknown types: {string.Join(", ", unknown)}")
                 + $"; valid types are {string.Join(", ", All)}";
             return false;
         }

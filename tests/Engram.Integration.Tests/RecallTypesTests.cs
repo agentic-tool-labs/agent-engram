@@ -334,6 +334,37 @@ public class RecallTypesTests
         Assert.Contains("unknown types: bogus", stderr.ToString(), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("user,")]
+    public void ExplainCommand_AnEmptyTypeName_IsNamedAsSuch(string types)
+    {
+        using var sandbox = new SandboxHome();
+        var stderr = new StringWriter();
+
+        var code = ExplainCommand.Run(sandbox.Home.Root, [Query, "--types", types], new StringWriter(), stderr);
+
+        Assert.Equal(1, code);
+        Assert.Contains("error: empty type name; valid types are", stderr.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Explain_WithEveryNonToolType_AgreesWithRecallUnderTheSameFilter()
+    {
+        using var sandbox = new SandboxHome();
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        var ids = Seed(connection);
+        var allButTool = MemoryScopes.All.Where(type => !MemoryScopes.ExcludedByDefault.Contains(type)).ToList();
+
+        var explanation = RetrievalExplainer.Explain(connection, sandbox.Home, Query, 500, 20, "current", T0.AddSeconds(5), _ => null, types: allButTool);
+        var recall = Rank(connection, ids.CurrentSession, allButTool);
+
+        Assert.NotEmpty(recall.Candidates);
+        Assert.Equal(recall.Candidates.Select(c => c.Handle), explanation.Candidates.Select(c => c.Candidate.Handle));
+        Assert.All(explanation.Candidates.Where(c => c.Candidate.LexicalRank is not null),
+            c => Assert.Equal(c.Candidate.LexicalRank, c.Lexical?.Rank));
+    }
+
     /// <summary>
     /// Byte-identity of the default: the only difference from the pre-D85 statement is the
     /// <c>scope &lt;&gt; 'tool'</c> term in <c>scored</c>, and on a store with no tool rows it changes
