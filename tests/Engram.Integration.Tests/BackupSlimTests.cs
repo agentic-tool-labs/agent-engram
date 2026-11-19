@@ -660,6 +660,62 @@ public class BackupSlimTests
         Assert.Contains(lines, l => l.Contains("class Bar v1", StringComparison.Ordinal));
     }
 
+    // --- I7: artifacts written by main (3435ad3) restore and replay as before ---------------
+
+    private static readonly string MainFixtures = Path.Combine(AppContext.BaseDirectory, "Fixtures", "main-3435ad3");
+    private const string MainSnapshot = "engram-20261119T202344Z-v19.db";
+
+    [Fact]
+    public void ASnapshotWrittenByMain_ListsAsFull_AndRestoresExactly_WithNoOmissionNotice()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        Directory.CreateDirectory(sandbox.Home.BackupDir);
+        var copy = Path.Combine(sandbox.Home.BackupDir, MainSnapshot);
+        File.Copy(Path.Combine(MainFixtures, MainSnapshot), copy);
+        var expected = DigestOf(copy);
+
+        var list = Cli(sandbox.Home, "list");
+        var restore = Cli(sandbox.Home, "restore", MainSnapshot, "--apply");
+
+        Assert.Contains(" full ", list.Stdout, StringComparison.Ordinal);
+        Assert.Equal(0, restore.Exit);
+        Assert.DoesNotContain("leaves out", restore.Stdout, StringComparison.Ordinal);
+        AuthoredDigest.Equal(expected, DigestOf(sandbox.Home.DatabasePath));
+    }
+
+    [Fact]
+    public void AJournalWrittenByMain_ReplaysAsFull_RegenerableLinesIncluded()
+    {
+        using var target = new SandboxHome(initialize: false);
+        var snapshot = Path.Combine(MainFixtures, MainSnapshot);
+        IReadOnlyDictionary<string, IReadOnlyList<string>> expected;
+        int regenerable;
+        try
+        {
+            using var source = EngramDatabase.Open(snapshot);
+            expected = AuthoredDigest.Read(source, journalSubset: true);
+            using var count = source.CreateCommand();
+            count.CommandText = "SELECT count(*) FROM fact WHERE regenerable = 1;";
+            regenerable = (int)(long)count.ExecuteScalar()!;
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(snapshot);
+        }
+
+        var replay = Cli(target.Home, "replay", Path.Combine(MainFixtures, FactJournal.FileName), "--apply");
+
+        Assert.Equal(0, replay.Exit);
+        Assert.Contains("Journal scope: full.", replay.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("code facts are not", replay.Stdout, StringComparison.Ordinal);
+        using var replayed = EngramDatabase.Open(target.Home);
+        AuthoredDigest.Equal(expected, AuthoredDigest.Read(replayed, journalSubset: true));
+        using var replayedCount = replayed.CreateCommand();
+        replayedCount.CommandText = "SELECT count(*) FROM fact WHERE regenerable = 1;";
+        Assert.Equal(3, regenerable);
+        Assert.Equal(regenerable, (int)(long)replayedCount.ExecuteScalar()!);
+    }
+
     // --- list (Phase 3) ----------------------------------------------------------------------
 
     [Fact]

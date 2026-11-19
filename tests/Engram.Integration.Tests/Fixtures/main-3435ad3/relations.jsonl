@@ -1,0 +1,2 @@
+{"format":"engram-relations","format_version":1,"schema_version":19,"written_at":"2026-11-19T20:23:44.5870850\u002B00:00"}
+{"fact_subject":"/knowledge/fixture/release","fact_predicate":"states","fact_body":"the fixture ships on Mondays","fact_valid_from":2000,"related_subject":"/code/fixture/src/a.cs#Foo","related_predicate":"declares","related_body":"class Foo in the fixture","related_valid_from":1000,"relation":"scoped","reason":"release builds Foo","judged_at":3000}
