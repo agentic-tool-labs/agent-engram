@@ -356,10 +356,7 @@ public static class RecallRanker
                 ToSessionFact(factId, body, path, subjectName, ageDays, detailsChars, agentNames)),
             FactOrigin.PriorSession => RecallEngine.MeasurePriorSessionFactLine(
                 ToSessionFact(factId, body, path, subjectName, ageDays, detailsChars, agentNames),
-                "p" + (labelIndex ?? throw new InvalidOperationException(
-                    $"fact {handle} ranked as a prior-session candidate with no prior_sessions label — "
-                    + "the origin CASE and the prior_sessions CTE's predicates have drifted apart."))
-                        .ToString(CultureInfo.InvariantCulture)),
+                PriorSessionLabel(labelIndex, reader.IsDBNull(reader.GetOrdinal("session_id")), handle)),
             _ => throw new InvalidOperationException($"no formatter for fact origin {origin}"),
         };
 
@@ -397,6 +394,15 @@ public static class RecallRanker
         var age = now - DateTimeOffset.FromUnixTimeSeconds(createdAtUnixSeconds);
         return age.TotalDays > 0 ? (int)age.TotalDays : 0;
     }
+
+    // A NULL-session note has no session to number, so it renders p? (D84). A missing label on a
+    // note that does have a session is still drift between the origin CASE and the CTE.
+    private static string PriorSessionLabel(int? labelIndex, bool sessionIsNull, string handle) =>
+        labelIndex is { } index ? "p" + index.ToString(CultureInfo.InvariantCulture)
+        : sessionIsNull ? "p?"
+        : throw new InvalidOperationException(
+            $"fact {handle} ranked as a prior-session candidate with no prior_sessions label — "
+            + "the origin CASE and the prior_sessions CTE's predicates have drifted apart.");
 
     private static int? NullableInt(SqliteDataReader reader, string column)
     {
@@ -499,30 +505,27 @@ public static class RecallRanker
                 """);
         }
 
-        var liveSessionRows = new List<string>(2);
-        foreach (var (index, objectTest) in new[] { ("ux_fact_live", "IS NULL"), ("ux_fact_edge_live", "IS NOT NULL") })
-        {
-            // The two existing live partitions avoid fetching closed history rows. Both are
-            // needed: prior-session enumeration has never excluded object-bearing facts.
-            liveSessionRows.Add(
-                $"""
-                SELECT f.session_id
-                FROM entity e CROSS JOIN fact f INDEXED BY {index} ON f.subject_id = e.id
-                WHERE f.valid_to IS NULL AND f.object_id {objectTest}
-                  AND e.path >= '{sessionPrefix}' AND e.path < '{SessionFacts.Root}0'
-                  AND f.session_id IS NOT $currentSessionId
-                """);
-        }
-
         sb.Append(
             $"""
             -- Ranges over every prior-session fact, never over `candidates` (ruling 6) — a session
-            -- contributing no candidates must not shift a later session's label.
+            -- contributing no candidates must not shift a later session's label. Driven from
+            -- `session` with a stop-at-first probe, not by visiting every live session note. The
+            -- probe has no object_id test, so object-bearing notes still count. A NULL session_id
+            -- has no `session` row and so takes no label (D84).
+            -- Ceiling (D84): the probe walks a session's closed and non-note facts before its first
+            -- live note, so bulk-closing session notes degrades it (25.6 ms adversarial vs 4.9 ms
+            -- on the real store). Upgrade path: a partial index fact(session_id) WHERE valid_to IS
+            -- NULL, a schema migration deliberately left out of D84.
             prior_sessions(session_id, label_index) AS (
-              SELECT DISTINCT session_id, DENSE_RANK() OVER (ORDER BY session_id)
-              FROM (
-                {string.Join("\nUNION ALL\n", liveSessionRows)}
-              )
+              SELECT s.id, DENSE_RANK() OVER (ORDER BY s.id)
+              FROM session s
+              WHERE s.id IS NOT $currentSessionId
+                AND EXISTS (
+                  SELECT 1
+                  FROM fact f INDEXED BY ix_fact_session JOIN entity e ON e.id = f.subject_id
+                  WHERE f.session_id = s.id AND f.valid_to IS NULL
+                    AND e.path >= '{sessionPrefix}' AND e.path < '{SessionFacts.Root}0'
+                )
             ),
 
             candidates AS (

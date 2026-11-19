@@ -9,10 +9,10 @@ namespace Engram.Integration.Tests;
 /// text was written ("pin reality, not a hope") — not the properties hoped for.
 /// </summary>
 /// <remarks>
-/// The prior-session fact scan formerly accepted here is removed by the entity-path range
-/// and entity-first join. Entity paths stay authoritative, and every prior session is still
-/// enumerated even when it contributes no candidates. The two live-fact indexes avoid
-/// fetching closed history rows for each session entity.
+/// Prior sessions are enumerated from <c>session</c> with a stop-at-first probe over
+/// <c>ix_fact_session</c> (D84, superseding D81's entity-first two-partition form). Entity paths
+/// stay authoritative, and every prior session is still enumerated even when it contributes no
+/// candidates.
 /// </remarks>
 public class RecallRankerPlanTests
 {
@@ -54,8 +54,7 @@ public class RecallRankerPlanTests
         }
 
         var lines = CapturePlan(connection, overlapAvailable, vectorAvailable);
-        Assert.Contains(lines, line => line.Contains("SEARCH f USING INDEX ux_fact_live (subject_id=?)", StringComparison.Ordinal));
-        Assert.Contains(lines, line => line.Contains("SEARCH f USING INDEX ux_fact_edge_live (subject_id=?)", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("SEARCH f USING INDEX ix_fact_session (session_id=?)", StringComparison.Ordinal));
         var unexpectedFactScans = UnexplainedFactScans(lines);
 
         Assert.True(

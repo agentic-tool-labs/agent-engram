@@ -5969,3 +5969,58 @@ because a plugin older than the binary still registers it and an unknown verb pr
 
 **Not measured.** Nothing here has run on an organization-managed install. That `prompt.submit` reaches a
 user-installed mod there rests on the docs not listing it as skipped.
+
+## D84 — Prior sessions are enumerated from `session`; a NULL-session note takes no label
+
+**Supersedes D81's choice of CTE form**, not its reasoning. `RecallRanker`'s `prior_sessions` is
+now driven from `session` (`s.id IS NOT $currentSessionId`) with an `EXISTS` probe over
+`ix_fact_session` that stops at the first live fact whose entity path is in
+`['/sessions/', '/sessions0')`. The set is unchanged: every session other than the current one
+that owns a live session note, whether or not it contributes a candidate (ruling 6). The probe has
+no `object_id` test, so an object-bearing live note still makes its session a prior session — that
+is how "both live partitions" is kept, behaviourally rather than by seeking both indexes.
+
+**A live `/sessions/` fact with `session_id IS NULL` contributes no row.** The old CTE emitted one,
+and it was unusable by construction: `scored` joins `ps.session_id = f.session_id`, `NULL = NULL`
+is not true, so the fact that produced the row got no label and `ReadCandidate` threw "drifted
+apart". Its only other effect was to sort first in `DENSE_RANK` and shift every real session's
+label up by one. Now such a fact, when ranked as a prior-session candidate, renders `p?`; a missing
+label on a note that *has* a session still throws, because that is real drift. With
+`$currentSessionId` NULL the unchanged origin CASE reads `NULL IS NULL` as current session, so the
+note is a current-session line there and never `p?`. `SessionFacts.Append` always sets
+`session_id`, so the population is import or legacy only: **0** such facts on the 621,904-fact
+snapshot (E3), so its recall output is byte-identical.
+
+**Measured** on a JIT host (Release, not the AOT binary), CTE alone, p50 of 21, arms alternated,
+same-form self-spread ≤ 0.46 ms; rows identical on every shape (EXCEPT both ways 0/0, and the full
+statement's 501 rows ordered-identical, with current session NULL and set):
+
+| store shape | old (D81) | new |
+|---|---|---|
+| real snapshot: 62,303 live notes, 222 closed, 1,620 sessions | 57.28 ms | 4.85 ms |
+| D81 rebuild: 50 live notes, 50,000 closed, 50,000 knowledge facts, 1,600 sessions | 5.05 ms | 8.18 ms |
+| adversarial: 800 sessions of closed notes only; 800 with 62 user facts before one live note | 5.42 ms | 25.56 ms |
+
+Full statement on the snapshot (overlap lane on, vector off, five queries) fell by 44–46 ms each,
+e.g. 104.6 → 59.6 ms. D81's fixture was never committed; the rebuild follows its prose (session
+count and insertion order are not stated there), and its old-form figure (5.05 ms) does not
+reproduce D81's 2.19 ms, so trust the direction on that row rather than the size.
+
+**Why the new form, though it loses two rows of three.** Each form is linear in a different
+population: the old one in live session notes, the new one in the closed or non-note facts a
+session holds before its first live note. Nothing closes session notes today, so the live
+population is the one that grows; the real store pays 52 ms per recall for the old form, and the
+shape D81 measured costs the new one 3 ms. D81's reasoning stands for a history-heavy store.
+
+**Known ceiling.** If anything starts closing session notes in bulk — expiry, or P4 promotion
+re-filing them — closed rows grow and this form degrades toward the adversarial row. The upgrade
+path is a partial index `fact(session_id) WHERE valid_to IS NULL`, so the probe skips closed rows;
+that is a schema migration (D31 snapshot) and deliberately not part of this change. P4 must
+re-measure this CTE after a promotion run and add the index if it exceeds 10 ms.
+
+**Guards.** `RecallRankerPlanTests` now pins `SEARCH f USING INDEX ix_fact_session (session_id=?)`
+in place of D81's two live-partition seeks. `RecallSessionRangeTests` keeps the legacy oracle,
+restated as the oracle minus its NULL row, and adds: unmodified-oracle equality for a store with no
+NULL-session note, the one-down label shift when a NULL note exists but does not match, `p?` with
+D84 numbering for current session set and NULL, and the drift throw (a session id with no `session`
+row, foreign keys off).

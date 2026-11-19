@@ -702,6 +702,14 @@ one people stop reading. A query that legitimately matches nothing must keep say
 note. `RecallRanker.OverlapUnavailableDetail` is shared with `RetrievalExplainer`'s lane row so the
 two surfaces cannot word the same state differently (D60).
 
+**`prior_sessions` is driven from `session`, and its cost is in the facts a session holds before its
+first live note.** Measured on a JIT host, CTE p50: **57.28 → 4.85 ms** on the real snapshot (62,303
+live notes), but **5.05 → 8.18 ms** on a D81-style history-heavy rebuild and **5.42 → 25.56 ms** on an
+adversarial one, rows identical on all three. It was chosen because live notes are what grows; if
+anything starts closing session notes in bulk, re-measure, and the fix is a partial
+`fact(session_id) WHERE valid_to IS NULL` index, a migration. A NULL-session note takes no label and
+renders `p?` (D84).
+
 **Falsify against a committed tree, and assert the patch landed.** A harness that restores arms with
 `git checkout --` restores to HEAD, so an uncommitted change under test is reverted by its own
 falsification and every arm goes red for the wrong reason. The sibling failure is quieter: a pattern
