@@ -5986,8 +5986,10 @@ is not true, so the fact that produced the row got no label and `ReadCandidate` 
 apart". Its only other effect was to sort first in `DENSE_RANK` and shift every real session's
 label up by one. Now such a fact, when ranked as a prior-session candidate, renders `p?`; a missing
 label on a note that *has* a session still throws, because that is real drift. With
-`$currentSessionId` NULL the unchanged origin CASE reads `NULL IS NULL` as current session, so the
-note is a current-session line there and never `p?`. `SessionFacts.Append` always sets
+`$currentSessionId` NULL the origin CASE as D84 shipped it read `NULL IS NULL` as current session, so
+the note was a current-session line there and never `p?`; **D90 amends this** — the CASE compares
+with `=`, so with no current session nothing is current and the note renders `p?` there too.
+`SessionFacts.Append` always sets
 `session_id`, so the population is import or legacy only: **0** such facts on the 621,904-fact
 snapshot (E3), so its recall output is byte-identical.
 
@@ -6085,3 +6087,114 @@ current session 1550; same-statement self-spread 0.3–11.6 ms):
 
 The default is within noise of before, and a filtered recall was cheaper than the default on every
 query measured; why was not profiled.
+
+## D90 — Recall scores only the overlap hits it could return; results are unchanged
+
+**The cost was materializing every overlap hit, not ranking them.** About 20,000 hits per query on
+the real store were joined to `fact` and `entity`, scored, counted by window functions and sorted,
+all to keep 501. Ranking every hit stays: `overlap_ranked` is unchanged. Only these are now joined:
+- the first `$limit` *eligible* hits in rank order (`overlap_prefix`);
+- every lexical and vector hit;
+- every current-session hit (`current_arm`).
+Each joined row keeps the overlap rank it has among all hits.
+
+**Why the window is exactly the old one.** Take a fact that was a candidate and is no longer
+materialized. It is not in lex, vec or the current-session arm, so it is an eligible, overlap-only,
+non-current hit whose eligible position is past `$limit`. Its fused score is 1/(k + its rank). Each
+of the `$limit` eligible hits ranked above it fuses at least 1/(k + a smaller rank), which is
+strictly greater because ranks are unique. So `$limit` rows sort before it, and it could never have
+been kept. Nothing at the bound can tie.
+
+**Totals.** `matched_total` is the eligible-hit count plus the materialized rows that are not overlap
+hits. `corroborated_total` is the sum over the materialized rows. A corroborated fact is in two lanes,
+so it is in lex or vec and always materialized, and its overlap rank comes from every hit, not from
+the prefix. Coverage is therefore unchanged.
+
+**One definition of the exclusion.** A new `excluded` CTE holds directives (by path range) and, on a
+default call, the registry's default-excluded scopes (`MemoryScopes.ExcludedByDefaultSql`, through
+`ix_fact_scope`). Overlap eligibility and `scored` both test membership in it, so they cannot
+disagree.
+
+**Construction.** The spec allowed two:
+- (b), default calls: raw rank ≤ `$limit` + the excluded hits, so no second ordering is needed.
+- (a), `types` calls: an ordering over eligible hits, which needs each hit's scope.
+
+L2 measured (a) on default calls at 69.5 ms against (b)'s 68.9, with identical rows, so the spec's
+choice stands. The snapshot holds no tool rows, so the comparison that would separate the two
+constructions (default calls once P3's ledgers exist) could not be run.
+
+**The origin CASE compares with `=`**, amending D84 (Orchestrator ruling U3). With `IS`, a NULL
+`$currentSessionId` made a NULL-session note origin 0. Such a note is not in the current arm, so it
+could be origin 0 without being materialized, which breaks the proof. It now renders `p?`. The
+snapshot holds 0 of them.
+
+**The one assumption.** `fact_token` must hold live facts only (D59). A stale token row is counted
+in the totals, because hits are counted without a `fact` join, and it can take one prefix position.
+`scored` still requires a live fact, so it is never returned. Accepted (U1): `repair` restores the
+index, and a stale index already perturbs overlap ranks today.
+
+**Two plan traps.** Both CTEs below are now `MATERIALIZED`.
+- `scored` has two readers, `totals` and `bounded`. Inlined into each, the planner drove every copy
+  from a scan of all live facts (through `ix_fact_scope`) rather than from `candidates`.
+  `RecallRankerPlanTests`' no-fact-scan guard caught it.
+- `overlap_eligible` has two readers, the prefix and the count. Inlined, it paid the per-hit `fact`
+  lookup twice, and `types:["user"]` ran 65.6 ms against 56.2 before.
+
+**Measured** on the 2.4 GB snapshot over the 30-query attribution sample (every 9th recorded query).
+Overlap on, vector off, NULL session.
+
+JIT statement time, Release. p50 of per-query medians over 5 alternated reps. The old statement
+against itself spreads 2.4 ms.
+
+| arm | fda1cb8 | D90 |
+|---|---|---|
+| default | 117.2 ms (p90 236.7, max 256.9) | 68.9 ms (p90 146.5, max 171.9) |
+| `types:["user"]` | 56.2 | 54.5 |
+| `types:["session"]` | 82.0 | 73.3 |
+
+Published AOT `explain`, timed to a file, on an APFS clone of the snapshot, with the 9.7 ms
+`engram home` floor subtracted. Self-spread 0.2 ms.
+
+| percentile | before | after |
+|---|---|---|
+| p50 | 156.5 ms | 108.7 ms |
+| p90 | 321.2 ms | 232.1 ms |
+
+The spec estimated 75–85 ms for the statement; it came in under that. What remains is mostly the
+lexical lane.
+
+**Equivalence**, zero tolerance, between fda1cb8 and D90 on the snapshot. 270 recorded queries ×
+19 configurations, 5,130 comparisons, 0 differences. Each comparison covers every returned column
+(hashed), the totals and the packed digest text. The configurations are:
+- the current session NULL, and set to each of the 10 sessions holding the most live notes;
+- `minCandidates` 1,000 (explain's case), with NULL and with the largest session;
+- `types` user, session and code, each with NULL and with the largest session.
+
+The harness was shown able to fail. Probes were built from the committed tree with a break applied
+and run on the first 5 queries (95 comparisons):
+- (iii), corroboration from the prefix: 91 differ.
+- (ii), no current arm: 60 differ.
+- (i), prefix `$limit − 1`: 0 differ. This is expected. Lex and current-session rows outside the
+  prefix take window slots, so real queries leave the prefix slack, and only the synthetic fixture
+  can reach (i).
+
+**Guards.** `RecallBoundedMaterializationTests` compares the bounded call with an unbounded oracle:
+the same statement with `minCandidates` above every candidate. It also checks the oracle's totals
+against its own rows, so a totals defect cannot hide by being in both. Falsified against the
+committed tree, with each break shown to have landed (red count in brackets):
+1. prefix `$limit − 1` [5]
+2. no current arm [9]
+3. corroboration from the prefix [6]
+4. (b) without the excluded count [6]
+5. totals without the lex/vec term [5]
+6. origin CASE back to `IS` [1, `RecallSessionRangeTests`]
+7. filtered eligibility without `types` [4]
+8. no tool arm in `excluded` [9]
+9. `scored` inlined [8 plan rows]
+10. `scored` without `valid_to IS NULL` [1, the stale-token test]
+
+`AStoreOfFiveFacts` turned red under none of them, since none bounds anything at that size. Its
+guarantee rests on the oracle comparison alone.
+
+`RecallTypesTests`' pre-D85 identity check now removes the tool arm from `excluded`. It compares rows
+only, because that arm has a plan of its own, and `RecallRankerPlanTests` pins that plan.
