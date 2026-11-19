@@ -6024,3 +6024,64 @@ restated as the oracle minus its NULL row, and adds: unmodified-oracle equality 
 NULL-session note, the one-down label shift when a NULL note exists but does not match, `p?` with
 D84 numbering for current session set and NULL, and the drift throw (a session id with no `session`
 row, foreign keys off).
+
+## D85 — Memory type is `fact.scope`; recall takes an optional `types` filter
+
+**The type of a memory is the `scope` column every producer already writes**, not a path-derived
+class: a `CASE` over path roots would be a second statement of what each writer states, and a GLOB
+cannot tell `/projects/<p>/code/…` from `/projects/<p>/notes/…`. `MemoryScopes` is the one registry
+— `session, user, project, agent, code, tool` — and every reader and validator takes the list from
+it. Origin (current / prior session / long term) stays path-derived; type and origin are different
+axes.
+
+**`engram_recall(query, budget_tokens?, types?)`**, and the same optional field on the mod `recall`
+op and `engram explain --types a,b`. `types` is validated before anything runs: an empty array or
+any unknown name — even beside known ones — is an error naming the valid values, because an
+ignored filter reads as "nothing of that type exists". Known duplicates collapse, and the list is
+normalized to registry order, so one filter has one header spelling. Each surface reports the error
+its usual way (MCP returns the string, the mod op its 400, `explain` stderr and exit 1), and no
+`recall` record is written for a refused call.
+
+**Where the filter applies, and why both places.** One predicate, `MemoryScopes.FilterSql`
+(`f.scope IN (SELECT value FROM json_each($types))`) with `MemoryScopes.BindFilter`, used in three
+statements: `lex` before its `LIMIT $seedK`, because otherwise BM25's top 32 come from a corpus
+dominated by code and a filtered recall starves (E2: user share of the unfiltered lexical top-32 is
+0.001); `scored`, so `matched_total` and `corroborated_total` — hence D44 coverage — describe what
+was asked; and `FactStore.SearchRanked`, so explain's lexical row is the lane `Rank` ran (D30). The
+overlap lane is unbounded, so filtering at `scored` loses nothing. **The vector lane is not filtered
+before its `k`**: vec0 returns the global top `seed_k` and `scored` drops what is outside the filter,
+so for `types:["user"]` the lane contributes nothing (E2: 0.000). Accepted; explain's vector row
+says so in words under `--types`, and the fix is a filter inside the KNN (E10), not oversampling.
+A scope value outside the registry is returned by no filter and still by default — mapping such
+values to `project` is a doctor concern, not recall's.
+
+**The default excludes `tool` at `scored` only** — `MemoryScopes.ExcludedByDefault`, the directive
+precedent — so the default `lex` lane and its D58–D60 cost are untouched, and the default statement
+differs from the one before by that single term. No `tool` row exists until P3 re-files the ledger,
+so until then default recall is byte-identical: measured on the 621,904-fact snapshot by compiling
+one probe against both trees (1184e93 and this change) and comparing `RecallRanker.Pack` text for
+the first 30 recorded E1 queries, with no current session and with session 1550 — 60 of 60 equal
+(`cmp`). The rows and plan detail of the pre-filter statement equal the new default on a fixture
+without tool rows (a test). Statement variants are 8 (overlap × vector × filter); the plan guard
+enumerates all of them.
+
+**Header and telemetry.** With a filter, the RECALL header gains ` · types: <list>` after the
+coverage value and before availability notes; without one it is unchanged. The `recall` record gains
+`types` (set only when passed; the log writes unset fields as null) and `packed_by_scope` on every
+record — packed lines by `fact.scope`, with session notes split into `current-session` and
+`prior-session` by origin. It is a line count beside `fact_count`, whose meaning is unchanged
+(D43, D46). The mod op's `mod-call` record gets neither.
+
+**Measured** (JIT host, Release; overlap on, vector off; statement p50 of 9 alternating runs,
+current session 1550; same-statement self-spread 0.3–11.6 ms):
+
+| query | before | default | `user` | `code` |
+|---|---|---|---|---|
+| ah2 hierarchy pane web UI TUI removed renamed | 259.8 | 260.8 | 119.0 | 218.9 |
+| agent-hierarchy v1 Claude Code pane hierarchy … | 445.1 | 442.9 | 203.4 | 347.4 |
+| ah2 sub-orchestrators feature status … | 250.0 | 260.0 | 100.9 | 171.2 |
+| how Claude Code loads plugin mods … | 360.0 | 354.9 | 166.9 | 314.3 |
+| ah2 web UI graph busy working member node … | 162.8 | 152.1 | 82.0 | 101.4 |
+
+The default is within noise of before, and a filtered recall was cheaper than the default on every
+query measured; why was not profiled.

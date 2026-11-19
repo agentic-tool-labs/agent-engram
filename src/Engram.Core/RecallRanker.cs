@@ -22,7 +22,8 @@ public sealed record RankOutcome(
     int CorroboratedTotal,
     FactTokenIndexState OverlapState,
     VectorLaneState VectorState,
-    string VectorReason);
+    string VectorReason,
+    IReadOnlyList<string>? Types = null);
 
 /// <summary>
 /// The one class that produces the ranking statement SQLite executes for recall (spec §2.1).
@@ -107,7 +108,8 @@ public static class RecallRanker
         DateTimeOffset now,
         VectorLaneQuery vectorQuery,
         int minCandidates = 0,
-        IReadOnlySet<long>? pinnedFactIds = null)
+        IReadOnlySet<long>? pinnedFactIds = null,
+        IReadOnlyList<string>? types = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(query);
@@ -127,13 +129,9 @@ public static class RecallRanker
         var overlapAvailable = overlapState == FactTokenIndexState.Ready;
         var vectorAvailable = vectorQuery.State == VectorLaneState.Queried;
 
-        var text = overlapAvailable && vectorAvailable
-            ? StatementFor(true, true, VectorIndex.TableName)
-            : overlapAvailable
-                ? StatementFor(true, false, VectorIndex.TableName)
-                : vectorAvailable
-                    ? StatementFor(false, true, VectorIndex.TableName)
-                    : StatementFor(false, false, VectorIndex.TableName);
+        // types is a normalized registry list (MemoryScopes.TryNormalize) or null for the default.
+        var filtered = types is not null;
+        var text = StatementFor(overlapAvailable, vectorAvailable, VectorIndex.TableName, filtered);
 
         var agentNames = FactStore.ReadEntityNames(connection, SessionFacts.AgentKind);
 
@@ -148,6 +146,11 @@ public static class RecallRanker
         if (vectorAvailable)
         {
             command.Parameters.AddWithValue("$embedding", ToBlob(vectorQuery.Embedding!));
+        }
+
+        if (filtered)
+        {
+            MemoryScopes.BindFilter(command, types!);
         }
 
         var candidates = new List<RecallCandidate>();
@@ -191,7 +194,8 @@ public static class RecallRanker
             corroboratedTotal,
             overlapState,
             vectorQuery.State,
-            vectorQuery.Reason);
+            vectorQuery.Reason,
+            types);
     }
 
     /// <summary>Builds the RECALL digest text, mirroring what the object ranker's Pack used to do.</summary>
@@ -203,8 +207,9 @@ public static class RecallRanker
         long? currentSessionId,
         DateTimeOffset now,
         VectorLaneQuery vectorQuery,
-        IReadOnlySet<long>? pinnedFactIds = null) =>
-        PackWithOutcome(connection, query, budgetTokens, seedK, currentSessionId, now, vectorQuery, pinnedFactIds).Result;
+        IReadOnlySet<long>? pinnedFactIds = null,
+        IReadOnlyList<string>? types = null) =>
+        PackWithOutcome(connection, query, budgetTokens, seedK, currentSessionId, now, vectorQuery, pinnedFactIds, types).Result;
 
     /// <summary>
     /// <see cref="Pack"/> plus the structured values the digest was written from, from the same run.
@@ -222,10 +227,11 @@ public static class RecallRanker
         long? currentSessionId,
         DateTimeOffset now,
         VectorLaneQuery vectorQuery,
-        IReadOnlySet<long>? pinnedFactIds = null)
+        IReadOnlySet<long>? pinnedFactIds = null,
+        IReadOnlyList<string>? types = null)
     {
         var outcome = Rank(
-            connection, query, budgetTokens, seedK, currentSessionId, now, vectorQuery, pinnedFactIds: pinnedFactIds);
+            connection, query, budgetTokens, seedK, currentSessionId, now, vectorQuery, pinnedFactIds: pinnedFactIds, types: types);
 
         var includedLines = new List<string>();
         var packed = new List<RecallCandidate>();
@@ -258,10 +264,11 @@ public static class RecallRanker
         var factCount = sessionFactCount + longTermFactCount + priorSessionFactCount;
         var notes = AvailabilityNotes(outcome);
         var noteSuffix = notes.Count == 0 ? string.Empty : " · " + string.Join(" · ", notes);
+        var typesSuffix = outcome.Types is null ? string.Empty : " · types: " + string.Join(",", outcome.Types);
         var lines = new List<string>
         {
             $"RECALL \"{query}\" · {factCount} facts · {outcome.TokensUsed}/{budgetTokens} tokens · "
-                + $"coverage: {RecallEngine.ToText(outcome.Coverage)}{noteSuffix}",
+                + $"coverage: {RecallEngine.ToText(outcome.Coverage)}{typesSuffix}{noteSuffix}",
         };
         lines.AddRange(includedLines);
 
@@ -287,6 +294,22 @@ public static class RecallRanker
             gaps,
             packed);
     }
+
+    /// <summary>
+    /// Packed line count by memory type, for the <c>recall</c> telemetry record's
+    /// <c>packed_by_scope</c>: session notes split by origin into <c>current-session</c> and
+    /// <c>prior-session</c>, every other line keyed by its <c>fact.scope</c>. A count of lines, not a
+    /// second <c>fact_count</c> (D43, D46).
+    /// </summary>
+    public static IReadOnlyDictionary<string, int> PackedByScope(IEnumerable<RecallCandidate> packed) =>
+        packed
+            .GroupBy(candidate => candidate.Origin switch
+            {
+                FactOrigin.CurrentSession => "current-session",
+                FactOrigin.PriorSession => "prior-session",
+                _ => candidate.Source!.Scope,
+            }, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
 
     /// <summary>
     /// The D44 consequence of an unavailable lane (spec §2.0.1): a note keyed to lane <i>state</i>,
@@ -433,19 +456,26 @@ public static class RecallRanker
     /// SQLite executes, for all four lane-availability variants, without a second implementation of
     /// how the variant is chosen.
     /// </summary>
-    internal static string StatementFor(bool overlapAvailable, bool vectorAvailable, string vecTable) =>
+    internal static string StatementFor(bool overlapAvailable, bool vectorAvailable, string vecTable, bool filtered = false) =>
         StatementCache.GetOrAdd(
             overlapAvailable.ToString(CultureInfo.InvariantCulture) + "|"
-                + vectorAvailable.ToString(CultureInfo.InvariantCulture) + "|" + vecTable,
-            _ => BuildStatementText(overlapAvailable, vectorAvailable, vecTable));
+                + vectorAvailable.ToString(CultureInfo.InvariantCulture) + "|"
+                + filtered.ToString(CultureInfo.InvariantCulture) + "|" + vecTable,
+            _ => BuildStatementText(overlapAvailable, vectorAvailable, vecTable, filtered));
 
     /// <summary>
     /// Assembles one of the four statement variants (spec §2.3). Built from shared fragments rather
     /// than four hand-written copies, so the overlap/vector lane terms cannot go out of sync between
     /// variants that include a lane and variants that omit it.
     /// </summary>
-    private static string BuildStatementText(bool overlapAvailable, bool vectorAvailable, string vecTable)
+    private static string BuildStatementText(bool overlapAvailable, bool vectorAvailable, string vecTable, bool filtered)
     {
+        // A `types` filter binds $types (a JSON array of registry names) and is applied in `lex`
+        // before its LIMIT — or BM25's top seed_k come from a corpus dominated by code — and in
+        // `scored`, so coverage describes what was asked (D44, D85). Without one, `scored` drops the
+        // registry's default exclusions only; `lex` is untouched, so the default lane costs what it did.
+        const string typesFilter = MemoryScopes.FilterSql;
+        var scopeTerm = filtered ? typesFilter : MemoryScopes.DefaultExclusionSql;
         var sessionPrefix = SessionFacts.Root + "/"; // "/sessions/" — kept in sync with the C# constant
         var directivePrefix = DirectiveFacts.Root + "/"; // "/directives/" — kept in sync with the C# constant
         var rrfK = RecallEngine.RrfK.ToString(CultureInfo.InvariantCulture);
@@ -475,7 +505,7 @@ public static class RecallRanker
         }
 
         sb.Append(
-            """
+            $"""
             -- ORDER BY bm25(), not rank: measured slower here despite the documentation (constraints
             -- file, Part 2 — USE TEMP B-TREE FOR ORDER BY disappearing under `rank` is not evidence
             -- of speed).
@@ -483,7 +513,7 @@ public static class RecallRanker
               SELECT f.id, ROW_NUMBER() OVER (ORDER BY bm25(fact_fts))
               FROM fact f
               JOIN fact_fts ON fact_fts.rowid = f.id
-              WHERE fact_fts MATCH $match AND f.valid_to IS NULL
+              WHERE fact_fts MATCH $match AND f.valid_to IS NULL{(filtered ? " AND " + typesFilter : string.Empty)}
               ORDER BY bm25(fact_fts)
               LIMIT $seedK
             ),
@@ -611,7 +641,7 @@ public static class RecallRanker
         // recall (D-5) — excluded here, where the candidate set drawn from every lane is
         // materialized, rather than at any one lane's own query, so it can never surface
         // regardless of which lane matched it, and never inflates matched/corroborated counts.
-        sb.Append($"  WHERE f.valid_to IS NULL\n    AND substr(e.path, 1, {directivePrefix.Length}) <> '{directivePrefix}'\n),\n\n");
+        sb.Append($"  WHERE f.valid_to IS NULL\n    AND substr(e.path, 1, {directivePrefix.Length}) <> '{directivePrefix}'\n    AND {scopeTerm}\n),\n\n");
 
         sb.Append(
             """

@@ -30,11 +30,15 @@ public class RecallRankerPlanTests
     /// instead, and reported narratively rather than pinned to a test that cannot see that store.
     /// </summary>
     [Theory]
-    [InlineData(true, false)]
-    [InlineData(false, false)]
-    [InlineData(true, true)]
-    [InlineData(false, true)]
-    public void TheRankingStatement_SeeksFactsAndTokensByIndex(bool overlapAvailable, bool vectorAvailable)
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, true)]
+    [InlineData(false, false, true)]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, true)]
+    public void TheRankingStatement_SeeksFactsAndTokensByIndex(bool overlapAvailable, bool vectorAvailable, bool filtered)
     {
         Assert.SkipUnless(!vectorAvailable || VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
         using var sandbox = new SandboxHome(initialize: false);
@@ -53,7 +57,7 @@ public class RecallRankerPlanTests
                 T0);
         }
 
-        var lines = CapturePlan(connection, overlapAvailable, vectorAvailable);
+        var lines = CapturePlan(connection, overlapAvailable, vectorAvailable, filtered);
         Assert.Contains(lines, line => line.Contains("SEARCH f USING INDEX ix_fact_session (session_id=?)", StringComparison.Ordinal));
         var unexpectedFactScans = UnexplainedFactScans(lines);
 
@@ -88,9 +92,13 @@ public class RecallRankerPlanTests
         .Where(line => line.Contains(" f ", StringComparison.Ordinal) || line.Contains(" f2", StringComparison.Ordinal) || line.EndsWith(" f", StringComparison.Ordinal))
         .ToList();
 
-    private static List<string> CapturePlan(SqliteConnection connection, bool overlapAvailable, bool vectorAvailable)
+    private static List<string> CapturePlan(SqliteConnection connection, bool overlapAvailable, bool vectorAvailable, bool filtered)
     {
-        var text = RecallRanker.StatementFor(overlapAvailable, vectorAvailable, "fact_vec");
+        var text = RecallRanker.StatementFor(overlapAvailable, vectorAvailable, "fact_vec", filtered);
+        if (filtered)
+        {
+            Assert.Contains("json_each($types)", text, StringComparison.Ordinal);
+        }
 
         using var command = connection.CreateCommand();
         command.CommandText = "EXPLAIN QUERY PLAN\n" + text;
@@ -100,6 +108,11 @@ public class RecallRankerPlanTests
         command.Parameters.AddWithValue("$currentSessionId", DBNull.Value);
         command.Parameters.AddWithValue("$now", T0.ToUnixTimeSeconds());
         command.Parameters.AddWithValue("$limit", 501);
+        if (filtered)
+        {
+            command.Parameters.AddWithValue("$types", "[\"user\"]");
+        }
+
         if (vectorAvailable)
         {
             command.Parameters.AddWithValue("$embedding", new float[] { 1f, 0f, 0f, 0f }.SelectMany(value => BitConverter.GetBytes(value)).ToArray());

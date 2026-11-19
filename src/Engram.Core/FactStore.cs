@@ -588,7 +588,9 @@ public static class FactStore
     /// convention and not worth normalizing away — an explainer that prettifies a score is one
     /// more place the number a user sees differs from the number that ranked.
     /// </remarks>
-    public static IReadOnlyList<LexicalHit> SearchRanked(SqliteConnection connection, string query, int limit)
+    /// <param name="types">A normalized <see cref="MemoryScopes"/> filter, or null for none.</param>
+    public static IReadOnlyList<LexicalHit> SearchRanked(
+        SqliteConnection connection, string query, int limit, IReadOnlyList<string>? types = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
@@ -600,15 +602,19 @@ public static class FactStore
 
         using var command = connection.CreateCommand();
         command.CommandText =
-            """
+            $"""
             SELECT f.id, bm25(fact_fts)
             FROM fact f
             JOIN fact_fts ON fact_fts.rowid = f.id
-            WHERE fact_fts MATCH $match AND f.valid_to IS NULL
+            WHERE fact_fts MATCH $match AND f.valid_to IS NULL{(types is null ? string.Empty : " AND " + MemoryScopes.FilterSql)}
             ORDER BY bm25(fact_fts) LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$match", match);
         command.Parameters.AddWithValue("$limit", limit);
+        if (types is not null)
+        {
+            MemoryScopes.BindFilter(command, types);
+        }
 
         var hits = new List<LexicalHit>();
         using var reader = command.ExecuteReader();
