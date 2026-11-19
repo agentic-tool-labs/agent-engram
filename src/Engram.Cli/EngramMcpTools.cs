@@ -27,8 +27,7 @@ public sealed class EngramMcpTools
         SessionPinStore pins,
         [Description("What you want to know, as a few keywords or a short question.")] string query,
         [Description("Maximum tokens to spend on the response. Defaults to 500.")] int? budget_tokens = null,
-        [Description("Limit recall to these kinds of memory: session, user, project, agent, code, tool. "
-            + "Omit to search everything except tool ledgers.")] string[]? types = null)
+        [Description("session,user,project,agent,code,tool; omit=all but tool")] string[]? types = null)
     {
         if (!MemoryScopes.TryNormalize(types, out var filter, out var error))
         {
