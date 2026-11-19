@@ -76,25 +76,55 @@ public class FactRefileTests
     }
 
     /// <summary>
-    /// The nearest input that must NOT take the no-op path: same address and predicate, different
-    /// body. The target's newer belief is never superseded by the source's older one.
+    /// Ruling 9, older target: same address and predicate, different body, and the target began
+    /// before the source. Nothing is written, nothing is closed.
     /// </summary>
     [Fact]
-    public void Refile_OntoADifferentLiveBelief_LeavesBothAlone()
+    public void Refile_OntoAnOlderDifferentBelief_LeavesBothAlone()
     {
         using var sandbox = new SandboxHome();
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         var existing = FactStore.Remember(connection, new FactWrite(
-            "/tools/ah2/a", "concept", "records", "newer", "tool", "observed"), T0).FactId;
-        var source = Ledger(connection, "/ah2/a", "older");
+            "/tools/ah2/a", "concept", "records", "older at the target", "tool", "observed"), T0).FactId;
+        var source = Ledger(connection, "/ah2/a", "newer at the source", T0.AddSeconds(1));
         var before = CountFacts(connection);
 
         var result = Refile(connection, source, "/tools/ah2/a", T0.AddMinutes(1));
 
-        Assert.Equal(RefileOutcome.TargetConflict, result.Outcome);
+        Assert.Equal((RefileOutcome.TargetConflict, (long?)existing), (result.Outcome, result.TargetFactId));
         Assert.Equal(before, CountFacts(connection));
         Assert.Null(FactStore.ReadById(connection, source)!.ValidTo);
         Assert.Null(FactStore.ReadById(connection, existing)!.ValidTo);
+        Assert.Equal(result, FactStore.PlanRefile(connection, null, source, "/tools/ah2/a"));
+    }
+
+    /// <summary>
+    /// Ruling 9, newer target and the equal-timestamp tie: the target is the newer belief, so the
+    /// source closes onto it, nothing is inserted, and the target is untouched.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(0)]
+    public void Refile_OntoANewerOrSameAgeDifferentBelief_ClosesTheSourceOntoIt(int targetLaterBySeconds)
+    {
+        using var sandbox = new SandboxHome();
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        var source = Ledger(connection, "/ah2/a", "older at the source");
+        var existing = FactStore.Remember(connection, new FactWrite(
+            "/tools/ah2/a", "concept", "records", "newer at the target", "tool", "observed"),
+            T0.AddSeconds(targetLaterBySeconds)).FactId;
+        var before = CountFacts(connection);
+
+        Assert.Equal(RefileOutcome.SupersededByNewerTarget, FactStore.PlanRefile(connection, null, source, "/tools/ah2/a").Outcome);
+        var result = Refile(connection, source, "/tools/ah2/a", T0.AddMinutes(1));
+
+        Assert.Equal((RefileOutcome.SupersededByNewerTarget, (long?)existing), (result.Outcome, result.TargetFactId));
+        Assert.Equal(before, CountFacts(connection));
+        var closed = FactStore.ReadById(connection, source)!;
+        Assert.Equal((T0.AddMinutes(1).ToUnixTimeSeconds(), (long?)existing), (closed.ValidTo, closed.SupersededBy));
+        Assert.Equal(("re-filed: test", (long?)existing), ReadSupersession(connection, source));
+        var target = FactStore.ReadById(connection, existing)!;
+        Assert.Equal(("newer at the target", (long?)null), (target.Body, target.ValidTo));
     }
 
     [Fact]
@@ -150,8 +180,8 @@ public class FactRefileTests
         return result;
     }
 
-    private static long Ledger(SqliteConnection connection, string path, string body) =>
-        FactStore.Remember(connection, new FactWrite(path, "concept", "records", body, "user", "stated"), T0).FactId;
+    private static long Ledger(SqliteConnection connection, string path, string body, DateTimeOffset? at = null) =>
+        FactStore.Remember(connection, new FactWrite(path, "concept", "records", body, "user", "stated"), at ?? T0).FactId;
 
     private static long CountFacts(SqliteConnection connection) =>
         long.Parse(Strings(connection, "SELECT count(*) FROM fact;")[0], System.Globalization.CultureInfo.InvariantCulture);

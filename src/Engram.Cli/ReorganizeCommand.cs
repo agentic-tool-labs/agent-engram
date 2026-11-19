@@ -12,8 +12,10 @@ namespace Engram.Cli;
 /// </summary>
 internal static partial class ReorganizeCommand
 {
-    private const string DefaultLedgerFrom = "/ah2";
-    private const string DefaultLedgerTo = "/tools/ah2";
+    // Fixed, not options (D87 ruling 10): there is no second caller, and an unbounded source prefix
+    // could re-file session notes or directives.
+    private const string LedgerFrom = "/ah2";
+    private const string LedgerTo = "/tools/ah2";
     private const string MisfiledReason = "misfiled capture: not the user's own words";
 
     private static readonly string[] CaptureRoots = [UserFacts.AboutYouPath, UserFacts.InstructionPath];
@@ -25,8 +27,7 @@ internal static partial class ReorganizeCommand
         """
         usage: engram reorganize <--ledger|--captures> [options]
 
-          --ledger [--from /ah2] [--to /tools/ah2]
-                                 re-file another tool's ledger to scope "tool" under --to
+          --ledger               re-file the ah2 ledger from /ah2 to /tools/ah2, scope "tool"
           --captures             list /user captures that look like agent text, by rule and tier
           --apply                act; without it nothing is written
           --captures --apply --tier a
@@ -42,8 +43,6 @@ internal static partial class ReorganizeCommand
         var ledger = false;
         var captures = false;
         var apply = false;
-        var from = DefaultLedgerFrom;
-        var to = DefaultLedgerTo;
         string? tier = null;
         string? only = null;
 
@@ -60,20 +59,20 @@ internal static partial class ReorganizeCommand
                 case "--apply":
                     apply = true;
                     break;
-                case "--from" or "--to" or "--tier" or "--only":
+                case "--tier" or "--only":
                     if (i + 1 >= rest.Length)
                     {
                         stderr.WriteLine($"error: {rest[i]} needs a value");
                         return 1;
                     }
 
-                    var value = rest[++i];
-                    switch (rest[i - 1])
+                    if (rest[i] == "--tier")
                     {
-                        case "--from": from = value; break;
-                        case "--to": to = value; break;
-                        case "--tier": tier = value; break;
-                        default: only = value; break;
+                        tier = rest[++i];
+                    }
+                    else
+                    {
+                        only = rest[++i];
                     }
 
                     break;
@@ -90,21 +89,9 @@ internal static partial class ReorganizeCommand
             return 1;
         }
 
-        if (!from.StartsWith('/') || !to.StartsWith('/') || Under(to, from))
-        {
-            stderr.WriteLine("error: --from and --to take rooted memory paths, and --to may not lie under --from");
-            return 1;
-        }
-
         if (tier is not null && tier != "a")
         {
             stderr.WriteLine("error: --tier takes only 'a'; tier B suspects are closed by handle with --only");
-            return 1;
-        }
-
-        if ((rest.Contains("--from") || rest.Contains("--to")) && !ledger)
-        {
-            stderr.WriteLine("error: --from and --to belong to --ledger");
             return 1;
         }
 
@@ -207,7 +194,7 @@ internal static partial class ReorganizeCommand
         var exit = 0;
         if (ledger)
         {
-            exit = Ledger(connection, from, to, apply, room, SnapshotOnce, stdout);
+            exit = Ledger(connection, apply, room, SnapshotOnce, stdout);
         }
 
         if (suspects is not null && exit == 0)
@@ -218,26 +205,30 @@ internal static partial class ReorganizeCommand
         return exit;
     }
 
-    private static int Ledger(
-        SqliteConnection connection, string from, string to, bool apply, int room, Func<bool> snapshot, TextWriter stdout)
+    private static int Ledger(SqliteConnection connection, bool apply, int room, Func<bool> snapshot, TextWriter stdout)
     {
-        var selected = ReadLiveUnder(connection, from);
-        stdout.WriteLine($"ledger: {selected.Count} live fact(s) under {from} → {to}, scope \"{FactStore.ToolScope}\"");
+        var selected = ReadLiveUnder(connection, LedgerFrom);
+        stdout.WriteLine($"ledger: {selected.Count} live fact(s) under {LedgerFrom} → {LedgerTo}, scope \"{FactStore.ToolScope}\"");
 
         foreach (var (id, path, body) in selected)
         {
-            stdout.WriteLine(WithBody($"  {FactCatalog.HandleFor(id)}  {path} → {Target(path, from, to)}", body, room));
+            stdout.WriteLine(WithBody($"  {FactCatalog.HandleFor(id)}  {path} → {Target(path)}", body, room));
         }
 
         if (!apply)
         {
+            // The same decision the apply makes, read without writing (FactStore.PlanRefile).
+            var planned = selected
+                .Select(s => (s.Id, Result: FactStore.PlanRefile(connection, null, s.Id, Target(s.Path))))
+                .ToList();
+            PrintCounts(planned, "would be: ", stdout);
             stdout.WriteLine("Dry run only — nothing was changed. Re-run with --apply to re-file them.");
             return 0;
         }
 
         if (selected.Count == 0)
         {
-            stdout.WriteLine("re-filed 0");
+            PrintCounts([], string.Empty, stdout);
             return 0;
         }
 
@@ -246,27 +237,47 @@ internal static partial class ReorganizeCommand
             return 1;
         }
 
-        var counts = new Dictionary<RefileOutcome, int>();
+        var results = new List<(long Id, RefileResult Result)>();
         var now = DateTimeOffset.UtcNow;
-        var reason = $"re-filed: another tool's ledger, {from} → {to}";
+        var reason = $"re-filed: another tool's ledger, {LedgerFrom} → {LedgerTo}";
         using (var transaction = EngramDatabase.BeginWrite(connection))
         {
             foreach (var (id, path, _) in selected)
             {
-                var outcome = FactStore.Refile(
-                    connection, transaction, id, Target(path, from, to), FactStore.ToolScope, "observed", reason, now).Outcome;
-                counts[outcome] = counts.GetValueOrDefault(outcome) + 1;
+                results.Add((id, FactStore.Refile(
+                    connection, transaction, id, Target(path), FactStore.ToolScope, "observed", reason, now)));
             }
 
             transaction.Commit();
         }
 
-        stdout.WriteLine(
-            $"re-filed {counts.GetValueOrDefault(RefileOutcome.Refiled)}, "
-            + $"already at target {counts.GetValueOrDefault(RefileOutcome.AlreadyAtTarget)}, "
-            + $"skipped (no longer live) {counts.GetValueOrDefault(RefileOutcome.SourceNotLive)}, "
-            + $"left in place (target holds a different belief) {counts.GetValueOrDefault(RefileOutcome.TargetConflict)}");
+        PrintCounts(results, string.Empty, stdout);
         return 0;
+    }
+
+    /// <summary>
+    /// The four counts (D87 rulings 1 and 9), each printed apart, then every source left in place
+    /// beside the older target that kept it there — those are the rows still in user scope.
+    /// </summary>
+    private static void PrintCounts(List<(long Id, RefileResult Result)> results, string prefix, TextWriter stdout)
+    {
+        int Count(RefileOutcome outcome) => results.Count(r => r.Result.Outcome == outcome);
+
+        var line = $"{prefix}re-filed {Count(RefileOutcome.Refiled)}, "
+            + $"already re-filed {Count(RefileOutcome.AlreadyAtTarget)}, "
+            + $"superseded by newer target {Count(RefileOutcome.SupersededByNewerTarget)}, "
+            + $"left in place {Count(RefileOutcome.TargetConflict)}";
+        if (Count(RefileOutcome.SourceNotLive) > 0)
+        {
+            line += $", no longer live {Count(RefileOutcome.SourceNotLive)}";
+        }
+
+        stdout.WriteLine(line);
+        foreach (var (id, result) in results.Where(r => r.Result.Outcome == RefileOutcome.TargetConflict))
+        {
+            stdout.WriteLine(
+                $"  left in place: {FactCatalog.HandleFor(id)} (target {FactCatalog.HandleFor(result.TargetFactId!.Value)} is older)");
+        }
     }
 
     private static (int LiveCount, List<(StoredFact Fact, List<string> Rules)> Suspects) ReadSuspects(SqliteConnection connection)
@@ -475,11 +486,7 @@ internal static partial class ReorganizeCommand
         return rows;
     }
 
-    private static bool Under(string path, string prefix) =>
-        path == prefix
-        || (path.StartsWith(prefix, StringComparison.Ordinal) && path[prefix.Length] is '/' or '#');
-
-    private static string Target(string path, string from, string to) => to + path[from.Length..];
+    private static string Target(string path) => LedgerTo + path[LedgerFrom.Length..];
 
     /// <summary>
     /// The handle and paths in full, then the body on the same line clipped to what is left —

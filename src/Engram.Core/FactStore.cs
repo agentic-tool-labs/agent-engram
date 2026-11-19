@@ -52,13 +52,21 @@ public enum RefileOutcome
     SourceNotLive,
 
     /// <summary>
-    /// The target holds a different live belief for the same predicate; nothing was written, so
-    /// the newer belief at the target is never superseded by the source's older one.
+    /// The target holds a different live belief for the same predicate that is older than the
+    /// source; nothing was written and the source stays live. A target is never re-asserted over
+    /// and never closed.
     /// </summary>
     TargetConflict,
+
+    /// <summary>
+    /// The target holds a different live belief for the same predicate whose <c>valid_from</c> is
+    /// at or after the source's: it is the newer belief about that subject, so the source was
+    /// closed onto it and nothing was written (D87 ruling 9).
+    /// </summary>
+    SupersededByNewerTarget,
 }
 
-/// <param name="TargetFactId">The fact the source now points at, when it was closed.</param>
+/// <param name="TargetFactId">The fact the source now points at, or would, when it is closed.</param>
 public sealed record RefileResult(RefileOutcome Outcome, long? TargetFactId);
 
 /// <summary>One FTS5 hit: which fact, how well it scored, and where that put it.</summary>
@@ -328,6 +336,10 @@ public static class FactStore
     ///
     /// <para>Idempotent: a source already closed is skipped; a target already holding the identical
     /// body for the same predicate and object closes the source onto that fact and writes nothing new.
+    /// A target holding a different body is the newer belief when its <c>valid_from</c> is at or
+    /// after the source's, and absorbs the source the same way; an older one leaves the source live.
+    /// A target is never re-asserted over and never closed (D87 rulings 1 and 9). The decision is
+    /// <see cref="PlanRefile"/>, which the dry run calls too, so the two cannot count differently.
     /// D57 <c>History</c> of the new fact shows one version — the trail is the evidence suffix and the
     /// supersession row.</para>
     /// </remarks>
@@ -341,62 +353,31 @@ public static class FactStore
         string reason,
         DateTimeOffset now)
     {
-        using var read = Build(
-            connection,
-            transaction,
-            """
-            SELECT e.path, e.kind, f.predicate, f.body, f.details, f.evidence, f.regenerable,
-                   f.session_id, f.analyzer_tier, o.path, o.kind
-              FROM fact f
-              JOIN entity e ON e.id = f.subject_id
-              LEFT JOIN entity o ON o.id = f.object_id
-             WHERE f.id = $id AND f.valid_to IS NULL;
-            """,
-            [("$id", sourceFactId)]);
-
-        FactWrite write;
-        using (var reader = read.ExecuteReader())
+        if (ReadRefileSource(connection, transaction, sourceFactId) is not { } source)
         {
-            if (!reader.Read())
-            {
-                return new RefileResult(RefileOutcome.SourceNotLive, null);
-            }
-
-            var evidence = reader.IsDBNull(5) ? null : reader.GetString(5);
-            var trail = "re-filed from " + FactCatalog.HandleFor(sourceFactId);
-            write = new FactWrite(
-                SubjectPath: targetPath,
-                SubjectKind: reader.GetString(1),
-                Predicate: reader.GetString(2),
-                Body: reader.GetString(3),
-                Scope: scope,
-                LearnedVia: learnedVia,
-                Evidence: evidence is null ? trail : evidence + "; " + trail,
-                Regenerable: reader.GetInt64(6) != 0,
-                SessionId: reader.IsDBNull(7) ? null : reader.GetInt64(7),
-                Details: reader.IsDBNull(4) ? null : reader.GetString(4),
-                ObjectPath: reader.IsDBNull(9) ? null : reader.GetString(9),
-                ObjectKind: reader.IsDBNull(10) ? null : reader.GetString(10),
-                AnalyzerTier: reader.IsDBNull(8) ? null : reader.GetInt32(8));
+            return new RefileResult(RefileOutcome.SourceNotLive, null);
         }
 
+        var plan = Decide(connection, transaction, source, targetPath);
         long targetId;
-        RefileOutcome outcome;
-        if (FindLiveFactId(connection, transaction, targetPath, write.Predicate, write.ObjectPath) is { } existing)
+        switch (plan.Outcome)
         {
-            var existingBody = ScalarString(connection, transaction, "SELECT body FROM fact WHERE id = $id;", ("$id", existing));
-            if (!string.Equals(existingBody, write.Body, StringComparison.Ordinal))
-            {
-                return new RefileResult(RefileOutcome.TargetConflict, existing);
-            }
-
-            targetId = existing;
-            outcome = RefileOutcome.AlreadyAtTarget;
-        }
-        else
-        {
-            targetId = Remember(connection, transaction, write, now).FactId;
-            outcome = RefileOutcome.Refiled;
+            case RefileOutcome.TargetConflict:
+                return plan;
+            case RefileOutcome.Refiled:
+                var trail = "re-filed from " + FactCatalog.HandleFor(sourceFactId);
+                var write = source.Write with
+                {
+                    SubjectPath = targetPath,
+                    Scope = scope,
+                    LearnedVia = learnedVia,
+                    Evidence = source.Write.Evidence is null ? trail : source.Write.Evidence + "; " + trail,
+                };
+                targetId = Remember(connection, transaction, write, now).FactId;
+                break;
+            default:
+                targetId = plan.TargetFactId!.Value;
+                break;
         }
 
         var timestamp = now.ToUnixTimeSeconds();
@@ -422,7 +403,81 @@ public static class FactStore
             ("$reason", reason),
             ("$now", timestamp));
 
-        return new RefileResult(outcome, targetId);
+        return new RefileResult(plan.Outcome, targetId);
+    }
+
+    /// <summary>
+    /// What <see cref="Refile"/> would do with one source, without writing: the one implementation
+    /// of the decision, shared by the apply and the dry run's counts.
+    /// </summary>
+    public static RefileResult PlanRefile(
+        SqliteConnection connection, SqliteTransaction? transaction, long sourceFactId, string targetPath) =>
+        ReadRefileSource(connection, transaction, sourceFactId) is { } source
+            ? Decide(connection, transaction, source, targetPath)
+            : new RefileResult(RefileOutcome.SourceNotLive, null);
+
+    private sealed record RefileSource(FactWrite Write, long ValidFrom);
+
+    private static RefileSource? ReadRefileSource(SqliteConnection connection, SqliteTransaction? transaction, long factId)
+    {
+        using var read = Build(
+            connection,
+            transaction,
+            """
+            SELECT e.path, e.kind, f.predicate, f.body, f.details, f.evidence, f.regenerable,
+                   f.session_id, f.analyzer_tier, o.path, o.kind, f.scope, f.learned_via, f.valid_from
+              FROM fact f
+              JOIN entity e ON e.id = f.subject_id
+              LEFT JOIN entity o ON o.id = f.object_id
+             WHERE f.id = $id AND f.valid_to IS NULL;
+            """,
+            [("$id", factId)]);
+
+        using var reader = read.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new RefileSource(
+            new FactWrite(
+                SubjectPath: reader.GetString(0),
+                SubjectKind: reader.GetString(1),
+                Predicate: reader.GetString(2),
+                Body: reader.GetString(3),
+                Scope: reader.GetString(11),
+                LearnedVia: reader.GetString(12),
+                Evidence: reader.IsDBNull(5) ? null : reader.GetString(5),
+                Regenerable: reader.GetInt64(6) != 0,
+                SessionId: reader.IsDBNull(7) ? null : reader.GetInt64(7),
+                Details: reader.IsDBNull(4) ? null : reader.GetString(4),
+                ObjectPath: reader.IsDBNull(9) ? null : reader.GetString(9),
+                ObjectKind: reader.IsDBNull(10) ? null : reader.GetString(10),
+                AnalyzerTier: reader.IsDBNull(8) ? null : reader.GetInt32(8)),
+            reader.GetInt64(13));
+    }
+
+    private static RefileResult Decide(
+        SqliteConnection connection, SqliteTransaction? transaction, RefileSource source, string targetPath)
+    {
+        if (FindLiveFactId(connection, transaction, targetPath, source.Write.Predicate, source.Write.ObjectPath) is not { } existing)
+        {
+            return new RefileResult(RefileOutcome.Refiled, null);
+        }
+
+        using var read = Build(
+            connection, transaction, "SELECT body, valid_from FROM fact WHERE id = $id;", [("$id", existing)]);
+        using var reader = read.ExecuteReader();
+        reader.Read();
+
+        if (string.Equals(reader.GetString(0), source.Write.Body, StringComparison.Ordinal))
+        {
+            return new RefileResult(RefileOutcome.AlreadyAtTarget, existing);
+        }
+
+        return reader.GetInt64(1) >= source.ValidFrom
+            ? new RefileResult(RefileOutcome.SupersededByNewerTarget, existing)
+            : new RefileResult(RefileOutcome.TargetConflict, existing);
     }
 
     /// <summary>
@@ -1030,16 +1085,6 @@ public static class FactStore
         var value = command.ExecuteScalar();
 
         return value is null or DBNull ? null : Convert.ToInt64(value);
-    }
-
-    private static string? ScalarString(
-        SqliteConnection connection,
-        SqliteTransaction? transaction,
-        string sql,
-        params (string Name, object Value)[] parameters)
-    {
-        using var command = Build(connection, transaction, sql, parameters);
-        return command.ExecuteScalar() as string;
     }
 
     private static SqliteCommand Build(

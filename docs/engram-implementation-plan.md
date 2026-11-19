@@ -5983,8 +5983,13 @@ object, body, details, subject kind, regenerable flag, session and analyzer tier
 `learned_via`, `valid_from = now`, and evidence `"<old evidence>; re-filed from f<old>"`; then it closes the
 source with `superseded_by` set to the new fact and a supersession row whose reason names the move. A closed
 source is skipped. If the target already holds the identical body for that predicate and object, the source
-is closed onto that fact and nothing new is written. If the target holds a *different* live body, nothing is
-written and the source stays live, so an older belief never supersedes a newer one at the target.
+is closed onto that fact and nothing new is written. If the target holds a *different* live body, the two
+`valid_from` values decide. When the target's is the same or later, it is the newer belief about the
+subject: the source is closed onto it, nothing is inserted, and the case is counted as "superseded by newer
+target". This is what lets the step converge once wrangl writes `/tools/ah2` itself (U8). When the target
+is older, nothing is written and the source stays live ("left in place", listed by handle). A target is
+never re-asserted over and never closed. `FactStore.PlanRefile` is the one decision, called by the apply
+and by the dry run's four counts.
 
 **Rejected: `MoveSubtree` plus an `UPDATE` of `scope`.** `MoveSubtree` is licensed for `path` only (D2).
 Adding `scope` to the append-only exceptions beside `analyzer_tier` would change an invariant this does not
@@ -5993,8 +5998,10 @@ D57 `History` of a re-filed fact shows one version, because history is keyed by 
 evidence and the supersession row. `SyncScope` syncs `scope='user'`, so the ledger stops syncing as user
 memory after the move, which is intended.
 
-**The verb.** `engram reorganize --ledger [--from /ah2 --to /tools/ah2]` re-files every live fact at or
-under `--from` (`MoveSubtree`'s `/`-or-`#` boundary, so `/ah2x` is not selected) to scope `tool`,
+**The verb.** `engram reorganize --ledger` re-files every live fact at or under `/ah2` to `/tools/ah2`
+(`MoveSubtree`'s `/`-or-`#` boundary, so `/ah2x` is not selected). The pair is fixed, not an option: there
+is no second caller, and an unbounded source prefix could re-file session notes or directives. The facts go
+to scope `tool`,
 `learned_via observed` (D19: a tool's observation, never the user's words). The original row keeps its
 historical `stated`. `engram reorganize --captures` lists suspects under deterministic rules, reported by
 name. Tier A is agent signature and can be closed as a set: R1 is an agent-report opener as the first word,
@@ -6032,5 +6039,6 @@ copy, so that drift was already in the store and is not from this change.
 
 **Not done here.** Wrangl's `bin/ah-memory-engram` has to write `/tools/ah2/…`, scope `tool`, `learned_via
 observed` before the real `--ledger --apply`, or new rows keep landing at `/ah2` (U8). Until then the step is
-safe to re-run. Engram adds no import-time remap and special-cases `ah2` nowhere but the `--from` default. A
+safe to re-run, and once wrangl writes the new address, a re-recorded path converges through the
+newer-target rule. Engram adds no import-time remap and special-cases `ah2` nowhere but this step. A
 forward fix for misfiled captures waits on E7.

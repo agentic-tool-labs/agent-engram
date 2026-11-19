@@ -165,17 +165,69 @@ public class ReorganizeCommandTests
         Assert.Equal(before, FileSnapshot(sandbox.Home.Root));
     }
 
+    /// <summary>D87 ruling 10: the ledger step moves /ah2 and nothing else; there is no --from.</summary>
     [Theory]
-    [InlineData("--captures", "--from", "/x")]
-    [InlineData("--captures", "--to", "/tools/x")]
-    public void FromAndTo_WithoutLedger_AreRefused(params string[] args)
+    [InlineData("--ledger", "--from", "/sessions")]
+    [InlineData("--ledger", "--to", "/tools/x")]
+    public void FromAndTo_AreNotOptions(params string[] args)
     {
         using var sandbox = new SandboxHome();
+        long note;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            note = SessionFacts.Append(connection, "s1", "A session note.", null, null, null, T0);
+        }
 
-        var (exit, _, stderr) = Run(sandbox, args);
+        var (exit, _, stderr) = Run(sandbox, [.. args, "--apply"]);
 
         Assert.Equal(1, exit);
-        Assert.Contains("--from and --to belong to --ledger", stderr, StringComparison.Ordinal);
+        Assert.Contains($"unexpected argument '{args[1]}'", stderr, StringComparison.Ordinal);
+        using var check = EngramDatabase.Open(sandbox.Home);
+        Assert.Null(FactStore.ReadById(check, note)!.ValidTo);
+    }
+
+    /// <summary>
+    /// Ruling 9 end to end: once wrangl writes /tools/ah2 itself, a re-recorded path's newer target
+    /// absorbs the stale /ah2 row, an older target leaves it, the dry run prints all four counts,
+    /// and a second apply selects only what was left in place.
+    /// </summary>
+    [Fact]
+    public void Ledger_ConvergesWhenTheToolAlreadyWritesTheTarget()
+    {
+        using var sandbox = new SandboxHome();
+        long newerSource, olderTargetSource, olderTarget;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Ledger(connection, "/ah2/repo/t/fresh", "moves plainly");
+            FactStore.Remember(connection, new FactWrite(
+                "/tools/ah2/repo/t/same", "concept", "records", "identical", "tool", "observed"), T0);
+            Ledger(connection, "/ah2/repo/t/same", "identical");
+            newerSource = Ledger(connection, "/ah2/repo/t/rerecorded", "stale state");
+            FactStore.Remember(connection, new FactWrite(
+                "/tools/ah2/repo/t/rerecorded", "concept", "records", "current state", "tool", "observed"), T0.AddSeconds(5));
+            olderTarget = FactStore.Remember(connection, new FactWrite(
+                "/tools/ah2/repo/t/older", "concept", "records", "old target", "tool", "observed"), T0).FactId;
+            olderTargetSource = FactStore.Remember(connection, new FactWrite(
+                "/ah2/repo/t/older", "concept", "records", "newer source", "user", "stated"), T0.AddSeconds(5)).FactId;
+        }
+
+        var dry = Run(sandbox, "--ledger");
+        Assert.Contains(
+            "would be: re-filed 1, already re-filed 1, superseded by newer target 1, left in place 1",
+            dry.Stdout, StringComparison.Ordinal);
+
+        var first = Run(sandbox, "--ledger", "--apply");
+        Assert.Contains("re-filed 1, already re-filed 1, superseded by newer target 1, left in place 1", first.Stdout, StringComparison.Ordinal);
+        Assert.Contains($"left in place: f{olderTargetSource} (target f{olderTarget} is older)", first.Stdout, StringComparison.Ordinal);
+
+        var second = Run(sandbox, "--ledger", "--apply");
+        Assert.Contains("ledger: 1 live fact(s)", second.Stdout, StringComparison.Ordinal);
+        Assert.Contains("re-filed 0, already re-filed 0, superseded by newer target 0, left in place 1", second.Stdout, StringComparison.Ordinal);
+
+        using var check = EngramDatabase.Open(sandbox.Home);
+        Assert.NotNull(FactStore.ReadById(check, newerSource)!.ValidTo);
+        Assert.Equal("current state", FactStore.ReadAt(check, "/tools/ah2/repo/t/rerecorded").Single().Body);
+        Assert.Null(FactStore.ReadById(check, olderTarget)!.ValidTo);
     }
 
     /// <summary>
@@ -274,17 +326,6 @@ public class ReorganizeCommandTests
         var stillClosed = FactStore.ReadById(check, closed)!;
         Assert.Equal(("/ah2/repo/t/closed", (long?)null), (stillClosed.SubjectPath, stillClosed.SupersededBy));
         Assert.Empty(FactStore.ReadAt(check, "/tools/ah2/repo/t/closed"));
-    }
-
-    [Fact]
-    public void Ledger_ToUnderFrom_IsRefused()
-    {
-        using var sandbox = new SandboxHome();
-
-        var (exit, _, stderr) = Run(sandbox, "--ledger", "--from", "/ah2", "--to", "/ah2/moved");
-
-        Assert.Equal(1, exit);
-        Assert.Contains("--to may not lie under --from", stderr, StringComparison.Ordinal);
     }
 
     [Fact]

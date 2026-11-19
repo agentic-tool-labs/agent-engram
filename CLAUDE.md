@@ -192,8 +192,10 @@ writes the same predicate, object, body and details at the new address through `
 source onto it with a supersession row naming the move — so `fact_fts` and `fact_token` stay right by
 construction, and `scope` stays off the append-only exception list, where only `path` (D2) and
 `analyzer_tier` sit. It is idempotent: a closed source is skipped, an identical live target absorbs the
-source, and a *different* live target is left alone with the source, because re-asserting an older belief
-over a newer one is the wrong direction. The cost is accepted and stated: one extra row per move, and
+source, and so does a *different* live target whose `valid_from` is at or after the source's, since that is
+the newer belief. An older different target leaves the source live. A target is never re-asserted over and
+never closed, because re-asserting an older belief over a newer one is the wrong direction.
+`FactStore.PlanRefile` is that decision, and the dry run counts with it. The cost is accepted and stated: one extra row per move, and
 `History` of the new fact shows one version — the trail is the evidence suffix and the supersession row
 (D87).
 
