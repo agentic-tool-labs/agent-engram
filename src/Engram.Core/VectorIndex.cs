@@ -476,6 +476,22 @@ public static class VectorIndex
         return counts;
     }
 
+    /// <summary>The statement behind <see cref="PruneIneligible"/>.</summary>
+    /// <remarks>
+    /// The unary plus keeps the inner select on a scan of fact (D92). Without it schema v20's
+    /// <c>ix_fact_object_ref</c>, which exists for compact's foreign-key checks, qualifies and
+    /// the planner seeks it, but the predicate matches most of the table (509,024 of 890,829 rows
+    /// on the measured store), so a seek plus a rowid lookup per row loses to one pass: the inner
+    /// select ran 586.03 ms seeking against 210.08 ms with the plus, the whole statement
+    /// 952.29 ms against 446.22 ms (medians of seven alternated warm runs). Not
+    /// <c>NOT INDEXED</c>, which would also refuse a better index later.
+    /// </remarks>
+    internal const string PruneIneligibleSql =
+        $"""
+         DELETE FROM {TableName}
+         WHERE fact_id IN (SELECT id FROM fact WHERE regenerable IS 1 AND +object_id IS NOT NULL);
+         """;
+
     /// <summary>
     /// Deletes vectors whose fact is no longer lane-eligible. <see cref="Clear"/>-shaped — a
     /// targeted <c>DELETE</c>, never <see cref="Drop"/> — so the table's space pin survives,
@@ -490,11 +506,7 @@ public static class VectorIndex
         transaction ??= ownedTransaction!;
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText =
-            $"""
-             DELETE FROM {TableName}
-             WHERE fact_id IN (SELECT id FROM fact WHERE regenerable IS 1 AND object_id IS NOT NULL);
-             """;
+        command.CommandText = PruneIneligibleSql;
 
         var deleted = command.ExecuteNonQuery();
         if (deleted > 0)

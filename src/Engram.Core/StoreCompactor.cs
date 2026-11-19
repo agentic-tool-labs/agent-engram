@@ -11,6 +11,7 @@ public sealed record CompactReport(
     int SupersessionsRemoved,
     int VectorsRemoved,
     int EntitiesRemoved,
+    int EntitiesKeptForRenameHistory,
     int FileStatesRemoved,
     int ReposDeregistered,
     string? SnapshotName,
@@ -101,11 +102,13 @@ public static class StoreCompactor
             }
 
             var entities = 0;
+            var entitiesKept = 0;
             var fileStates = 0;
             var repos = 0;
             if (prefix is not null)
             {
                 entities = Scalar(connection, EntitySql("SELECT count(*) FROM entity"), ("$p", prefix));
+                entitiesKept = Scalar(connection, EntitySql("SELECT count(*) FROM entity", aliased: true), ("$p", prefix));
                 fileStates = Scalar(connection, FileStateSql("SELECT count(*) FROM file_state"), ("$p", prefix));
                 repos = Scalar(connection, RegistrySql("SELECT count(*) FROM repo_registry"), ("$p", prefix));
 
@@ -123,6 +126,7 @@ public static class StoreCompactor
                 supersessions,
                 vectors,
                 entities,
+                entitiesKept,
                 fileStates,
                 repos,
                 SnapshotName: null,
@@ -259,14 +263,24 @@ public static class StoreCompactor
         $"({column} = $p OR (substr({column}, 1, length($p)) = $p "
         + $"AND substr({column}, length($p) + 1, 1) IN ('/', '#')))";
 
-    private static string EntitySql(string head) =>
+    /// <summary>
+    /// Code entities under the prefix that no surviving fact references. <paramref name="aliased"/>
+    /// false selects the ones to delete; true selects the ones kept only because a rename filed
+    /// an alias against them, which <c>ON DELETE CASCADE</c> would otherwise remove silently and
+    /// no index run rebuilds.
+    /// </summary>
+    internal static string EntitySql(string head, bool aliased = false) =>
         $"{head} WHERE kind IN ('repo', 'module', 'file', 'symbol', 'section') "
         + $"AND {Subtree("entity.path")} "
         // Written to hold before and after the fact delete: in a dry run the targets still
-        // exist, so "no remaining reference" has to look through them.
-        + "AND NOT EXISTS (SELECT 1 FROM fact "
-        + "WHERE (fact.subject_id = entity.id OR fact.object_id = entity.id) "
-        + "AND fact.id NOT IN (SELECT id FROM temp.compact_target));";
+        // exist, so "no remaining reference" has to look through them. Two NOT EXISTS rather
+        // than one with an OR: the OR kept either index from being used and scanned fact once
+        // per entity (1,340 entities took 76.8 s).
+        + "AND NOT EXISTS (SELECT 1 FROM fact WHERE fact.subject_id = entity.id "
+        + "AND fact.id NOT IN (SELECT id FROM temp.compact_target)) "
+        + "AND NOT EXISTS (SELECT 1 FROM fact WHERE fact.object_id = entity.id "
+        + "AND fact.id NOT IN (SELECT id FROM temp.compact_target)) "
+        + $"AND {(aliased ? string.Empty : "NOT ")}EXISTS (SELECT 1 FROM entity_alias a WHERE a.entity_id = entity.id);";
 
     /// <summary>
     /// A file's memory path is <c>repo_path || '/' || path</c> (the grammar's ForFile). The
