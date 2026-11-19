@@ -78,6 +78,106 @@ public sealed class RegistryOriginGlobalConfigTests
         Assert.Empty(RegistryRetirementTests.IndexEvents(sandbox));
     }
 
+    [Fact]
+    public void RepoIndexAll_UnknownOrigin_SkipsTheRoot_ExitsNonZero_AndRecordsNoIndexEvent()
+    {
+        using var sandbox = new SandboxHome();
+        var repo = EnrolledUnknownCheckout(sandbox, "all-unknown", out var global);
+        using var _ = global;
+        var stdout = new StringWriter();
+
+        var exit = RepoCommand.Run(sandbox.Home.Root, ["index", "--all", "--apply"], stdout, new StringWriter());
+
+        Assert.Equal(1, exit);
+        Assert.Contains(CodeIndexer.UnknownOriginNote(repo, RegistryRetirementTests.GetUrlGaveNothing), stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains("1 skipped (origin unknown)", stdout.ToString(), StringComparison.Ordinal);
+        AssertNothingIndexed(sandbox);
+    }
+
+    [Fact]
+    public void IndexFreshen_UnknownOrigin_IsSilent_AndIndexesNothing()
+    {
+        using var sandbox = new SandboxHome();
+        EnrolledUnknownCheckout(sandbox, "freshen-unknown", out var global);
+        using var _ = global;
+        var stdout = new StringWriter();
+
+        var exit = IndexCommand.Run(sandbox.Home.Root, ["--freshen", "--apply"], stdout, new StringWriter());
+
+        Assert.Equal(0, exit);
+        Assert.Equal(string.Empty, stdout.ToString());
+        AssertNothingIndexed(sandbox);
+    }
+
+    [Fact]
+    public void ServerFreshnessTick_UnknownOrigin_IndexesNothing()
+    {
+        using var sandbox = new SandboxHome();
+        var repo = EnrolledUnknownCheckout(sandbox, "tick-unknown", out var global);
+        using var _ = global;
+        var log = new List<string>();
+
+        new IndexFreshness(sandbox.Home, log.Add).TickOnce();
+
+        Assert.Contains(CodeIndexer.UnknownOriginNote(repo, RegistryRetirementTests.GetUrlGaveNothing), log);
+        AssertNothingIndexed(sandbox);
+    }
+
+    [Fact]
+    public void DrainAll_UnknownSecondaryRoot_IsSkipped_WithNoEventForIt()
+    {
+        using var sandbox = new SandboxHome();
+        var secondary = EnrolledUnknownCheckout(sandbox, "secondary-unknown", out var global);
+        using var _ = global;
+
+        // Any local origin works: the global url is appended to it, and get-url answers.
+        var primary = RegistryRetirementTests.Checkout(sandbox, "primary", "git@example.com:acme/primary");
+
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var exit = IndexCommand.Run(sandbox.Home.Root, ["--drain-all", "--apply", primary], stdout, stderr);
+
+        Assert.True(exit == 0, $"{stdout}\n{stderr}");
+        Assert.DoesNotContain(RegistryRetirementTests.IndexEvents(sandbox), l => l.Contains(EnrolledIdentity, StringComparison.Ordinal));
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Assert.Equal(1L, (long)Scalar(connection, "SELECT COUNT(*) FROM repo_registry;"));
+        Assert.Equal(0L, (long)Scalar(connection, $"SELECT COUNT(*) FROM repo_registry WHERE disk_path = '{secondary}';"));
+        Assert.Null(RepoEnrollment.Get(connection, EnrolledIdentity)!.LastFullScanAt);
+    }
+
+    [Fact]
+    public void McpIndexRepo_UnknownOrigin_RecordsNothing()
+    {
+        using var sandbox = new SandboxHome();
+        var repo = UnknownCheckout(sandbox, "mcp-unknown", out var global);
+        using var _ = global;
+
+        var response = EngramMcpTools.IndexRepo(sandbox.Home, new McpSessionId("session-unknown"), repo, "enroll");
+
+        Assert.StartsWith(CodeIndexer.UnknownOriginNote(repo, RegistryRetirementTests.GetUrlGaveNothing), response, StringComparison.Ordinal);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Assert.Empty(RepoEnrollment.ListAll(connection));
+    }
+
+    private const string EnrolledIdentity = "git@example.com:acme/enrolled-earlier";
+
+    /// <summary>Enrolled under an identity it once resolved to, never scanned, so it is due.</summary>
+    private static string EnrolledUnknownCheckout(SandboxHome sandbox, string name, out IDisposable global)
+    {
+        var repo = UnknownCheckout(sandbox, name, out global);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        RepoEnrollment.Enroll(connection, EnrolledIdentity, repo, DateTimeOffset.UtcNow.AddDays(-2));
+        return repo;
+    }
+
+    private static void AssertNothingIndexed(SandboxHome sandbox)
+    {
+        Assert.Empty(RegistryRetirementTests.IndexEvents(sandbox));
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Assert.Equal(0L, (long)Scalar(connection, "SELECT COUNT(*) FROM repo_registry;"));
+        Assert.Null(RepoEnrollment.Get(connection, EnrolledIdentity)!.LastFullScanAt);
+    }
+
     /// <summary>
     /// A real-git Unknown that leaves the checkout readable: the URL lives only in the global
     /// file, so config answers it (exit 0) while get-url says there is no such remote (exit 2).
