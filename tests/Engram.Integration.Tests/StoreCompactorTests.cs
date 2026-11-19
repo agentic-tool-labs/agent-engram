@@ -137,6 +137,54 @@ public class StoreCompactorTests
     }
 
     /// <summary>
+    /// F5 (compact-quadratic-deletes.md): a judged relation, a review date or a sync request is
+    /// authored and none of those tables cascades, so a regenerable fact any of them names is
+    /// kept rather than failing the whole call on a foreign key. The unreferenced sibling under
+    /// the same prefix is the nearest input that must still be pruned.
+    /// </summary>
+    [Theory]
+    [InlineData("relation-from", true)]
+    [InlineData("relation-to", true)]
+    [InlineData("review", true)]
+    [InlineData("sync", true)]
+    [InlineData("relation-from", false)]
+    [InlineData("relation-to", false)]
+    [InlineData("review", false)]
+    [InlineData("sync", false)]
+    public void ARegenerableFact_NamedByAuthoredSideTables_IsProtected(string reference, bool pathMode)
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+
+        var belief = Authored(connection, "/knowledge/testing/widget", "Widget is the v1 importer's entry point.");
+        var referenced = Code(connection, "/projects/acme/code/api/src/A.cs#Widget", "declared as class Widget");
+        var sibling = Code(connection, "/projects/acme/code/api/src/A.cs#Gadget", "declared as class Gadget");
+        if (!pathMode)
+        {
+            // Closed by a successor, so the no-path mode selects both.
+            Code(connection, "/projects/acme/code/api/src/A.cs#Widget", "declared as sealed class Widget");
+            Code(connection, "/projects/acme/code/api/src/A.cs#Gadget", "declared as sealed class Gadget");
+        }
+
+        Execute(connection, reference switch
+        {
+            "relation-from" => $"INSERT INTO fact_relation (fact_id, related_id, relation, judged_at) VALUES ({referenced}, {belief}, 'scoped', 0);",
+            "relation-to" => $"INSERT INTO fact_relation (fact_id, related_id, relation, judged_at) VALUES ({belief}, {referenced}, 'scoped', 0);",
+            "review" => $"INSERT INTO fact_review (fact_id, review_after, set_at) VALUES ({referenced}, 0, 0);",
+            _ => $"INSERT INTO fact_sync_request (fact_id, requested_at) VALUES ({referenced}, 0);",
+        });
+
+        var report = StoreCompactor.Compact(
+            connection, sandbox.Home, pathMode ? "/projects/acme/code/api" : null, apply: true, T0);
+
+        Assert.Equal(1, report.ProtectedByAuthoredHistory);
+        Assert.Equal(1, report.FactsPruned);
+        Assert.NotNull(FactStore.ReadById(connection, referenced));
+        Assert.Null(FactStore.ReadById(connection, sibling));
+        Assert.Equal(0, Scalar(connection, "SELECT count(*) FROM pragma_foreign_key_check;"));
+    }
+
+    /// <summary>
     /// The load-bearing half of path mode. Pruned facts with surviving file state would make
     /// the next index run see unchanged blob hashes and rewrite nothing — a silent,
     /// permanent loss rather than the temporary one compact promises.
