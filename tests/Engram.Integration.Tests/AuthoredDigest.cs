@@ -40,8 +40,12 @@ internal static class AuthoredDigest
         {
             ["facts"] = Facts("f.regenerable = 0", journalSubset),
             ["supersession"] = journalSubset
+                // Replay links a supersession only through superseded_by, so a forget row (no
+                // new fact) is not rebuilt by any replay, full or authored: a pre-existing limit of
+                // replay, outside this item, and kept out of the journalled subset rather than hidden.
                 ? $"SELECT json_array({KeyOf("s.old_fact_id")}, {KeyOf("s.new_fact_id")}, s.reason) FROM supersession s "
-                  + "WHERE EXISTS (SELECT 1 FROM fact x WHERE x.id IN (s.old_fact_id, s.new_fact_id) AND x.regenerable = 0)"
+                  + "WHERE s.new_fact_id IS NOT NULL "
+                  + "AND EXISTS (SELECT 1 FROM fact x WHERE x.id IN (s.old_fact_id, s.new_fact_id) AND x.regenerable = 0)"
                 : $"SELECT json_array({KeyOf("s.old_fact_id")}, {KeyOf("s.new_fact_id")}, s.reason, s.evidence, s.created_at) "
                   + "FROM supersession s "
                   + "WHERE EXISTS (SELECT 1 FROM fact x WHERE x.id IN (s.old_fact_id, s.new_fact_id) AND x.regenerable = 0)",

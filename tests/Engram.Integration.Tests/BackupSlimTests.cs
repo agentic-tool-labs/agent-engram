@@ -494,6 +494,172 @@ public class BackupSlimTests
         Assert.Contains("'authored+vectors' scope marker would be cleared", dry.Stdout, StringComparison.Ordinal);
     }
 
+    // --- 2a: the authored journal ------------------------------------------------------------
+
+    private static List<System.Text.Json.Nodes.JsonObject> Lines(string path) =>
+        File.ReadLines(path)
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .Select(l => (System.Text.Json.Nodes.JsonObject)System.Text.Json.Nodes.JsonNode.Parse(l)!)
+            .ToList();
+
+    [Fact]
+    public void AuthoredJournal_KeepsAuthoredFactsAndOnlyTheRegenerableOnesAuthoredTruthNeeds()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Seed(connection);
+        }
+
+        Assert.Equal(0, Cli(sandbox.Home, "take").Exit);
+
+        var lines = Lines(FactJournal.PathIn(sandbox.Home));
+        var regenerable = lines.Skip(1)
+            .Where(l => l["regenerable"]!.GetValue<bool>())
+            .Select(l => l["body"]!.GetValue<string>())
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        // Kept: a supersession edge to an authored fact, and one named by each side table.
+        // Left out: a live code fact and a regenerable-only rewrite chain — the snapshot has them.
+        Assert.Equal(["class Baz as indexed", "class Corge", "class Quux", "class Qux"], regenerable);
+        Assert.Contains(lines.Skip(1), l => l["body"]!.GetValue<string>() == "tea in the morning");
+
+        foreach (var file in new[] { FactJournal.FileName, RelationJournal.FileName, SyncRequestJournal.FileName, ReviewJournal.FileName })
+        {
+            Assert.Equal("authored", Lines(Path.Combine(sandbox.Home.BackupDir, file))[0]["scope"]!.GetValue<string>());
+        }
+    }
+
+    /// <summary>
+    /// I1 and I9: the journal replayed into a fresh initialised home reproduces authored truth, and
+    /// every relation, review and sync line finds its fact in the same journal.
+    /// </summary>
+    [Fact]
+    public void AuthoredJournal_ReplaysIntoAFreshHome_WithEveryReferenceResolved()
+    {
+        using var source = new SandboxHome(initialize: false);
+        IReadOnlyDictionary<string, IReadOnlyList<string>> expected;
+        using (var connection = EngramDatabase.OpenInitialized(source.Home))
+        {
+            Seed(connection);
+            expected = AuthoredDigest.Read(connection, journalSubset: true);
+        }
+
+        Assert.Equal(0, Cli(source.Home, "take").Exit);
+
+        using var target = new SandboxHome();
+        using var baseline = new SandboxHome();
+        var replay = Cli(target.Home, "replay", FactJournal.PathIn(source.Home), "--apply");
+
+        Assert.Equal(0, replay.Exit);
+        Assert.DoesNotContain("could not", replay.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("pointed outside", replay.Stdout, StringComparison.Ordinal);
+
+        IReadOnlyDictionary<string, IReadOnlyList<string>> seeded;
+        using (var fresh = EngramDatabase.OpenInitialized(baseline.Home))
+        {
+            seeded = AuthoredDigest.Read(fresh, journalSubset: true);
+        }
+
+        using var replayed = EngramDatabase.OpenInitialized(target.Home);
+        var actual = AuthoredDigest.Read(replayed, journalSubset: true)
+            .ToDictionary(p => p.Key, p => (IReadOnlyList<string>)p.Value.Except(seeded[p.Key]).ToList());
+        AuthoredDigest.Equal(expected, actual);
+    }
+
+    /// <summary>
+    /// A TextWriter that writes a fact into the live store the moment the snapshot is reported —
+    /// after the copy, before the journal. A journal read from the live store would carry it.
+    /// </summary>
+    private sealed class WriteAfterSnapshot(EngramHome home) : StringWriter
+    {
+        public override void WriteLine(string? value)
+        {
+            base.WriteLine(value);
+            if (value?.StartsWith("Wrote ", StringComparison.Ordinal) == true)
+            {
+                using var other = EngramDatabase.Open(home, pooling: false);
+                Remember(other, "/knowledge/late", "states", "written after the snapshot", T0.AddHours(5));
+            }
+        }
+    }
+
+    [Fact]
+    public void Journal_IsWrittenFromTheSnapshot_NotTheLiveStore()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Seed(connection);
+
+        var snapshot = Engram.Cli.BackupCommand.TakeNow(
+            sandbox.Home,
+            BackupSettings.Read(ConfigFile.Load(sandbox.Home.ConfigPath)),
+            connection,
+            BackupScope.Authored,
+            new WriteAfterSnapshot(sandbox.Home),
+            new StringWriter());
+
+        Assert.NotNull(snapshot);
+        Assert.Single(FactStore.SearchRanked(connection, "snapshot", 10));
+        Assert.DoesNotContain("written after the snapshot", File.ReadAllText(FactJournal.PathIn(sandbox.Home)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Replay_OfAnAuthoredJournal_SaysWhatIsNotInIt()
+    {
+        using var source = new SandboxHome(initialize: false);
+        using (var connection = EngramDatabase.OpenInitialized(source.Home))
+        {
+            Seed(connection);
+        }
+
+        Cli(source.Home, "take");
+        using var target = new SandboxHome();
+
+        var dry = Cli(target.Home, "replay", FactJournal.PathIn(source.Home));
+
+        Assert.Contains("Journal scope: authored.", dry.Stdout, StringComparison.Ordinal);
+        Assert.Contains("code facts are not in this journal", dry.Stdout, StringComparison.Ordinal);
+    }
+
+    /// <summary>I7: a journal whose header has no scope is a full one, and replay says only that.</summary>
+    [Fact]
+    public void Replay_OfAJournalWithNoScope_ReadsAsFull()
+    {
+        using var source = new SandboxHome(initialize: false);
+        var journal = Path.Combine(source.Home.Root, "old-facts.jsonl");
+        using (var connection = EngramDatabase.OpenInitialized(source.Home))
+        {
+            Seed(connection);
+            using var writer = new StreamWriter(journal);
+            FactJournal.WriteTo(connection, writer, pathPrefix: null, T0);
+        }
+
+        using var target = new SandboxHome();
+        var dry = Cli(target.Home, "replay", journal);
+
+        Assert.Contains("Journal scope: full.", dry.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("code facts are not", dry.Stdout, StringComparison.Ordinal);
+    }
+
+    /// <summary>Export keeps every fact and writes no scope: the filter is reachable only from backup.</summary>
+    [Fact]
+    public void Export_IsUnchanged_AllFactsAndNoScope()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Seed(connection);
+        var writer = new StringWriter();
+
+        FactJournal.WriteTo(connection, writer, pathPrefix: null, T0);
+
+        var lines = writer.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.DoesNotContain("\"scope\":\"authored\"", lines[0], StringComparison.Ordinal);
+        Assert.Contains(lines, l => l.Contains("class Foo", StringComparison.Ordinal));
+        Assert.Contains(lines, l => l.Contains("class Bar v1", StringComparison.Ordinal));
+    }
+
     // --- list (Phase 3) ----------------------------------------------------------------------
 
     [Fact]

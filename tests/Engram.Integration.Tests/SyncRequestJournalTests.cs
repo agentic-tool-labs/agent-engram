@@ -58,7 +58,7 @@ public sealed class SyncRequestJournalTests
             transaction.Commit();
         }
 
-        var written = SyncRequestJournal.Write(connection, sandbox.Home, T0);
+        var written = SyncRequestJournal.Write(connection, sandbox.Home, T0, BackupScope.Full);
 
         Assert.Equal(1, written);
         var lines = File.ReadAllLines(SyncRequestJournal.PathIn(sandbox.Home));
@@ -81,8 +81,8 @@ public sealed class SyncRequestJournalTests
                 transaction.Commit();
             }
 
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(2));
-            SyncRequestJournal.Write(connection, source.Home, T0.AddMinutes(2));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
+            SyncRequestJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
         }
 
         var facts = RereadFacts(source.Home);
@@ -123,7 +123,7 @@ public sealed class SyncRequestJournalTests
             // The journal is taken here, before the flagged fact exists — standing in for a
             // sync request whose fact lives in a different journal slice than the one being
             // replayed.
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(1));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(1), BackupScope.Full);
         }
 
         var facts = Array.Empty<JournalFact>();
@@ -163,8 +163,8 @@ public sealed class SyncRequestJournalTests
                 transaction.Commit();
             }
 
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(2));
-            SyncRequestJournal.Write(connection, source.Home, T0.AddMinutes(2));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
+            SyncRequestJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
         }
 
         var facts = RereadFacts(source.Home);
@@ -204,7 +204,7 @@ public sealed class SyncRequestJournalTests
             transaction.Commit();
         }
 
-        SyncRequestJournal.Write(connection, sandbox.Home, T0);
+        SyncRequestJournal.Write(connection, sandbox.Home, T0, BackupScope.Full);
         var requests = RereadSyncRequests(sandbox.Home);
 
         using (var command = connection.CreateCommand())

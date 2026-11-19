@@ -144,27 +144,37 @@ public static class BackupCommand
         {
             try
             {
-                var facts = FactJournal.Write(connection, home, DateTimeOffset.UtcNow);
-                stdout.WriteLine($"Journalled {facts} {(facts == 1 ? "fact" : "facts")} to {FactJournal.FileName}.");
+                // From the snapshot just written, not the live store: the journal then says exactly
+                // what the file beside it holds, and a write landing between the two cannot split them.
+                using (var written = EngramDatabase.Open(snapshot.Path, home.LibDir))
+                {
+                    var facts = FactJournal.Write(written, home, DateTimeOffset.UtcNow, scope);
+                    stdout.WriteLine($"Journalled {facts} {(facts == 1 ? "fact" : "facts")} to {FactJournal.FileName}.");
 
-                var relations = RelationJournal.Write(connection, home, DateTimeOffset.UtcNow);
-                stdout.WriteLine(
-                    $"Journalled {relations} {(relations == 1 ? "relation" : "relations")} to {RelationJournal.FileName}.");
+                    var relations = RelationJournal.Write(written, home, DateTimeOffset.UtcNow, scope);
+                    stdout.WriteLine(
+                        $"Journalled {relations} {(relations == 1 ? "relation" : "relations")} to {RelationJournal.FileName}.");
 
-                var syncRequests = SyncRequestJournal.Write(connection, home, DateTimeOffset.UtcNow);
-                stdout.WriteLine(
-                    $"Journalled {syncRequests} sync {(syncRequests == 1 ? "request" : "requests")} to "
-                        + $"{SyncRequestJournal.FileName}.");
+                    var syncRequests = SyncRequestJournal.Write(written, home, DateTimeOffset.UtcNow, scope);
+                    stdout.WriteLine(
+                        $"Journalled {syncRequests} sync {(syncRequests == 1 ? "request" : "requests")} to "
+                            + $"{SyncRequestJournal.FileName}.");
 
-                var reviews = ReviewJournal.Write(connection, home, DateTimeOffset.UtcNow);
-                stdout.WriteLine(
-                    $"Journalled {reviews} review {(reviews == 1 ? "marker" : "markers")} to {ReviewJournal.FileName}.");
+                    var reviews = ReviewJournal.Write(written, home, DateTimeOffset.UtcNow, scope);
+                    stdout.WriteLine(
+                        $"Journalled {reviews} review {(reviews == 1 ? "marker" : "markers")} to {ReviewJournal.FileName}.");
+                }
             }
             catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException)
             {
                 // The snapshot is already on disk and is the tier that matters most. Failing the
                 // whole command now would report a backup that did not happen when one did.
                 stderr.WriteLine("warning: snapshot written, but the fact journal failed — " + exception.Message);
+            }
+            finally
+            {
+                // The prune below may delete an older snapshot; this one must not stay held open either.
+                EngramDatabase.ReleasePooledConnections(snapshot.Path);
             }
         }
 
@@ -324,6 +334,15 @@ public static class BackupCommand
         var apply = args.Contains("--apply");
         var named = args.FirstOrDefault(a => !a.StartsWith('-'));
         var path = named ?? FactJournal.PathIn(home);
+
+        if (File.Exists(path) && FactJournal.ReadScope(File.ReadLines(path)) is { } scope)
+        {
+            stdout.WriteLine("Journal scope: " + scope + ".");
+            if (scope == BackupMarkers.AuthoredScope)
+            {
+                stdout.WriteLine("  code facts are not in this journal; restore a snapshot or run 'engram index' to regenerate them");
+            }
+        }
 
         return ReplayInto(
             home,

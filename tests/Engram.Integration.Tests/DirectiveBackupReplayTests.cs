@@ -15,7 +15,7 @@ public class DirectiveBackupReplayTests
         using (var connection = EngramDatabase.OpenInitialized(source.Home))
         {
             DirectiveFacts.Add(connection, "always use BEGIN IMMEDIATE for writes", T0);
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(1));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(1), BackupScope.Full);
         }
 
         var facts = FactJournal.Parse(File.ReadLines(FactJournal.PathIn(source.Home)), out var skipped);

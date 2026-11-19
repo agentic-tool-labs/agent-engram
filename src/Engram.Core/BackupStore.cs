@@ -108,6 +108,8 @@ public sealed record BackupMarkers(string Scope, long VectorsOmitted)
 
     public bool IsMarked => Scope != FullScope;
 
+    public static string NameOf(BackupScope scope) => scope == BackupScope.Authored ? AuthoredScope : FullScope;
+
     public static BackupMarkers Read(SqliteConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
