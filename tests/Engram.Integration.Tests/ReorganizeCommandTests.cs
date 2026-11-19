@@ -143,6 +143,24 @@ public class ReorganizeCommandTests
         Assert.Contains("/ah2/repo/t/train/1", File.ReadAllText(journal), StringComparison.Ordinal);
     }
 
+    /// <summary>It rewrites only authored filing, which an authored snapshot fully protects.</summary>
+    [Fact]
+    public void Ledger_Apply_PreReorganizeSnapshotIsAuthored()
+    {
+        using var sandbox = new SandboxHome();
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Ledger(connection, "/ah2/repo/t/train/1", "train one opened");
+        }
+
+        var (exit, _, _) = Run(sandbox, "--ledger", "--apply");
+
+        Assert.Equal(0, exit);
+        var snapshot = Assert.Single(BackupStore.List(sandbox.Home), s => s.Name.Contains("pre-reorganize", StringComparison.Ordinal));
+        using var copy = EngramDatabase.Open(snapshot.Path);
+        Assert.Equal(BackupMarkers.AuthoredScope, BackupMarkers.Read(copy).Scope);
+    }
+
     [Fact]
     public void Ledger_Apply_WhileABackupHoldsTheLock_RefusesAndWritesNothing()
     {

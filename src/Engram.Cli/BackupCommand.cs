@@ -105,7 +105,7 @@ public static class BackupCommand
             stdout.WriteLine("Taking a snapshot: " + decision.Reason + ".");
         }
 
-        return TakeNow(home, settings, connection, stdout, stderr) is null ? 1 : 0;
+        return TakeNow(home, settings, connection, BackupScope.Authored, stdout, stderr) is null ? 1 : 0;
     }
 
     /// <summary>
@@ -118,6 +118,7 @@ public static class BackupCommand
         EngramHome home,
         BackupSettings settings,
         Microsoft.Data.Sqlite.SqliteConnection connection,
+        BackupScope scope,
         TextWriter stdout,
         TextWriter stderr,
         string? label = null)
@@ -125,7 +126,7 @@ public static class BackupCommand
         BackupSnapshot snapshot;
         try
         {
-            snapshot = BackupStore.Take(connection, home, DateTimeOffset.UtcNow, label);
+            snapshot = BackupStore.Take(connection, home, DateTimeOffset.UtcNow, scope, label);
         }
         catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException)
         {
@@ -134,6 +135,10 @@ public static class BackupCommand
         }
 
         stdout.WriteLine($"Wrote {snapshot.Name} ({Size(snapshot.Bytes)}).");
+        if (snapshot.Warning is not null)
+        {
+            stderr.WriteLine("warning: " + snapshot.Warning + ".");
+        }
 
         if (settings.Journal)
         {
@@ -182,7 +187,7 @@ public static class BackupCommand
             return 0;
         }
 
-        stdout.WriteLine("  taken (UTC)          schema      size  name");
+        stdout.WriteLine("  taken (UTC)          schema      size  scope             name");
         foreach (var snapshot in snapshots)
         {
             stdout.WriteLine(
@@ -191,6 +196,7 @@ public static class BackupCommand
                     + ("v" + snapshot.SchemaVersion.ToString(CultureInfo.InvariantCulture)).PadRight(8)
                     + Size(snapshot.Bytes).PadLeft(8)
                     + "  "
+                    + (BackupStore.ReadMarkers(snapshot, home)?.Scope ?? "unreadable").PadRight(18)
                     + snapshot.Name);
         }
 
@@ -266,6 +272,24 @@ public static class BackupCommand
         stdout.WriteLine(apply
             ? "  keeping the current store as a new snapshot first"
             : "  the current store would be snapshotted first, not discarded");
+
+        if (BackupStore.ReadMarkers(chosen, home) is { IsMarked: true } markers)
+        {
+            var unembedded = BackupStore.CountUnembedded(chosen, home);
+            if (unembedded > 0)
+            {
+                stdout.WriteLine();
+                stdout.WriteLine("This snapshot leaves out state Engram rebuilds:");
+                stdout.WriteLine(
+                    $"  vector index   {unembedded} {(unembedded == 1 ? "fact" : "facts")} to embed; the server embeds them after 'engram start'");
+                stdout.WriteLine("                 (several hours for a large store: 'engram embed --status' shows progress;");
+                stdout.WriteLine("                  until it finishes, recall's vector lane covers only what is embedded)");
+            }
+
+            stdout.WriteLine(apply
+                ? $"  clearing the snapshot's '{markers.Scope}' scope marker from the restored store"
+                : $"  the snapshot's '{markers.Scope}' scope marker would be cleared from the restored store");
+        }
 
         if (!apply)
         {

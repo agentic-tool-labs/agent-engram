@@ -137,7 +137,7 @@ public static class StoreRepairer
             return report;
         }
 
-        var snapshot = BackupStore.Take(connection, home, now, label: "pre-repair");
+        var snapshot = BackupStore.Take(connection, home, now, BackupScope.Authored, label: "pre-repair");
         BackupStore.PruneAfterWrite(home, snapshot);
 
         using (var transaction = EngramDatabase.BeginWrite(connection))
