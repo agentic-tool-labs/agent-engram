@@ -34,7 +34,7 @@ internal static partial class ReorganizeCommand
           --captures --apply --only f…,f…
                                  close exactly these printed suspects
 
-        Refuses while the server is running. Snapshots the store before the first write.
+        --apply refuses while the server is running. Snapshots the store before the first write.
         """;
 
     public static int Run(string? homePath, string[] rest, TextWriter stdout, TextWriter stderr)
@@ -102,6 +102,12 @@ internal static partial class ReorganizeCommand
             return 1;
         }
 
+        if ((rest.Contains("--from") || rest.Contains("--to")) && !ledger)
+        {
+            stderr.WriteLine("error: --from and --to belong to --ledger");
+            return 1;
+        }
+
         if ((tier is not null || only is not null) && !captures)
         {
             stderr.WriteLine("error: --tier and --only belong to --captures");
@@ -138,8 +144,11 @@ internal static partial class ReorganizeCommand
             return 1;
         }
 
+        // Only --apply refuses: a dry run only reads, and the capture list has to be reviewable
+        // without stopping memory for every session (D87 ruling 2; D38/D42 for the apply).
         var lifecycle = new ServerLifecycle(new ProcessInspector(), new HttpServerHealthChecker(), new ProcessServerLauncher());
-        if (lifecycle.Status(home, EngramVersion.Current, ServerLifecycleTimeouts.Default.HealthCheckTimeout).ServerIsAlive)
+        var serverAlive = lifecycle.Status(home, EngramVersion.Current, ServerLifecycleTimeouts.Default.HealthCheckTimeout).ServerIsAlive;
+        if (serverAlive && apply)
         {
             stderr.WriteLine("error: the server is running, and its recall and embedding backlog read these rows.");
             stderr.WriteLine("       Run 'engram stop' first, then reorganize, then 'engram start'.");
@@ -148,19 +157,51 @@ internal static partial class ReorganizeCommand
 
         using var connection = apply ? EngramDatabase.OpenInitialized(home) : EngramDatabase.Open(home);
         var room = Tui.Detect().Room;
-        var snapshotTaken = false;
 
-        void SnapshotOnce()
+        if (serverAlive)
+        {
+            stdout.WriteLine("note: the server is running; --apply will need it stopped first ('engram stop').");
+        }
+
+        // Every captures refusal is decided before any step writes, so a combined run never
+        // commits the ledger and then refuses the captures.
+        (int LiveCount, List<(StoredFact Fact, List<string> Rules)> Suspects)? suspects =
+            captures ? ReadSuspects(connection) : null;
+        if (suspects is not null && apply)
+        {
+            var suspectIds = suspects.Value.Suspects.Select(s => s.Fact.Id).ToHashSet();
+            var unknown = onlyIds.Where(id => !suspectIds.Contains(id)).ToList();
+            if (unknown.Count > 0)
+            {
+                stderr.WriteLine(
+                    "error: not a printed suspect, so not closed (this is not a general forget): "
+                    + string.Join(",", unknown.Select(FactCatalog.HandleFor)));
+                return 1;
+            }
+        }
+
+        var snapshotTaken = false;
+        bool SnapshotOnce()
         {
             if (snapshotTaken)
             {
-                return;
+                return true;
             }
 
-            var snapshot = BackupStore.Take(connection, home, DateTimeOffset.UtcNow, label: "pre-reorganize");
-            BackupStore.PruneAfterWrite(home, snapshot);
-            stdout.WriteLine($"snapshot: {snapshot.Name}");
+            using var held = BackupStore.TryLock(home);
+            if (held is null)
+            {
+                stderr.WriteLine("error: a backup is already running; nothing was changed. Try again when it finishes.");
+                return false;
+            }
+
+            if (BackupCommand.TakeNow(home, BackupSettings.Read(ConfigFile.Load(home.ConfigPath)), connection, stdout, stderr, "pre-reorganize") is null)
+            {
+                return false;
+            }
+
             snapshotTaken = true;
+            return true;
         }
 
         var exit = 0;
@@ -169,16 +210,16 @@ internal static partial class ReorganizeCommand
             exit = Ledger(connection, from, to, apply, room, SnapshotOnce, stdout);
         }
 
-        if (captures && exit == 0)
+        if (suspects is not null && exit == 0)
         {
-            exit = Captures(connection, apply, tier is not null, onlyIds, room, SnapshotOnce, stdout, stderr);
+            exit = Captures(suspects.Value, connection, apply, tier is not null, onlyIds, room, SnapshotOnce, stdout);
         }
 
         return exit;
     }
 
     private static int Ledger(
-        SqliteConnection connection, string from, string to, bool apply, int room, Action snapshot, TextWriter stdout)
+        SqliteConnection connection, string from, string to, bool apply, int room, Func<bool> snapshot, TextWriter stdout)
     {
         var selected = ReadLiveUnder(connection, from);
         stdout.WriteLine($"ledger: {selected.Count} live fact(s) under {from} → {to}, scope \"{FactStore.ToolScope}\"");
@@ -200,7 +241,10 @@ internal static partial class ReorganizeCommand
             return 0;
         }
 
-        snapshot();
+        if (!snapshot())
+        {
+            return 1;
+        }
 
         var counts = new Dictionary<RefileOutcome, int>();
         var now = DateTimeOffset.UtcNow;
@@ -225,15 +269,7 @@ internal static partial class ReorganizeCommand
         return 0;
     }
 
-    private static int Captures(
-        SqliteConnection connection,
-        bool apply,
-        bool tierA,
-        HashSet<long> onlyIds,
-        int room,
-        Action snapshot,
-        TextWriter stdout,
-        TextWriter stderr)
+    private static (int LiveCount, List<(StoredFact Fact, List<string> Rules)> Suspects) ReadSuspects(SqliteConnection connection)
     {
         var live = CaptureRoots.SelectMany(root => FactStore.ReadSubtree(connection, root)).ToList();
         var inSessions = SessionBodies(connection, live.Select(f => f.Body).Distinct(StringComparer.Ordinal).ToList());
@@ -241,14 +277,27 @@ internal static partial class ReorganizeCommand
             .Select(f => (Fact: f, Rules: Rules(f.Body, inSessions)))
             .Where(s => s.Rules.Count > 0)
             .ToList();
+        return (live.Count, suspects);
+    }
 
+    private static int Captures(
+        (int LiveCount, List<(StoredFact Fact, List<string> Rules)> Suspects) plan,
+        SqliteConnection connection,
+        bool apply,
+        bool tierA,
+        HashSet<long> onlyIds,
+        int room,
+        Func<bool> snapshot,
+        TextWriter stdout)
+    {
+        var suspects = plan.Suspects;
         var tierASet = suspects.Where(s => s.Rules.Any(r => r is "R1" or "R2" or "R5")).ToList();
         var tierBSet = suspects.Except(tierASet)
             .OrderBy(s => s.Rules[0], StringComparer.Ordinal)
             .ThenByDescending(s => s.Fact.Body.Length)
             .ToList();
 
-        stdout.WriteLine($"captures: {live.Count} live under {string.Join(", ", CaptureRoots)}; {suspects.Count} suspect");
+        stdout.WriteLine($"captures: {plan.LiveCount} live under {string.Join(", ", CaptureRoots)}; {suspects.Count} suspect");
         foreach (var (rule, name) in RuleNames)
         {
             stdout.WriteLine($"  {rule} {name}: {suspects.Count(s => s.Rules.Contains(rule))}");
@@ -284,16 +333,6 @@ internal static partial class ReorganizeCommand
             return 0;
         }
 
-        var suspectIds = suspects.Select(s => s.Fact.Id).ToHashSet();
-        var unknown = onlyIds.Where(id => !suspectIds.Contains(id)).ToList();
-        if (unknown.Count > 0)
-        {
-            stderr.WriteLine(
-                "error: not a printed suspect, so not closed (this is not a general forget): "
-                + string.Join(",", unknown.Select(FactCatalog.HandleFor)));
-            return 1;
-        }
-
         var close = tierA ? tierASet.Select(s => s.Fact.Id).ToList() : onlyIds.Order().ToList();
         if (close.Count == 0)
         {
@@ -301,7 +340,10 @@ internal static partial class ReorganizeCommand
             return 0;
         }
 
-        snapshot();
+        if (!snapshot())
+        {
+            return 1;
+        }
 
         var closed = 0;
         var now = DateTimeOffset.UtcNow;

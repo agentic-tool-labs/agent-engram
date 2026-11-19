@@ -57,10 +57,7 @@ public class ReorganizeCommandTests
             Ledger(connection, "/ah2/repo/t/train/1", "train one opened");
         }
 
-        // This process, recorded as the server, on a port nothing answers: alive and not answering
-        // is Wedged, which ServerIsAlive counts — no real server is started.
-        PidFile.Write(sandbox.Home, new PidFileRecord(
-            Environment.ProcessId, FreePort(), EngramVersion.Current, DateTimeOffset.UtcNow, ProcessStartToken.ForSelf()));
+        RecordALiveServer(sandbox);
         SqliteConnection.ClearAllPools();
         var before = FileSnapshot(sandbox.Home.Root);
 
@@ -70,6 +67,155 @@ public class ReorganizeCommandTests
         Assert.Equal(1, exit);
         Assert.Contains("server is running", stderr, StringComparison.Ordinal);
         Assert.Equal(before, FileSnapshot(sandbox.Home.Root));
+    }
+
+    /// <summary>D87 ruling 2: a dry run only reads, so a live server does not stop it.</summary>
+    [Theory]
+    [InlineData("--ledger")]
+    [InlineData("--captures")]
+    public void DryRun_WhileAServerIsAlive_RunsAndWritesNothing(string step)
+    {
+        using var sandbox = new SandboxHome();
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Ledger(connection, "/ah2/repo/t/train/1", "train one opened");
+            Capture(connection, "Verified the fix against the rebuilt binary.");
+        }
+
+        RecordALiveServer(sandbox);
+        SqliteConnection.ClearAllPools();
+        var before = FileSnapshot(sandbox.Home.Root);
+
+        var (exit, stdout, _) = Run(sandbox, step);
+
+        SqliteConnection.ClearAllPools();
+        Assert.Equal(0, exit);
+        Assert.Contains("--apply will need it stopped", stdout, StringComparison.Ordinal);
+        Assert.Contains(step == "--ledger" ? "ledger: 1 live fact(s)" : "; 1 suspect", stdout, StringComparison.Ordinal);
+        Assert.Equal(before, FileSnapshot(sandbox.Home.Root));
+    }
+
+    /// <summary>
+    /// A combined run validates the captures selection before the ledger writes anything: a
+    /// non-suspect in --only must not leave the ledger re-filed behind an exit 1.
+    /// </summary>
+    [Fact]
+    public void LedgerAndCaptures_ApplyOnlyNamingANonSuspect_RefusesBeforeTheLedgerWrites()
+    {
+        using var sandbox = new SandboxHome();
+        long plain;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Ledger(connection, "/ah2/repo/t/train/1", "train one opened");
+            plain = Capture(connection, "I prefer dark roast coffee.");
+        }
+
+        SqliteConnection.ClearAllPools();
+        var before = FileSnapshot(sandbox.Home.Root);
+        var (exit, _, stderr) = Run(sandbox, "--ledger", "--captures", "--apply", "--only", $"f{plain}");
+        SqliteConnection.ClearAllPools();
+
+        Assert.Equal(1, exit);
+        Assert.Contains($"f{plain}", stderr, StringComparison.Ordinal);
+        Assert.Equal(before, FileSnapshot(sandbox.Home.Root));
+    }
+
+    /// <summary>
+    /// The snapshot goes through <c>backup take</c>'s routine, so the journal beside it is as
+    /// current as the snapshot rather than whatever the last scheduled backup wrote.
+    /// </summary>
+    [Fact]
+    public void Ledger_Apply_SnapshotsThroughBackupTake_IncludingTheJournal()
+    {
+        using var sandbox = new SandboxHome();
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Ledger(connection, "/ah2/repo/t/train/1", "train one opened");
+        }
+
+        var journal = FactJournal.PathIn(sandbox.Home);
+        Assert.False(File.Exists(journal));
+
+        var (exit, stdout, _) = Run(sandbox, "--ledger", "--apply");
+
+        Assert.Equal(0, exit);
+        Assert.Contains("pre-reorganize", stdout, StringComparison.Ordinal);
+        Assert.Contains("/ah2/repo/t/train/1", File.ReadAllText(journal), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Ledger_Apply_WhileABackupHoldsTheLock_RefusesAndWritesNothing()
+    {
+        using var sandbox = new SandboxHome();
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Ledger(connection, "/ah2/repo/t/train/1", "train one opened");
+        }
+
+        using var held = BackupStore.TryLock(sandbox.Home);
+        Assert.NotNull(held);
+        SqliteConnection.ClearAllPools();
+        var before = FileSnapshot(sandbox.Home.Root);
+
+        var (exit, _, stderr) = Run(sandbox, "--ledger", "--apply");
+
+        SqliteConnection.ClearAllPools();
+        Assert.Equal(1, exit);
+        Assert.Contains("backup is already running", stderr, StringComparison.Ordinal);
+        Assert.Equal(before, FileSnapshot(sandbox.Home.Root));
+    }
+
+    [Theory]
+    [InlineData("--captures", "--from", "/x")]
+    [InlineData("--captures", "--to", "/tools/x")]
+    public void FromAndTo_WithoutLedger_AreRefused(params string[] args)
+    {
+        using var sandbox = new SandboxHome();
+
+        var (exit, _, stderr) = Run(sandbox, args);
+
+        Assert.Equal(1, exit);
+        Assert.Contains("--from and --to belong to --ledger", stderr, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// R5 against the store, not an injected set: a body that also exists as a live or a closed
+    /// <c>/sessions/</c> note is Tier A and closes with <c>--tier a</c>; the same body under a
+    /// sibling root or under <c>/knowledge</c> is not R5.
+    /// </summary>
+    [Fact]
+    public void Captures_R5_MatchesLiveAndClosedSessionNotes_AndNothingOutsideSessions()
+    {
+        using var sandbox = new SandboxHome();
+        long live, closed, sibling, knowledge;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            SessionFacts.Append(connection, "s1", "Copied from a live note.", null, null, null, T0);
+            var closedNote = SessionFacts.Append(connection, "s2", "Copied from a closed note.", null, null, null, T0);
+            FactStore.Forget(connection, closedNote, "test", T0);
+            FactStore.Remember(connection, new FactWrite(
+                "/sessionsx/a", "note", "noted", "Copied from a sibling root.", "session", "observed"), T0);
+            FactStore.Remember(connection, new FactWrite(
+                "/knowledge/a", "note", "notes", "Copied from knowledge.", "user", "stated"), T0);
+
+            live = Capture(connection, "Copied from a live note.");
+            closed = Capture(connection, "Copied from a closed note.");
+            sibling = Capture(connection, "Copied from a sibling root.");
+            knowledge = Capture(connection, "Copied from knowledge.");
+        }
+
+        var (dryExit, stdout, _) = Run(sandbox, "--captures");
+        Assert.Equal(0, dryExit);
+        Assert.Contains("  R5 duplicate of a session note: 2", stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain($"f{sibling} ", stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain($"f{knowledge} ", stdout, StringComparison.Ordinal);
+
+        Assert.Equal(0, Run(sandbox, "--captures", "--apply", "--tier", "a").Exit);
+        using var check = EngramDatabase.Open(sandbox.Home);
+        Assert.NotNull(FactStore.ReadById(check, live)!.ValidTo);
+        Assert.NotNull(FactStore.ReadById(check, closed)!.ValidTo);
+        Assert.Null(FactStore.ReadById(check, sibling)!.ValidTo);
+        Assert.Null(FactStore.ReadById(check, knowledge)!.ValidTo);
     }
 
     [Fact]
@@ -87,11 +233,11 @@ public class ReorganizeCommandTests
 
         Assert.Equal(0, first.Exit);
         Assert.Contains("re-filed 1,", first.Stdout, StringComparison.Ordinal);
-        Assert.Contains("snapshot: ", first.Stdout, StringComparison.Ordinal);
+        Assert.Contains("-pre-reorganize.db", first.Stdout, StringComparison.Ordinal);
         Assert.Equal(0, second.Exit);
         Assert.Contains("ledger: 0 live fact(s)", second.Stdout, StringComparison.Ordinal);
         Assert.Contains("re-filed 0", second.Stdout, StringComparison.Ordinal);
-        Assert.DoesNotContain("snapshot: ", second.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("-pre-reorganize.db", second.Stdout, StringComparison.Ordinal);
 
         using var check = EngramDatabase.Open(sandbox.Home);
         Assert.NotNull(FactStore.ReadById(check, source)!.ValidTo);
@@ -410,6 +556,14 @@ public class ReorganizeCommandTests
 
         return files;
     }
+
+    /// <summary>
+    /// This process, recorded as the server, on a port nothing answers: alive and not answering is
+    /// Wedged, which ServerIsAlive counts — no real server is started.
+    /// </summary>
+    private static void RecordALiveServer(SandboxHome sandbox) =>
+        PidFile.Write(sandbox.Home, new PidFileRecord(
+            Environment.ProcessId, FreePort(), EngramVersion.Current, DateTimeOffset.UtcNow, ProcessStartToken.ForSelf()));
 
     private static int FreePort()
     {

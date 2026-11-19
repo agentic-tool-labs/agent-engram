@@ -6003,9 +6003,15 @@ also exists as a `/sessions/` note. Tier B is shape only and is closed by handle
 citation, with no backtick clause, and R4 is over 400 UTF-16 code units. `--apply --tier a` and
 `--apply --only f…,f…` act. `--apply` alone is refused, and so is a handle that is not a printed suspect, so
 the verb cannot become a general forget. Captures are closed with `Forget` and never re-filed: a misfiled
-capture is not the user's belief anywhere. The verb is dry-run by default. It refuses while
-`ServerIsAlive`, dry run included, because the server's recall and backlog read these rows (D38/D42). It
-takes a `pre-reorganize` snapshot before its first write, and none when there is nothing to write.
+capture is not the user's belief anywhere. The verb is dry-run by default. `--apply` refuses while
+`ServerIsAlive`, because the server's recall and backlog read these rows (D38/D42). A dry run does not
+refuse: it only reads, and the capture list has to be reviewable without stopping memory for every
+session, so it prints one line saying an apply will need the server stopped. Every refusal, including a
+captures `--only` naming a non-suspect in a run that also asks for `--ledger`, is decided before either
+step writes. Before its first write the verb takes a `pre-reorganize` snapshot through `backup take`'s own
+routine, under its lock and with the journals beside it, so a later `backup replay` reads a journal as
+current as the snapshot. A held backup lock refuses the apply. It takes no snapshot when there is nothing
+to write.
 
 **Primer.** `PrimerSummary` neither counts nor samples `scope = 'tool'`. The histogram takes them out with a
 third, negative arm over `ix_fact_scope` and a `HAVING`, not with a scope filter on the two count arms,
