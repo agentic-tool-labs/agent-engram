@@ -380,7 +380,9 @@ public class RecallTypesTests
         var ids = Seed(connection, withTool: false);
 
         var statement = RecallRanker.StatementFor(overlap, false, "fact_vec");
-        var before = statement.Replace("\n    AND f.scope <> 'tool'", string.Empty, StringComparison.Ordinal);
+        // D90 moved the default exclusion into the `excluded` CTE; the statement without it is the
+        // statement as it was before D85.
+        var before = statement.Replace("  UNION\n  SELECT f.id FROM fact f WHERE f.scope IN ('tool') AND f.valid_to IS NULL\n", string.Empty, StringComparison.Ordinal);
         Assert.NotEqual(before, statement);
         // The default lex lane carries no scope term at all, so its D58-D60 cost is untouched.
         var lexStart = statement.IndexOf("lex(fact_id, rank) AS (", StringComparison.Ordinal);
@@ -390,14 +392,11 @@ public class RecallTypesTests
 
         foreach (var session in new[] { null, ids.CurrentSession })
         {
+            // Rows only: since D90 the exclusion is a CTE arm with a plan of its own, which
+            // RecallRankerPlanTests pins.
             Assert.Equal(Run(connection, before, session), Run(connection, statement, session));
-            // Plan detail only: the id columns are bytecode addresses, which any added term shifts.
-            Assert.Equal(PlanDetail(connection, before, session), PlanDetail(connection, statement, session));
         }
     }
-
-    private static List<string> PlanDetail(SqliteConnection connection, string sql, long? session) =>
-        Run(connection, "EXPLAIN QUERY PLAN\n" + sql, session).Select(row => row.Split('|', 4)[3]).ToList();
 
     private static List<string> Run(SqliteConnection connection, string sql, long? session)
     {

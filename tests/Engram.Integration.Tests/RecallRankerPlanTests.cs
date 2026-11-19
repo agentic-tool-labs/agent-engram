@@ -66,6 +66,18 @@ public class RecallRankerPlanTests
             $"overlapAvailable={overlapAvailable}: unexpected SCAN of fact — "
                 + $"{string.Join(" | ", unexpectedFactScans)}\nfull plan:\n{string.Join("\n", lines)}");
 
+        // D90's CTEs. `excluded` seeks the directive subtree by path range and, on a default call,
+        // the default-excluded scopes by the partial scope index; the current-session arm seeks by
+        // session beside prior_sessions' probe; `scored` is built once for its two readers.
+        Assert.Contains("SEARCH e USING COVERING INDEX sqlite_autoindex_entity_1 (path>? AND path<?)", lines);
+        if (!filtered)
+        {
+            // A filter may seek ix_fact_scope for its own predicate, so only the default pins it.
+            Assert.Contains("SEARCH f USING INDEX ix_fact_scope (scope=?)", lines);
+        }
+        Assert.Equal(overlapAvailable ? 2 : 1, lines.Count(line => line.Contains("SEARCH f USING INDEX ix_fact_session (session_id=?)", StringComparison.Ordinal)));
+        Assert.Contains("MATERIALIZE scored", lines);
+
         var tokenAccess = lines.Where(line => line.Contains("fact_token", StringComparison.Ordinal)).ToList();
         Assert.True(
             tokenAccess.All(line => line.Contains("SEARCH", StringComparison.Ordinal) && line.Contains("PRIMARY KEY", StringComparison.Ordinal))

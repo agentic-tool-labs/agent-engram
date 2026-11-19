@@ -99,13 +99,13 @@ public class RecallSessionRangeTests
         Assert.Contains("· p3 ·", LineOf(withCurrent, edge), StringComparison.Ordinal);
 
         // No current session: the current session's notes are prior, and still no NULL row. The
-        // origin CASE (unchanged) reads `NULL IS NULL` as current session, so the NULL note is not
-        // a prior-session line here at all.
+        // origin CASE compares with `=` since D90, so with no current session nothing is current
+        // and the NULL note is a prior-session line that renders p? here too.
         var noCurrent = Rank(connection, null);
-        // p? is reached only from the prior-session arm.
-        var asCurrent = noCurrent.Candidates.Single(c => c.FactId == nullSession);
-        Assert.Equal(FactOrigin.CurrentSession, asCurrent.Origin);
-        Assert.DoesNotContain("p?", asCurrent.Line, StringComparison.Ordinal);
+        var asPrior = noCurrent.Candidates.Single(c => c.FactId == nullSession);
+        Assert.Equal(FactOrigin.PriorSession, asPrior.Origin);
+        Assert.Contains("· p?", asPrior.Line, StringComparison.Ordinal);
+        Assert.DoesNotContain(noCurrent.Candidates, c => c.Origin == FactOrigin.CurrentSession);
         Assert.Equal(FactOrigin.PriorSession, withCurrent.Candidates.Single(c => c.FactId == nullSession).Origin);
         Assert.Contains("· p2 ·", LineOf(noCurrent, current), StringComparison.Ordinal);
         Assert.Contains("· p3 ·", LineOf(noCurrent, prior), StringComparison.Ordinal);

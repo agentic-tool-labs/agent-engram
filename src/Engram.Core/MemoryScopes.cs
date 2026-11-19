@@ -32,9 +32,12 @@ public static class MemoryScopes
     /// </summary>
     internal const string FilterSql = "f.scope IN (SELECT value FROM json_each($types))";
 
-    /// <summary>The default exclusion, over a fact aliased <c>f</c>: what an unfiltered recall leaves out.</summary>
-    internal static string DefaultExclusionSql { get; } =
-        string.Join(" AND ", ExcludedByDefault.Select(scope => $"f.scope <> '{scope}'"));
+    /// <summary>
+    /// The default exclusion, over a fact aliased <c>f</c>: matches what an unfiltered recall leaves
+    /// out. Recall's <c>excluded</c> CTE is its one consumer (D90).
+    /// </summary>
+    internal static string ExcludedByDefaultSql { get; } =
+        "f.scope IN (" + string.Join(", ", ExcludedByDefault.Select(scope => $"'{scope}'")) + ")";
 
     /// <summary>Binds <c>$types</c> for <see cref="FilterSql"/> from a normalized list.</summary>
     internal static void BindFilter(SqliteCommand command, IReadOnlyList<string> types)
