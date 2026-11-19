@@ -138,7 +138,12 @@ public sealed class RegistryOriginGlobalConfigTests
         var exit = IndexCommand.Run(sandbox.Home.Root, ["--drain-all", "--apply", primary], stdout, stderr);
 
         Assert.True(exit == 0, $"{stdout}\n{stderr}");
-        Assert.DoesNotContain(RegistryRetirementTests.IndexEvents(sandbox), l => l.Contains(EnrolledIdentity, StringComparison.Ordinal));
+        // Every index event is the primary's: the secondary started nothing, under any name.
+        var primaryIdentity = CodeIndexer.ResolveIdentity(primary);
+        Assert.NotEmpty(RegistryRetirementTests.IndexEvents(sandbox));
+        Assert.All(
+            RegistryRetirementTests.IndexEvents(sandbox),
+            l => Assert.Contains($"\"repo\":\"{primaryIdentity}\"", l, StringComparison.Ordinal));
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Assert.Equal(1L, (long)Scalar(connection, "SELECT COUNT(*) FROM repo_registry;"));
         Assert.Equal(0L, (long)Scalar(connection, $"SELECT COUNT(*) FROM repo_registry WHERE disk_path = '{secondary}';"));
