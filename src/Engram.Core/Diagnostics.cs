@@ -134,6 +134,13 @@ public static class Diagnostics
         Try(checks, "tree-sitter", list => list.Add(CheckTreeSitter(environment, home)));
         Try(checks, "indexing config", list => CheckIndexingConfig(IndexingSettings.Read(config), list));
         Try(checks, "indexing/enrollment", list => list.AddRange(CheckEnrolledRepos(home, connection, DateTimeOffset.UtcNow, config)));
+        Try(checks, "indexing", list =>
+        {
+            if (CheckRetiredPaths(connection) is { } retired)
+            {
+                list.Add(retired);
+            }
+        });
 
         if (repoRoot is not null)
         {
@@ -1081,7 +1088,15 @@ public static class Diagnostics
 
         // Registration is looked up the same way the indexer does it, because two answers
         // to "which repo is this" is how a report drifts from the system it describes.
-        var identity = CodeIndexer.ResolveIdentity(repoRoot);
+        // Warn, not Broken (D37), and no fix: nothing about the installation is wrong, and the
+        // indexer skips this root until git answers (D94).
+        if (!CodeIndexer.TryResolveIdentity(repoRoot, out var identity, out var originFailure))
+        {
+            return new Diagnosis(
+                "indexing",
+                DiagnosisState.Warn,
+                $"could not resolve this checkout's origin ({originFailure}); {repoRoot} is not indexed until git answers");
+        }
 
         // The suppression column is read from this same query, not a second lookup
         // (docs/repo-index-remediation-spec.md §14.2). EngramDatabase.Open, which doctor uses,
@@ -1211,6 +1226,50 @@ public static class Diagnostics
             "indexing",
             DiagnosisState.Ok,
             $"{Plural((int)indexed, "file")} indexed into {repoPath}{age}; {scan.Summary()} on disk");
+    }
+
+    /// <summary>
+    /// Store-wide: superseded registry paths (D94) that still hold indexed files. Counted from
+    /// <c>repo_registry</c> and <c>file_state</c> only — never a fact scan in doctor. No row when
+    /// there are none; Warn, never Broken, because nothing is wrong until someone wants the space
+    /// back (D37).
+    /// </summary>
+    internal static Diagnosis? CheckRetiredPaths(SqliteConnection? connection)
+    {
+        if (connection is null)
+        {
+            return null;
+        }
+
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT COUNT(DISTINCT r.repo_path), COUNT(f.path)
+            FROM repo_registry r JOIN file_state f ON f.repo_path = r.repo_path
+            WHERE r.detached_at IS NOT NULL;
+            """;
+
+        long paths;
+        long files;
+        try
+        {
+            using var reader = command.ExecuteReader();
+            reader.Read();
+            paths = reader.GetInt64(0);
+            files = reader.GetInt64(1);
+        }
+        catch (SqliteException e) when (IsSchemaAbsence(e))
+        {
+            return null;
+        }
+
+        return paths == 0
+            ? null
+            : new Diagnosis(
+                "indexing",
+                DiagnosisState.Warn,
+                $"{paths} superseded registry path(s) still hold indexed files ({files} file states); "
+                    + "run `engram compact --retired` to see what removing them would free");
     }
 
     /// <summary>

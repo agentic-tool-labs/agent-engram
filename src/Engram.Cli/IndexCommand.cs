@@ -88,7 +88,20 @@ internal static class IndexCommand
         var home = EngramHome.ResolveFromProcess(homePath);
         var config = ConfigFile.Load(home.ConfigPath);
         var settings = IndexingSettings.Read(config);
-        var identity = CodeIndexer.ResolveIdentity(root);
+        // Unknown: nothing started, so no telemetry (D55, D94). --auto stays a silent refusal;
+        // a typed command says why it did nothing and exits non-zero, as lock contention does.
+        // The indexer resolves again and refuses on its own; this check is what keeps the
+        // "started" event from being written for it.
+        if (!CodeIndexer.TryResolveIdentity(root, out var identity, out var originFailure))
+        {
+            if (auto)
+            {
+                return 0;
+            }
+
+            stdout.WriteLine(CodeIndexer.UnknownOriginNote(root, originFailure));
+            return 1;
+        }
 
         // --auto is the session-start maintenance child asking. The whole policy lives
         // here, like --if-due and --if-large: the config gate, the requirement that the
@@ -244,6 +257,12 @@ internal static class IndexCommand
             return 0;
         }
 
+        // Ambient, so silent: an Unknown origin starts nothing and records nothing (D94).
+        if (!CodeIndexer.TryResolveIdentity(candidate.Root, out _, out _))
+        {
+            return 0;
+        }
+
         var identity = candidate.Row.Identity;
         IndexTelemetry.Note(home, "cli", "started", identity);
 
@@ -312,7 +331,13 @@ internal static class IndexCommand
                 continue;
             }
 
-            var secondaryIdentity = CodeIndexer.ResolveIdentity(secondaryRoot);
+            // Unknown: no event and no drain. The root stays in `seen`, so its queue entries
+            // are kept for a later pass rather than discarded as unserviced (D94).
+            if (!CodeIndexer.TryResolveIdentity(secondaryRoot, out var secondaryIdentity, out _))
+            {
+                continue;
+            }
+
             IndexTelemetry.Note(home, "cli", "started", secondaryIdentity);
 
             var report = CodeIndexer.Index(

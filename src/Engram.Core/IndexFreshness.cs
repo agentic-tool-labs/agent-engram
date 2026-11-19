@@ -98,6 +98,14 @@ public sealed class IndexFreshness(EngramHome home, Action<string>? log = null)
             return;
         }
 
+        // An Unknown origin starts nothing and records nothing (D94); the next tick asks again.
+        if (!CodeIndexer.TryResolveIdentity(candidate.Root, out _, out var originFailure))
+        {
+            Publish(candidate.Row.Identity, outcome: "idle", error: null);
+            log?.Invoke(CodeIndexer.UnknownOriginNote(candidate.Root, originFailure));
+            return;
+        }
+
         var identity = candidate.Row.Identity;
         IndexTelemetry.Note(home, "server", "started", identity);
         Publish(identity, outcome: "running", error: null);

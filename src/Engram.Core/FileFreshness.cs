@@ -82,9 +82,9 @@ public static class FileFreshness
                 return Verdict.Unknown;
             }
 
-            // disk_path goes NULL once a checkout is detached, so a detached repo yields Unknown
-            // rather than Missing — "cannot look" and "it is gone" are different answers and only
-            // the second is worth telling the caller.
+            // A detached (superseded, D94) row keeps its disk_path but is filtered out here, so it
+            // yields Unknown rather than Missing — "cannot look" and "it is gone" are different
+            // answers and only the second is worth telling the caller.
             var diskPath = ScalarText(
                 connection,
                 "SELECT disk_path FROM repo_registry WHERE repo_path = $repo AND detached_at IS NULL;",
