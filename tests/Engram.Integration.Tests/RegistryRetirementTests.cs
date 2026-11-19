@@ -397,9 +397,12 @@ public class RegistryRetirementTests
         var retiredAt = Rows(connection).Single(r => r.RepoPath == pathA).DetachedAt;
         Assert.NotNull(retiredAt);
 
-        FullIndex(connection, sandbox, repo, apply: true);
+        var report = FullIndex(connection, sandbox, repo, apply: true);
 
+        // The note as well as the stamp: a clear-then-re-retire inside one second leaves the
+        // timestamp equal, but announces the retirement again.
         Assert.Equal(retiredAt, Rows(connection).Single(r => r.RepoPath == pathA).DetachedAt);
+        Assert.DoesNotContain(report.Notes, n => n.StartsWith($"retired {pathA} ", StringComparison.Ordinal));
     }
 
     [Fact]
