@@ -344,7 +344,7 @@ public class ReorganizeCommandTests
         var (exit, stdout, _) = Run(sandbox, "--captures");
 
         Assert.Equal(0, exit);
-        Assert.Contains("; 0 suspect", stdout, StringComparison.Ordinal);
+        Assert.Contains("captures: 0 live under", stdout, StringComparison.Ordinal);
         Assert.DoesNotContain($"f{directive} ", stdout, StringComparison.Ordinal);
         Assert.DoesNotContain($"f{knowledge} ", stdout, StringComparison.Ordinal);
     }
