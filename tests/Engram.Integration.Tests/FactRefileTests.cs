@@ -122,7 +122,7 @@ public class FactRefileTests
         Assert.Equal(before, CountFacts(connection));
         var closed = FactStore.ReadById(connection, source)!;
         Assert.Equal((T0.AddMinutes(1).ToUnixTimeSeconds(), (long?)existing), (closed.ValidTo, closed.SupersededBy));
-        Assert.Equal(("re-filed: test", (long?)existing), ReadSupersession(connection, source));
+        Assert.Equal(("superseded by newer target: /tools/ah2/a", (long?)existing), ReadSupersession(connection, source));
         var target = FactStore.ReadById(connection, existing)!;
         Assert.Equal(("newer at the target", (long?)null), (target.Body, target.ValidTo));
     }

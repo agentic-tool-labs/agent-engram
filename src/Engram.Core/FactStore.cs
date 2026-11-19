@@ -400,7 +400,11 @@ public static class FactStore
             """,
             ("$old", sourceFactId),
             ("$new", targetId),
-            ("$reason", reason),
+            // Nothing moved on this branch — the source was closed onto a newer belief already at the
+            // target — so the permanent history row says that, not the caller's move reason.
+            ("$reason", plan.Outcome == RefileOutcome.SupersededByNewerTarget
+                ? "superseded by newer target: " + targetPath
+                : reason),
             ("$now", timestamp));
 
         return new RefileResult(plan.Outcome, targetId);

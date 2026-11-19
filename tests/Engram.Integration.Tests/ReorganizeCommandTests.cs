@@ -195,10 +195,10 @@ public class ReorganizeCommandTests
     public void Ledger_ConvergesWhenTheToolAlreadyWritesTheTarget()
     {
         using var sandbox = new SandboxHome();
-        long newerSource, olderTargetSource, olderTarget;
+        long freshSource, newerSource, olderTargetSource, olderTarget;
         using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
         {
-            Ledger(connection, "/ah2/repo/t/fresh", "moves plainly");
+            freshSource = Ledger(connection, "/ah2/repo/t/fresh", "moves plainly");
             FactStore.Remember(connection, new FactWrite(
                 "/tools/ah2/repo/t/same", "concept", "records", "identical", "tool", "observed"), T0);
             Ledger(connection, "/ah2/repo/t/same", "identical");
@@ -226,6 +226,8 @@ public class ReorganizeCommandTests
 
         using var check = EngramDatabase.Open(sandbox.Home);
         Assert.NotNull(FactStore.ReadById(check, newerSource)!.ValidTo);
+        Assert.Equal("superseded by newer target: /tools/ah2/repo/t/rerecorded", ReadReason(check, newerSource));
+        Assert.Equal("re-filed: another tool's ledger, /ah2 → /tools/ah2", ReadReason(check, freshSource));
         Assert.Equal("current state", FactStore.ReadAt(check, "/tools/ah2/repo/t/rerecorded").Single().Body);
         Assert.Null(FactStore.ReadById(check, olderTarget)!.ValidTo);
     }
