@@ -416,7 +416,7 @@ public static class BackupStore
             {
                 // A full snapshot's label must say full. Markers can reach the live store (an older
                 // binary's restore, or a clear that failed) and VACUUM INTO would copy them across.
-                StripMarkersIfPresent(connection, partial);
+                warning = StripMarkersIfPresent(connection, partial);
             }
             else
             {
@@ -476,26 +476,42 @@ public static class BackupStore
 
     /// <summary>
     /// Deletes both markers from a full copy, when the store it was copied from carried any. Checked
-    /// on the live connection first, so the ordinary full take opens nothing extra.
+    /// on the live connection first, so the ordinary full take opens nothing extra. Returns a
+    /// warning when the delete fails.
     /// </summary>
-    private static void StripMarkersIfPresent(SqliteConnection live, string partial)
+    /// <remarks>
+    /// A failure keeps the copy. It is still a full snapshot, only its label is stale, and failing
+    /// the take would leave nothing — before a migration, that blocks the migration. No labelling
+    /// step may cost the snapshot (the same rule as a slimming failure).
+    /// </remarks>
+    private static string? StripMarkersIfPresent(SqliteConnection live, string partial)
     {
         if (EngramDatabase.ReadMeta(live, BackupMarkers.ScopeKey) is null
             && EngramDatabase.ReadMeta(live, BackupMarkers.OmittedKey) is null)
         {
-            return;
+            return null;
         }
 
         try
         {
             using var copy = EngramDatabase.Open(partial);
+            StripFault.Value?.Invoke();
             DeleteMarkers(copy);
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return "the snapshot is full but may list as authored, because clearing the scope markers its "
+                + "store carried failed — " + exception.Message;
         }
         finally
         {
             EngramDatabase.ReleasePooledConnections(partial);
         }
     }
+
+    /// <summary>The test-only counterpart of <see cref="SlimFault"/>, for the marker strip on a full take.</summary>
+    internal static readonly AsyncLocal<Action?> StripFault = new();
 
     private static void DeleteMarkers(SqliteConnection connection)
     {

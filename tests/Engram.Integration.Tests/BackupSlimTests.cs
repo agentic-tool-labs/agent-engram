@@ -381,6 +381,43 @@ public class BackupSlimTests
         Assert.DoesNotContain("marker", dry.Stdout, StringComparison.Ordinal);
     }
 
+    /// <summary>Ruling after round 2: a failed marker strip keeps the full copy and warns; the take does not fail.</summary>
+    [Fact]
+    public void FullTake_WhoseMarkerStripFails_KeepsARestorableSnapshotAndWarns()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        IReadOnlyDictionary<string, IReadOnlyList<string>> source;
+        BackupSnapshot full;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Seed(connection);
+            source = AuthoredDigest.Read(connection);
+            using (var transaction = EngramDatabase.BeginWrite(connection))
+            {
+                EngramDatabase.WriteMeta(connection, transaction, BackupMarkers.ScopeKey, BackupMarkers.AuthoredScope);
+                transaction.Commit();
+            }
+
+            BackupStore.StripFault.Value = () => throw new UnauthorizedAccessException("planted");
+            try
+            {
+                full = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
+            }
+            finally
+            {
+                BackupStore.StripFault.Value = null;
+            }
+        }
+
+        Assert.Contains("may list as authored", full.Warning, StringComparison.Ordinal);
+        Assert.Contains("planted", full.Warning, StringComparison.Ordinal);
+        Assert.True(File.Exists(full.Path));
+
+        SqliteConnection.ClearAllPools();
+        Assert.Equal(0, Cli(sandbox.Home, "restore", full.Name, "--apply").Exit);
+        AuthoredDigest.Equal(source, DigestOf(sandbox.Home.DatabasePath));
+    }
+
     /// <summary>
     /// §9 "provider = off with a stale fact_vec" and review round 1, n5: the vectors are dropped,
     /// restore promises no server-side embedding, and doctor reads embedding as Off afterwards.
