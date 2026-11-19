@@ -790,19 +790,22 @@ public static class CodeIndexer
     private sealed record LiveFact(
         long Id, string Path, string Predicate, string? Object, string Body, bool Regenerable, int? AnalyzerTier);
 
+    /// <summary>The per-file reconcile read; internal so its plan can be pinned (D95).</summary>
+    internal const string ReadLiveUnderSql =
+        $"""
+        SELECT fact.id, fact.path, fact.predicate, o.path, fact.body, fact.regenerable, fact.analyzer_tier
+        FROM fact
+        LEFT JOIN entity o ON o.id = fact.object_id
+        WHERE fact.valid_to IS NULL
+          AND {LiveCodeFacts.UnderFilePredicate};
+        """;
+
     private static Dictionary<(string, string, string?), LiveFact> ReadLiveUnder(SqliteConnection connection, string filePath)
     {
         var facts = new Dictionary<(string, string, string?), LiveFact>();
 
         using var command = connection.CreateCommand();
-        command.CommandText =
-            $"""
-            SELECT fact.id, fact.path, fact.predicate, o.path, fact.body, fact.regenerable, fact.analyzer_tier
-            FROM fact
-            LEFT JOIN entity o ON o.id = fact.object_id
-            WHERE fact.valid_to IS NULL
-              AND {LiveCodeFacts.UnderFilePredicate};
-            """;
+        command.CommandText = ReadLiveUnderSql;
         LiveCodeFacts.BindFile(command, filePath);
 
         using var reader = command.ExecuteReader();

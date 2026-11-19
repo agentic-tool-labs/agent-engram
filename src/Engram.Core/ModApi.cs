@@ -345,6 +345,18 @@ public static class ModApi
         return Ok(JsonSerializer.Serialize(new ModCapturesResponse([.. captures]), ModApiJsonContext.Default.ModCapturesResponse));
     }
 
+    /// <summary>The <c>path-facts</c> read; internal so its plan can be pinned (D95).</summary>
+    internal const string PathFactsSql =
+        $"""
+        SELECT fact.id, fact.path, fact.predicate, fact.body, fact.scope, fact.regenerable, fact.valid_from
+        FROM fact
+        WHERE fact.valid_to IS NULL
+          AND {LiveCodeFacts.UnderFilePredicate}
+          AND ($predicate IS NULL OR fact.predicate = $predicate)
+        ORDER BY fact.regenerable, fact.valid_from DESC, fact.id
+        LIMIT $limit;
+        """;
+
     private static ModApiResult PathFacts(EngramHome home, ModRequest request)
     {
         var path = request.Path;
@@ -361,16 +373,7 @@ public static class ModApi
         }
 
         using var command = connection.CreateCommand();
-        command.CommandText =
-            $"""
-            SELECT fact.id, fact.path, fact.predicate, fact.body, fact.scope, fact.regenerable, fact.valid_from
-            FROM fact
-            WHERE fact.valid_to IS NULL
-              AND {LiveCodeFacts.UnderFilePredicate}
-              AND ($predicate IS NULL OR fact.predicate = $predicate)
-            ORDER BY fact.regenerable, fact.valid_from DESC, fact.id
-            LIMIT $limit;
-            """;
+        command.CommandText = PathFactsSql;
         LiveCodeFacts.BindFile(command, entityPath);
         command.Parameters.AddWithValue("$predicate", (object?)request.Predicate ?? DBNull.Value);
         command.Parameters.AddWithValue("$limit", MaxPathFacts);
