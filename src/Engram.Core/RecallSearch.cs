@@ -13,13 +13,15 @@ public static class RecallSearch
     /// <param name="budgetTokens">The caller's budget; not positive or null means the configured default.</param>
     /// <param name="sessionExternalId">The host session whose working-memory notes join the ranking.</param>
     /// <param name="pinnedFactIds">Facts the caller has pinned, or null when it has no pins.</param>
+    /// <param name="types">A normalized <see cref="MemoryScopes"/> filter, or null for the default.</param>
     public static RecallPackDetail Run(
         EngramHome home,
         LocalRuntime local,
         string query,
         int? budgetTokens,
         string sessionExternalId,
-        IReadOnlySet<long>? pinnedFactIds)
+        IReadOnlySet<long>? pinnedFactIds,
+        IReadOnlyList<string>? types = null)
     {
         var config = ConfigFile.Load(home.ConfigPath);
         var settings = RetrievalSettings.Read(config);
@@ -42,6 +44,6 @@ public static class RecallSearch
             connection, home, EmbeddingSettings.Read(config), query, Environment.GetEnvironmentVariable, local);
 
         return RecallRanker.PackWithOutcome(
-            connection, query, budget, settings.SeedK, currentSessionId, now, vectorQuery, pinnedFactIds);
+            connection, query, budget, settings.SeedK, currentSessionId, now, vectorQuery, pinnedFactIds, types);
     }
 }

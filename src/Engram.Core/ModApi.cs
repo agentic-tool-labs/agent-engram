@@ -156,8 +156,13 @@ public static class ModApi
             throw Bad("mode must be 'shadow' or 'inject'");
         }
 
+        if (!MemoryScopes.TryNormalize(request.Types, out var types, out var typesError))
+        {
+            throw Bad(typesError!);
+        }
+
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var detail = RecallSearch.Run(home, local, query, request.BudgetTokens, sessionId, pinnedFactIds: null);
+        var detail = RecallSearch.Run(home, local, query, request.BudgetTokens, sessionId, pinnedFactIds: null, types);
         var result = detail.Result;
         var durationMs = Math.Round(System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds, 2);
 

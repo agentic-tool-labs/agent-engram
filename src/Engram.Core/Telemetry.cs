@@ -335,7 +335,20 @@ public sealed record TelemetryRecord(
     /// server's share of the latency and not the caller's. Only a <see cref="TelemetryEventKind.ModCall"/>
     /// recall sets this; the other operations are not on a latency budget anyone reads.
     /// </summary>
-    [property: JsonPropertyName("duration_ms")] double? DurationMs = null);
+    [property: JsonPropertyName("duration_ms")] double? DurationMs = null,
+
+    /// <summary>
+    /// The <c>types</c> filter a <see cref="TelemetryEventKind.Recall"/> was asked for, normalized to
+    /// registry order; absent when none was passed (D85).
+    /// </summary>
+    [property: JsonPropertyName("types")] IReadOnlyList<string>? Types = null,
+
+    /// <summary>
+    /// Packed lines of a <see cref="TelemetryEventKind.Recall"/> by memory type
+    /// (<see cref="RecallRanker.PackedByScope"/>), on every recall record. Lines, not
+    /// <c>fact_count</c>, whose meaning is unchanged (D43, D46).
+    /// </summary>
+    [property: JsonPropertyName("packed_by_scope")] IReadOnlyDictionary<string, int>? PackedByScope = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

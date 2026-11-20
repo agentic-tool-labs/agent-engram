@@ -128,7 +128,13 @@ public static class CodeIndexer
     {
         var notes = new List<string>();
         var root = ResolveRoot(options.Root);
-        var identity = ResolveIdentity(root);
+
+        // Before the lock and every write: an Unknown origin mints, scans, stamps and retires
+        // nothing for this root (D94).
+        if (!TryResolveIdentity(root, out var identity, out var originFailure))
+        {
+            return SkippedReport(root, UnknownOriginNote(root, originFailure));
+        }
 
         // Claimed before the last_root repair below writes anything, so the whole
         // read-modify-write cycle for this identity — the file_state snapshot, the scan, and the
@@ -197,6 +203,9 @@ public static class CodeIndexer
         // for a full FullScanIntervalMinutes and silently downgrade the repo to incremental.
         var stampFullScan = false;
 
+        // The same evidence without the --apply half, so a dry run can say what it would retire.
+        var scanComplete = false;
+
         // Same reasoning as stampFullScan: null unless a completed, applied run actually skipped
         // deletions, so a dry run reports what it would do without moving repo_registry state.
         string? suppressedReason = null;
@@ -234,6 +243,7 @@ public static class CodeIndexer
                 // Only a completed scan has actually seen the repo, and only an applied run
                 // may move state (§6.3b) — a dry run must report what it would do, not do it.
                 stampFullScan = options.Apply;
+                scanComplete = true;
             }
         }
         else
@@ -316,6 +326,10 @@ public static class CodeIndexer
             using var transaction = EngramDatabase.BeginWrite(connection);
             RepoEnrollment.StampFullScan(connection, transaction, stampIdentity, now);
             ClearSuppressedReason(connection, transaction, stampIdentity);
+
+            // `identity`, never `stampIdentity`: an enrollment row stamped for A while the scan
+            // ran under B must not retire on A's behalf (CodeIndexer.cs EnrolledIdentity split).
+            RetireSuperseded(connection, transaction, root, identity, repoPath, apply: true, now, notes);
             transaction.Commit();
             // Keyed by the same resolver the lookup-nudge hook uses to look it up, so the two
             // cannot drift apart on how a checkout root is spelled.
@@ -325,6 +339,10 @@ public static class CodeIndexer
         else if (suppressedReason is not null)
         {
             SetSuppressedReason(connection, identity, suppressedReason);
+        }
+        else if (scanComplete)
+        {
+            RetireSuperseded(connection, null, root, identity, repoPath, apply: false, now, notes);
         }
 
         if (options.Apply && storedVersion != CurrentVersion)
@@ -361,6 +379,12 @@ public static class CodeIndexer
     /// regardless of whether it has to report it (commanded) or stay silent (ambient).
     /// </summary>
     private static IndexReport ContentionReport(string root, IndexLockRecord? blockedBy) =>
+        SkippedReport(root, blockedBy is not null
+            ? $"skipped: another process is indexing this repo (pid {blockedBy.Pid}, since {blockedBy.StartedAt:O})"
+            : "skipped: another process is indexing this repo");
+
+    /// <summary>Zero counts and one note: a run that did nothing, and says why.</summary>
+    private static IndexReport SkippedReport(string root, string note) =>
         new(
             RepoPath: root,
             Root: root,
@@ -379,9 +403,7 @@ public static class CodeIndexer
             ClosesSkipped: 0,
             QueueConsumed: 0,
             QueueLeft: 0,
-            Notes: [blockedBy is not null
-                ? $"skipped: another process is indexing this repo (pid {blockedBy.Pid}, since {blockedBy.StartedAt:O})"
-                : "skipped: another process is indexing this repo"]);
+            Notes: [note]);
 
     /// <summary>
     /// Batch pre-pass for files whose language declares tier 2 (D24): one sidecar process
@@ -843,30 +865,75 @@ public static class CodeIndexer
     /// <summary>
     /// The durable answer to "is this the same repository": the origin URL when there is
     /// one — a checkout can move directories without becoming a different repo — else the
-    /// root path.
+    /// root path — or false when git could not say which.
     /// </summary>
     /// <remarks>
-    /// A caller enrolling a row under a precomputed identity must pass a <paramref name="root"/>
+    /// <para>A caller enrolling a row under a precomputed identity must pass a <paramref name="root"/>
     /// already run through <see cref="PathCanonicalizer.Canonical"/>, matching what
     /// <see cref="RepoEnrollment.Enroll"/> stores as <c>LastRoot</c> — <see cref="Index"/> resolves
     /// its own identity independently from that stored root, ignoring whatever identity the caller
     /// enrolled under, so a test that skips canonicalizing first enrolls under an identity a real
     /// tick never reaches and <c>StampFullScan</c> silently no-ops (hit while writing tests for
-    /// commits D, E and F).
+    /// commits D, E and F).</para>
+    /// <para>Three outcomes, never two (D94). <c>remote get-url origin</c> is the one call on the
+    /// happy path and the only source of identity, so <c>url.*.insteadOf</c> rewriting still
+    /// applies. Only when it yields nothing does <c>config --get remote.origin.url</c> classify:
+    /// exit 1 is NoRemote and the root path is the identity, as before; anything else — a URL
+    /// that get-url could not read, a corrupt config (observed exit 128), an empty value, a
+    /// timeout, git missing — is Unknown, and the caller must do nothing for this root. Treating a
+    /// failed lookup as "no remote" is what minted a root-path identity for checkouts that had one.
+    /// A global <c>[remote "origin"]</c> section with no url (observed: <c>prune = true</c>)
+    /// leaves config at exit 1, which is why <c>git remote</c>'s listing is never consulted.</para>
     /// </remarks>
-    public static string ResolveIdentity(string root)
+    public static bool TryResolveIdentity(string root, out string identity, out string failure) =>
+        TryResolveIdentity(root, "git", null, out identity, out failure);
+
+    internal static bool TryResolveIdentity(
+        string root, string git, TimeSpan? timeout, out string identity, out string failure)
     {
-        var remote = GitFileLister.Run(root, "remote", "get-url", "origin")?.Trim();
-        if (string.IsNullOrEmpty(remote))
+        var (getUrlExit, getUrlOut) = GitFileLister.RunWithStatus(root, ["remote", "get-url", "origin"], git, timeout);
+        var remote = getUrlExit == 0 ? getUrlOut.Trim() : string.Empty;
+        if (remote.Length > 0)
         {
-            return root;
+            var normalized = remote.TrimEnd('/');
+            identity = normalized.EndsWith(".git", StringComparison.OrdinalIgnoreCase)
+                ? normalized[..^4]
+                : normalized;
+            failure = string.Empty;
+            return true;
         }
 
-        var normalized = remote.TrimEnd('/');
-        return normalized.EndsWith(".git", StringComparison.OrdinalIgnoreCase)
-            ? normalized[..^4]
-            : normalized;
+        var (configExit, _) = GitFileLister.RunWithStatus(root, ["config", "--get", "remote.origin.url"], git, timeout);
+        if (configExit == 1)
+        {
+            identity = root;
+            failure = string.Empty;
+            return true;
+        }
+
+        identity = string.Empty;
+        failure = configExit switch
+        {
+            null => "git did not answer",
+            0 => "remote.origin.url is set but 'git remote get-url origin' gave nothing",
+            _ => $"git exited {configExit}",
+        };
+        return false;
     }
+
+    /// <summary>
+    /// <see cref="TryResolveIdentity(string, out string, out string)"/> for a root already known to
+    /// resolve. Throws on Unknown rather than falling back to the root path, which is the fallback
+    /// D94 removed.
+    /// </summary>
+    internal static string ResolveIdentity(string root) =>
+        TryResolveIdentity(root, out var identity, out var failure)
+            ? identity
+            : throw new InvalidOperationException(UnknownOriginNote(root, failure));
+
+    /// <summary>The one wording of "this root was skipped because git could not say what it is".</summary>
+    public static string UnknownOriginNote(string root, string failure) =>
+        $"skipped {root}: could not ask git for its origin ({failure})";
 
     private static string EnsureRepo(
         SqliteConnection connection,
@@ -884,12 +951,18 @@ public static class CodeIndexer
 
         if (existing is { } registered)
         {
-            if (apply && registered.Second != root)
+            // The row for the identity git resolves now is never retired (D94): re-homing a moved
+            // checkout and un-retiring one whose remote was pointed back are one statement, which
+            // is a no-op when neither applies.
+            if (apply)
             {
                 Execute(
                     connection,
                     null,
-                    "UPDATE repo_registry SET disk_path = $disk, detached_at = NULL WHERE identity = $identity;",
+                    """
+                    UPDATE repo_registry SET disk_path = $disk, detached_at = NULL
+                    WHERE identity = $identity AND (disk_path IS NOT $disk OR detached_at IS NOT NULL);
+                    """,
                     ("$disk", root),
                     ("$identity", identity));
             }
@@ -934,6 +1007,66 @@ public static class CodeIndexer
         transaction.Commit();
         notes.Add($"registered {repoPath} for {identity}");
         return repoPath;
+    }
+
+    /// <summary>
+    /// Marks every other live registration of this checkout retired (D94): a complete full scan
+    /// at <paramref name="root"/> under an identity git resolved positively is the evidence that
+    /// they no longer describe it. Only <c>detached_at</c> is set — nothing is deleted, and
+    /// <see cref="EnsureRepo"/>'s re-home clears it if that identity ever resolves here again.
+    /// Same checkout means equal canonical paths, never a shared prefix.
+    /// </summary>
+    private static void RetireSuperseded(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        string root,
+        string identity,
+        string repoPath,
+        bool apply,
+        DateTimeOffset now,
+        List<string> notes)
+    {
+        var checkout = PathCanonicalizer.Canonical(root);
+        var superseded = new List<(string RepoPath, string Identity)>();
+
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText =
+                """
+                SELECT repo_path, identity, disk_path FROM repo_registry
+                WHERE detached_at IS NULL AND disk_path IS NOT NULL
+                  AND identity <> $identity AND repo_path <> $repo;
+                """;
+            command.Parameters.AddWithValue("$identity", identity);
+            command.Parameters.AddWithValue("$repo", repoPath);
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                if (PathCanonicalizer.Canonical(reader.GetString(2)) == checkout)
+                {
+                    superseded.Add((reader.GetString(0), reader.GetString(1)));
+                }
+            }
+        }
+
+        foreach (var (stalePath, staleIdentity) in superseded)
+        {
+            if (!apply)
+            {
+                notes.Add($"would retire {stalePath} (superseded by {repoPath})");
+                continue;
+            }
+
+            Execute(
+                connection,
+                transaction,
+                "UPDATE repo_registry SET detached_at = $now WHERE repo_path = $path AND detached_at IS NULL;",
+                ("$now", now.ToUnixTimeSeconds()),
+                ("$path", stalePath));
+            notes.Add($"retired {stalePath} ({staleIdentity}): {root} is now {repoPath}");
+        }
     }
 
     private static void SetSuppressedReason(SqliteConnection connection, string identity, string reason) =>
