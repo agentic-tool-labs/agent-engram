@@ -62,9 +62,17 @@ public class TelemetryFeedTests
     }
 
     /// <summary>A subscriber that accepts the request and never answers it.</summary>
+    /// <remarks>
+    /// A raw socket bound to port 0, so the port is learned from the bind rather than chosen before
+    /// it. The previous version probed a free port, released it, and bound an HttpListener to it —
+    /// anything taking that port in between failed the constructor with "Address already in use",
+    /// once in a full run. HttpListener cannot bind port 0 and report the result, which is why this
+    /// is not one. A request counts once its first byte arrives, as a context did before.
+    /// </remarks>
     private sealed class HangingSink : IDisposable
     {
-        private readonly HttpListener listener = new();
+        private readonly TcpListener listener = new(IPAddress.Loopback, 0);
+        private readonly List<TcpClient> held = [];
 
         public int Accepted;
 
@@ -72,23 +80,33 @@ public class TelemetryFeedTests
 
         public HangingSink()
         {
-            var probe = new TcpListener(IPAddress.Loopback, 0);
-            probe.Start();
-            var port = ((IPEndPoint)probe.LocalEndpoint).Port;
-            probe.Stop();
-
-            Url = $"http://127.0.0.1:{port}/engram/";
-            listener.Prefixes.Add(Url);
             listener.Start();
-            _ = Task.Run(async () =>
+            Url = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}/engram/";            _ = Task.Run(async () =>
             {
-                var held = new List<HttpListenerContext>();
-                while (listener.IsListening)
+                while (true)
                 {
                     try
                     {
-                        held.Add(await listener.GetContextAsync().ConfigureAwait(false));
-                        Interlocked.Increment(ref Accepted);
+                        var client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
+                        lock (held)
+                        {
+                            held.Add(client);
+                        }
+
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                if (await client.GetStream().ReadAsync(new byte[1]).ConfigureAwait(false) == 1)
+                                {
+                                    Interlocked.Increment(ref Accepted);
+                                }
+                            }
+                            catch (Exception)
+                            {
+                                // Closed by Dispose or by the subscriber giving up.
+                            }
+                        });
                     }
                     catch (Exception)
                     {
@@ -98,7 +116,14 @@ public class TelemetryFeedTests
             });
         }
 
-        public void Dispose() => listener.Close();
+        public void Dispose()
+        {
+            listener.Stop();
+            lock (held)
+            {
+                held.ForEach(client => client.Dispose());
+            }
+        }
     }
 
     [Fact]

@@ -62,7 +62,6 @@ public sealed class VectorRecallTests : IDisposable
     {
         Directory.CreateDirectory(directory);
         var script = Path.Combine(directory, "embed-server.py");
-        var port = FreePort();
 
         File.WriteAllText(script, $$"""
             #!{{Python}}
@@ -95,7 +94,9 @@ public sealed class VectorRecallTests : IDisposable
                     self.send_header("content-length", str(len(raw)))
                     self.end_headers()
                     self.wfile.write(raw)
-            HTTPServer(("127.0.0.1", {{port}}), H).serve_forever()
+            server = HTTPServer(("127.0.0.1", 0), H)
+            print(server.server_address[1], flush=True)
+            server.serve_forever()
 
             """);
 
@@ -115,6 +116,11 @@ public sealed class VectorRecallTests : IDisposable
         })!;
         started.Add(process);
 
+        // The server binds port 0 and prints what it got (DiagnosticsTests.StartStandInEmbedder's
+        // reason): a port probed here and bound a process start later can be taken in between.
+        var line = Task.Run(process.StandardOutput.ReadLine);
+        Assert.True(line.Wait(TimeSpan.FromSeconds(120)), "the stand-in embedding server never reported a port");
+        var port = int.Parse(line.Result!, CultureInfo.InvariantCulture);
         var endpoint = $"http://127.0.0.1:{port.ToString(CultureInfo.InvariantCulture)}/v1";
         WaitUntilAnswering(endpoint);
         return endpoint;
