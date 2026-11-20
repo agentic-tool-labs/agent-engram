@@ -25,6 +25,9 @@ public static class MemoryScopes
     /// </summary>
     public static IReadOnlyList<string> ExcludedByDefault { get; } = [Tool];
 
+    /// <summary>Scopes <c>engram_remember</c> accepts in <c>scope</c>, the default first (D98).</summary>
+    public static IReadOnlyList<string> Writable { get; } = [Session, Project, Agent];
+
     /// <summary>
     /// The one implementation of the <c>types</c> predicate, over a fact aliased <c>f</c>. Every
     /// statement that honours a filter uses this text and <see cref="BindFilter"/>; a second

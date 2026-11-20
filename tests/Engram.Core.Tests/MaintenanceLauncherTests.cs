@@ -160,7 +160,38 @@ public class MaintenanceLauncherTests
         Assert.DoesNotContain("queue compact", script, StringComparison.Ordinal);
         Assert.DoesNotContain("repair", script, StringComparison.Ordinal);
         Assert.DoesNotContain("sync", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("compact --retired", script, StringComparison.Ordinal);
     }
+
+    private const string RetiredRemoval = " compact --retired --apply --auto --home ";
+
+    /// <summary>
+    /// D97: automatic removal rides the session-start chain, after the claim and after the
+    /// freshen job, so it runs under the maintenance lock and after any scan that could retire a
+    /// row this session. The launcher passes no setting: --auto makes the verb read the key.
+    /// </summary>
+    [Fact]
+    public void SessionStart_RemovesRetiredPathsLast_AfterFreshen_AndUnderTheClaim()
+    {
+        var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, "/repo");
+
+        var removal = script.IndexOf(RetiredRemoval, StringComparison.Ordinal);
+        Assert.True(removal > 0, script);
+        Assert.True(removal > script.IndexOf(" index --freshen ", StringComparison.Ordinal), script);
+        Assert.True(removal > script.IndexOf(" maintenance claim ", StringComparison.Ordinal), script);
+        Assert.True(removal > script.IndexOf(MaintenanceLauncher.Redirect, StringComparison.Ordinal), script);
+    }
+
+    /// <summary>
+    /// The job is on the session-start list itself, not on the index jobs: with no root to index
+    /// there is no freshen, and removal still runs.
+    /// </summary>
+    [Fact]
+    public void SessionStart_WithNoIndexRoot_StillRemovesRetiredPaths() =>
+        Assert.Contains(
+            RetiredRemoval,
+            MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null),
+            StringComparison.Ordinal);
 
     /// <summary>
     /// The one-descriptor-precedes-first-job property (D55/D56) must hold for both job lists —
@@ -199,6 +230,38 @@ public class MaintenanceLauncherTests
                 priorityAt + MaintenanceLauncher.Priority.Length,
                 script.IndexOf(MaintenanceLauncher.MacPriority, StringComparison.Ordinal));
         }
+    }
+
+    /// <summary>
+    /// The whole session-start script, byte for byte. P4 resolves a project per remember call
+    /// and binds nothing at session start (D98), so this text must not grow a job.
+    /// </summary>
+    [Fact]
+    public void TheSessionStartScript_IsExactlyThisText()
+    {
+        const string e = "'/opt/engram/bin/engram'";
+        const string h = " --home '/home/someone/.engram'";
+
+        var expected =
+            "exec </dev/null >/dev/null 2>&1; "
+            + "renice -n 10 -p $$ >/dev/null 2>&1 || :; "
+            + "taskpolicy -b -p $$ >/dev/null 2>&1 || :; "
+            + e + " maintenance claim --pid $$" + h + "; rc=$?; [ \"$rc\" -eq 1 ] && exit 0; "
+            + "{ "
+            + e + " backup take --if-due" + h + "; "
+            + e + " queue compact --apply --if-large" + h + "; "
+            + e + " repair --apply --tokens" + h + "; "
+            + e + " sync import --if-new --apply" + h + "; "
+            + e + " sync export --if-due --apply" + h + "; "
+            + e + " sync compact --apply --if-large" + h + "; "
+            + e + " index --drain-all --apply --auto '/repo'" + h + "; "
+            + e + " index --freshen --apply --skip '/repo'" + h + "; "
+            + e + " compact --retired --apply --auto" + h + "; "
+            + "}";
+
+        Assert.Equal(
+            expected,
+            MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: true, "/repo", platform: OSPlatform.OSX));
     }
 
     /// <summary>Each platform gets its own background line, and never the other's.</summary>

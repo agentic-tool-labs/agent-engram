@@ -764,6 +764,23 @@ anything starts closing session notes in bulk, re-measure, and the fix is a part
 `fact(session_id) WHERE valid_to IS NULL` index, a migration. A NULL-session note takes no label and
 renders `p?` (D84).
 
+**A project note is filed by the directory its own call names, never by a session.**
+`engram_remember` writes under the transport's `Mcp-Session-Id`, which D43 measured as disjoint from
+Claude Code's `session_id`, so anything bound at session start is bound to a row that no remember
+ever reads. `scope:"project"` resolves `project_dir` per call through the indexer's own resolvers to
+a live `repo_registry` row, at a cost of ~20 ms for two git calls (N1). Enrollment is not consulted,
+and every failure writes a session note with a one-line reason. The leaf is the 8-byte fingerprint,
+because a shared namespace turns a 32-bit collision into a lost write. `Fingerprint`'s default stays
+4, which is what keeps every existing address where it is (D98).
+
+**Role memory is keyed on the role the caller names, never on an id the server would have to
+infer.** `scope:"agent"` takes `agent` = the hook payload's `agent_type` and writes under
+`/agents/<role-slug>/`, three per role per MCP session. The subagent primer (and an `--agent` main
+session's) delivers the newest five after the precedence line. A role with no facts still gets
+its one key line, or it could never learn its key, while a payload with no role stays
+byte-identical and makes no extra read. "Newest" is the highest fact id: the one ordering both
+summary paths can apply (D100).
+
 **Falsify against a committed tree, and assert the patch landed.** A harness that restores arms with
 `git checkout --` restores to HEAD, so an uncommitted change under test is reverted by its own
 falsification and every arm goes red for the wrong reason. The sibling failure is quieter: a pattern

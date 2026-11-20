@@ -163,6 +163,18 @@ public static class TelemetryEventKind
     public const string ModCall = "mod-call";
 
     /// <summary>
+    /// A <c>compact --retired --apply</c> run that had at least one eligible prefix (D97):
+    /// <c>started</c>, one <c>removed</c> per prefix with <c>repo</c> = the removed
+    /// <c>repo_path</c>, then <c>finished</c> or <c>failed</c>. Every record carries
+    /// <c>trigger</c> (<c>auto</c> or <c>manual</c>) and no counts (D55).
+    /// </summary>
+    /// <remarks>
+    /// Its own kind, never <see cref="Index"/>, which answers whether indexing runs (D56). A dry
+    /// run emits nothing (D69).
+    /// </remarks>
+    public const string RetiredRemoval = "retired-removal";
+
+    /// <summary>
     /// Every kind Engram emits.
     /// </summary>
     /// <remarks>
@@ -175,7 +187,7 @@ public static class TelemetryEventKind
         Recall, Remember, Digest, Browse, Expand, Revise, Timeline, Judge,
         SessionStart, ServerStart, ServerStop, SessionOpen, SubagentStart, PreCompact, PostCompact,
         FileTouched, UserPrompt, MemoryGuard, LookupNudge, ToolObserved, Index, Embedding, Enrollment,
-        Sync, Navigate, Report, ModCall,
+        Sync, Navigate, Report, ModCall, RetiredRemoval,
     ];
 }
 
@@ -338,6 +350,20 @@ public sealed record TelemetryRecord(
     [property: JsonPropertyName("duration_ms")] double? DurationMs = null,
 
     /// <summary>
+    /// What started a <see cref="TelemetryEventKind.RetiredRemoval"/> run: <c>auto</c> (session
+    /// start, <c>[indexing] auto_remove_retired</c>) or <c>manual</c>. Only that kind sets it.
+    /// </summary>
+    [property: JsonPropertyName("trigger")] string? Trigger = null,
+
+    /// <summary>
+    /// True on a <see cref="TelemetryEventKind.RetiredRemoval"/> <c>finished</c> record whose
+    /// automatic transaction held the write lock longer than
+    /// <see cref="StoreCompactor.AutoOverBudget"/>; absent otherwise. A bool, not a duration
+    /// (D55). Only that kind sets it.
+    /// </summary>
+    [property: JsonPropertyName("over_budget")] bool? OverBudget = null,
+
+    /// <summary>
     /// The <c>types</c> filter a <see cref="TelemetryEventKind.Recall"/> was asked for, normalized to
     /// registry order; absent when none was passed (D85).
     /// </summary>
@@ -348,7 +374,26 @@ public sealed record TelemetryRecord(
     /// (<see cref="RecallRanker.PackedByScope"/>), on every recall record. Lines, not
     /// <c>fact_count</c>, whose meaning is unchanged (D43, D46).
     /// </summary>
-    [property: JsonPropertyName("packed_by_scope")] IReadOnlyDictionary<string, int>? PackedByScope = null);
+    [property: JsonPropertyName("packed_by_scope")] IReadOnlyDictionary<string, int>? PackedByScope = null,
+
+    /// <summary>
+    /// The scope a <see cref="TelemetryEventKind.Remember"/> actually wrote, only when it is not
+    /// <c>session</c>; a degraded project write records none (D98).
+    /// </summary>
+    [property: JsonPropertyName("scope")] string? Scope = null,
+
+    /// <summary>
+    /// Why a <c>scope:"project"</c> remember was kept as a session note: <c>no-dir</c>,
+    /// <c>bad-dir</c>, <c>not-checkout</c>, <c>git-unknown</c> or <c>not-indexed</c> (D98).
+    /// </summary>
+    [property: JsonPropertyName("project_unresolved")] string? ProjectUnresolved = null,
+
+    /// <summary>
+    /// Role facts a primer delivered in its role block, set on a <c>subagent-start</c> or
+    /// <c>session-start</c> record whenever the payload named a role (D100). Its own field;
+    /// <c>fact_count</c> stays null on a primer (D46).
+    /// </summary>
+    [property: JsonPropertyName("role_fact_count")] int? RoleFactCount = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

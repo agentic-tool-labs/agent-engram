@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace Engram.Core;
 
@@ -323,6 +324,13 @@ public sealed class GitFileLister : IFileLister
             .ToArray();
     }
 
+    /// <summary>
+    /// Test seam: when a flow sets this, every <see cref="RunWithStatus"/> on that flow — and so
+    /// every <see cref="Run"/> — counts itself, so a test can assert that a path spawned no git
+    /// process without racing parallel tests (D98).
+    /// </summary>
+    internal static readonly AsyncLocal<StrongBox<int>?> InvocationCounter = new();
+
     internal static string? Run(string workingDirectory, params string[] arguments)
     {
         var (exitCode, stdout) = RunWithStatus(workingDirectory, arguments);
@@ -343,6 +351,11 @@ public sealed class GitFileLister : IFileLister
         string executable = "git",
         TimeSpan? timeout = null)
     {
+        if (InvocationCounter.Value is { } counter)
+        {
+            counter.Value++;
+        }
+
         var info = new ProcessStartInfo(executable)
         {
             WorkingDirectory = workingDirectory,

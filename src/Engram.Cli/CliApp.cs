@@ -122,6 +122,7 @@ public static class CliApp
         writer.WriteLine("  repair [--apply]                   rebuild derived state — the lexical index, denormalized paths — never facts");
         writer.WriteLine("  review <list|clear <id>> [--apply]  list facts with a review date set, or clear one");
         writer.WriteLine("  compact [--path <prefix>] [--apply]  prune regenerable code facts: closed ones, or a whole subtree with --path");
+        writer.WriteLine("  compact --retired [--apply]        remove what superseded repo registrations left behind");
         writer.WriteLine("  reorganize <--ledger|--captures> [--apply]  re-file a tool's ledger out of user memory, or close misfiled captures");
         writer.WriteLine("  export [--path <prefix>] [--out <file>]  write facts as a portable JSONL bundle (stdout by default)");
         writer.WriteLine("  import <file> [--apply]            add a bundle's facts; never rewrites or closes what the store already has");

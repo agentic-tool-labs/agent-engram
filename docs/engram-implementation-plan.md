@@ -6339,7 +6339,7 @@ in the dry run reddens N14; dropping the `superseded_by` condition reddens N8, N
 restatement in the same second share the identity key, so the live restatement matches the closed row
 and is never restored; `Sync.ApplyClose` with no superseder writes no `supersession` row; and
 `supersession.evidence` is never journalled.
-of scope here.
+
 ## D84 — Prior sessions are enumerated from `session`; a NULL-session note takes no label
 
 **Supersedes D81's choice of CTE form**, not its reasoning. `RecallRanker`'s `prior_sessions` is
@@ -6568,6 +6568,7 @@ guarantee rests on the oracle comparison alone.
 
 `RecallTypesTests`' pre-D85 identity check now removes the tool arm from `excluded`. It compares rows
 only, because that arm has a plan of its own, and `RecallRankerPlanTests` pins that plan.
+
 ## D96 — Scheduled snapshots also leave out closed code history, through `StoreCompactor`
 
 Spec: `backup-derived-state.md` §4.2 (phase 2b, eng-40); adr-2, accepted 2026-11-19. Builds on D93 and
@@ -6609,6 +6610,329 @@ the live store is unchanged, and a test holds it.
 pruning closed regenerable facts from it would remove exactly what that compact deletes. It still omits
 vectors. `Take` carries this as `keepClosedHistory`, which only `StoreCompactor` passes. `facts_closed` is
 absent from such a snapshot, so a restore names nothing as unrecoverable.
+
+## D97 — Retired registry paths are removed by compact, by hand or opt-in at session start
+
+**Problem.** D94 marks a superseded registry row retired and deletes nothing. What it left behind — on
+the real store 25 rows, 206,171 live and 22,510 closed regenerable facts, 110,324 entities, 25,705 file
+states, 122,684 vectors — stays until something removes it. The user asked for an automatic option as
+well as the manual verb (adr-3, 2026-11-19).
+
+**Rule 1: `engram compact --retired` is path mode applied to every retired row.** Dry run by default;
+`--apply` acts. It is the same `SelectTargets`, `EntitySql` (F4), F5 predicate, `FileStateSql` and
+`RegistrySql`, one implementation each. Every prefix's targets go into `temp.compact_target` before any
+entity, file-state or registry delete, because `EntitySql` looks through the target set. Manual apply is
+one `pre-compact` snapshot, one `BEGIN IMMEDIATE` transaction for the batch, one checkpoint and VACUUM,
+and it prints first that other sessions' writes will fail until it finishes. The report lists, per
+prefix and in total, facts pruned, protected, entities removed and kept for rename history, authored
+facts left in place (first 20 paths), file states, registry rows, vectors, and skipped rows with reasons.
+`repo_enrollment` is never touched.
+
+**Rule 2: a row is removed only after an apply-time re-check, split around the lock.** Before the
+transaction, because it shells out: the `disk_path` exists, git resolves it positively now, a
+non-detached row at the same checkout carries that identity, and that row's
+`last_scan_suppressed_reason` is NULL. Inside the transaction: the row is still detached and that winner
+still exists, so an `index` that un-retired it in between wins and nothing is deleted. A row that fails
+is reported "skipped: <reason>" and stays retired. Both modes use the same re-check.
+
+**Rule 3: `[indexing] auto_remove_retired = true` is a standing `--apply` the user typed.** Absent,
+`false` or unparseable means off; unparseable also lands in `Problems`, which doctor now reports for the
+`[indexing]` section. Nothing Engram ships or runs writes the key. Session start appends
+`compact --retired --apply --auto` to the chain after `index --freshen`, under the `maintenance` claim
+(D82); `--auto` makes the verb read the key and exit 0 silently when it is off, so the launcher reads
+nothing. `--auto` without `--apply`, with `--path`, or without `--retired` is a usage error (exit 2).
+
+**Rule 4: `--auto` removes one prefix per run, after 7 days, if it has at most 2,000 entities.** The
+oldest retirement first; a prefix over the cap is skipped for the next. One transaction, a passive
+checkpoint, no VACUUM. A run that removes nothing takes no snapshot and records no telemetry. A
+transaction that held the write lock longer than 2 s still commits, and its `finished` record carries
+`over_budget: true`. These bounds are what keep "Anything destructive is dry-run first" (D49): the flag
+is the user's, every row is shown by doctor and the dry run for 7 days first, and only regenerable rows
+go, behind a snapshot.
+
+**Why one prefix, measured.** E6, on a copy of the real store with all 25 prefixes in per-prefix
+transactions: 36.5 s of transactions, 574 ms to 3,832 ms each, and **6 of 6** concurrent `BEGIN
+IMMEDIATE` writers (busy_timeout 5000) failed `database is locked` at about 5.4 s. The lock was free for
+0.1 ms between transactions, and a writer sleeping in its busy handler never lands in that window. So
+per-prefix transactions bounded each transaction and not the run. A sleep between prefixes would have to
+beat SQLite's busy-handler schedule; a time budget bounds the run, not any writer's wait. **That copy was
+in rollback-journal mode, not WAL**: `VACUUM INTO` writes its output that way, and the real store is WAL
+(schema line 18). Re-run on a WAL copy, the same 25 back-to-back transactions failed 0 of 16 writes, but
+the longest waited 4,822 ms against a 5,000 ms busy_timeout — a near miss rather than a margin, so the
+rule stands on the WAL number. A measurement made on a copy has to check the copy's journal mode first.
+
+**Why entities, measured.** E7 fitted each removal's delete phase: vectors R² 0.965, entities 0.929,
+facts 0.770, file states 0.232. Fact count does not even order cost — 10,726 facts took 917 ms and 6,487
+took 1,737 ms. Entities over vectors because doctor can count them through `entity.path` without a fact
+scan, so the verb and doctor share `StoreCompactor.EntitiesUnder` and cannot disagree. The fit puts 2,000
+at about 0.56 s. The D92 `agent-tools-2` outlier holds 36,522 entities for 15,261 facts (2.4 per fact,
+against 0.19 in `wrangl-3`); the entity fit predicts about 6.2 s for it, close to the 7.31 s measured,
+but over-predicts `wrangl-3`, so it is partly explained and no more.
+
+**Rule 5: `Subtree` is an equality and two byte ranges, and path mode lets the path index serve it.**
+`[$p/, $p0)` and `[$p#, $p$)` mean what the `substr` form meant under BINARY collation, and an index on
+the column can serve them. The range form alone changed nothing measurable: with `regenerable = 1 AND`
+in front and no `sqlite_stat1`, the planner still took `ix_fact_regenerable` and walked every
+regenerable fact (smallest prefix 144–147 ms against 144–160 ms before, sqlite3 CLI, process floor
+about 22 ms). Path mode's selection and protected count therefore share one predicate with
+`+regenerable = 1`, the remedy D92 used for `PruneIneligible`: 21.6–22.8 ms, `agent-tools-3` 29.3
+against 141.7 ms. `EntitySql` had the same shape through `ix_entity_kind` and gets `+kind` on the same
+evidence: 78–104 ms against 23–27 ms. Closed mode keeps the plain form. A tier-2 test pins both plans.
+Equivalence was measured on the real-store copy: every compact mode's dry run (`--retired`, no path,
+one `--path`, and the root — old `//` against new `/`) printed byte-identical output under the old and
+new SQL. The `--retired` dry run went 13.5 s → 2.7 s; the root dry run read 1.67 → 2.03 s on one
+sample, since there the path index covers every row.
+
+**Rule 6: `compact --path /` is the whole code index.** Normalisation lives in one place,
+`StoreCompactor.NormalizePath`: trailing `/` stripped, empty becomes `/`, a path not starting with `/` (or
+empty) is a usage error, exit 2. The root binds as the empty string, which makes every boundary
+predicate read "every path starting with `/`" — a parameter form, not a second definition of "under".
+Before, `/` matched only `//…` paths and `//` silently meant everything; both now mean the root.
+
+**Telemetry.** New kind `retired-removal`: `started`, one `removed` per prefix with `repo` = the removed
+`repo_path`, then `finished` or `failed`; every record carries `trigger: auto|manual`, never a count. A
+dry run emits nothing. It is in `TelemetryEventKind.All`.
+
+**Doctor.** Key off: Warn with the residue count, `-> engram compact --retired`, and the key named as an
+option. Key on: Ok "removed automatically after <date>" while inside grace; Warn "too large to remove
+automatically" over the cap whatever the grace, since `--auto` will never take it and an Ok would be false
+for seven days; Warn "automatic removal has not run" strictly more than a day past grace.
+A row whose checkout is absent here is Ok "kept: checkout not on this machine", never Warn. Doctor does
+not read telemetry, so `over_budget` is telemetry-only.
+
+**The envelope, measured (E8).** On a WAL copy with a server on its own port taking an `engram_remember`
+every 100 ms over MCP, twelve automatic runs removed one prefix each, oldest first, then the thirteenth
+removed nothing: 13 of the 25 prefixes are over the cap (2,278 to 19,719 entities) and are the manual
+verb's. Every transaction took 388–607 ms; 536 writes, none failed, the slowest 673 ms. On a rollback
+copy the same runs failed nothing either, but one write per run waited 3.0–4.8 s on the snapshot's
+`VACUUM INTO`, which blocks writers there and not under WAL.
+
+**Sync scope.** The dry run notes a configured `[sync]` `repo:` scope that resolves today and would
+resolve to nothing once the eligible prefixes are gone, by asking `SyncScope.ResolveRepo` — the resolver
+`sync export` uses — over the registry before and after, so the note and the export cannot disagree.
+
+**The in-lock re-check repeats the suppression test**, not only "still retired, winner still there": a
+truncated scan landing between the git check and `BEGIN IMMEDIATE` keeps the row.
+
+## D98 — A project note is filed by the directory its call names, never by a session binding
+
+**What it is.** `engram_remember` gains `scope` (`session` by default, or `project`) and
+`project_dir`. A note is durable only when the writer says so at write time; nothing is promoted
+afterwards. With a resolved project it lands at `/projects/<p>/notes/<fp64>`, entity kind `note`,
+scope `project`, `learned_via observed` (D19). Its predicate comes from a fixed cue match, first
+match wins: `warns` for `never`, `do not`, `don't`, `must not`, `trap`, `gotcha` or `breaks` as
+whole words in any case; `decided` for `decided`, `chose` or `rejected`; else `holds`. The
+predicate is display and FTS text, and the path carries uniqueness. **The cues match
+`FactStore.Normalize`'s form, the same text the fingerprint hashes**, so one path always carries
+one predicate. Matched on raw text, "don't" (warns) and "don’t" (curly apostrophe: holds), or
+"Do-not" and "do not", shared a path under two predicates. The repeat check is path plus
+predicate, so the second write became a second live fact at the same address. `don't` is spelled
+`don ?t` in the normalized form. The accepted scopes come from
+`MemoryScopes.Writable` (session, project); `agent` joins at P5. Any other value is an error naming
+them, and nothing is written. The mod `remember` op is unchanged and always writes a session note.
+
+**Why per call, and not per session.** The spec first bound `session.repo_path` from the
+session-start hook's `cwd`, keyed on Claude Code's `session_id`. `engram_remember` writes under the
+transport's `Mcp-Session-Id`, and D43 measured those id spaces as disjoint. The bound row would never
+have been the one a remember looks up, so every project write would have degraded, and the "bound"
+and "not yet bound" cases would have been indistinguishable. So the project comes from the call's
+own `project_dir`:
+1. `RepoEnrollment.FindCheckoutRoot`: is there a `.git` above it at all? This is filesystem only.
+2. `CodeIndexer.ResolveRoot`, then `TryResolveIdentity`.
+3. `CodeIndexer.LiveRepoPath`: the `repo_registry` row for that identity with `detached_at IS NULL`.
+4. The project is the second segment of that row's `repo_path`.
+
+Enrollment is not consulted. The project is an address, not indexing consent, and only a live
+registry row knows the slug. Minting one here would be a second minting path beside `EnsureRepo`.
+A linked worktree resolves to its main checkout's project through the shared origin identity. That
+is a stated limit: in a repo with no `origin`, the identity is the toplevel path, a worktree's
+toplevel is its own, and a note from there reads as `not-indexed`.
+`session.repo_path` stays unwritten, because nothing reads it. Nothing at session start changed:
+`MaintenanceLauncherTests` pins the script byte for byte.
+
+**A failed resolution writes a session note, never a refusal** (D64: a bounced write risks the
+capture). The response gains one line naming why. The `remember` record's `project_unresolved`
+carries the same reason as a closed code (`no-dir`, `bad-dir`, `not-checkout`, `git-unknown`,
+`not-indexed`), so the adoption question can be split from the resolution one. `scope` is recorded
+only when a project note was actually written. `git-unknown` is reserved and not yet produced:
+when git cannot answer, `TryResolveIdentity` fails and the call reads as `not-indexed`. Producing
+it is a separate item. Until then, the `not-indexed` notice names `project_dir` as the call gave
+it, not a root git may have failed to find, so a subdirectory is never reported as unindexed on the
+strength of a failed lookup.
+
+A `scope` passed with `supersedes` is not applied, because a restatement keeps the capture's
+address. The response says so in one line ("scope ignored — a revision keeps the original's
+address") rather than reading as obeyed.
+
+**Why the leaf is 64 bits.** `FactStore.Fingerprint` keeps 4 bytes. Under `/sessions/<id>/` a
+collision is harmless, because the session segment separates the paths. A shared namespace has no
+such segment, so a collision there is a lost write: the repeat rule hands back another statement's
+handle. The expected count is about n²/2³³, roughly 36% at 62,000 notes. The function takes a
+length; the default stays 4, so no existing address moves. The test uses a real 32-bit collision,
+found by birthday search: "project note collision probe 36851" and "… 77915" share `0528fe15`.
+
+**One append routine.** `SessionFacts.AppendAt` writes both kinds. They differ by path, predicate,
+scope and parent entities. A repeat of a live identical statement, under the same normalization,
+returns the existing handle and writes nothing, as it always has for session notes.
+
+**Measured (N1).** On the published binary, through a raw MCP client against a disposable-home
+server, 50 calls per arm with the arms alternated: a `scope:"project"` remember into an indexed
+checkout cost **p50 +19.5 / p95 +21.5 ms** over the same call without scope, and +20.3 / +25.6 ms on
+a repeat run. That is the two git subprocesses. It is inside the 50 ms bar the spec set, so no
+`ByRoot` cache goes in front of them. A remember without `scope:"project"` runs no git at all, and
+a test asserts it through a per-flow invocation counter on `GitFileLister`.
+
+**Not done, deliberately.** `Diagnostics.CheckRepo` keeps its own query. It joins `file_state` and
+does not filter `detached_at`, so sharing `LiveRepoPath` would change what doctor reports. The tool
+surface ceiling moved from 6,591 to 6,852 for the two parameters the spec words.
+
+**Falsified** against the committed tree. Each break was confirmed landed, then restored; red
+counts in brackets:
+1. default fingerprint length 8 [2]
+2. project leaf 4 bytes [4]
+3. `never` dropped from the cue [1]
+4. `decided` tested before `warns` [1]
+5. no word boundaries [1]
+6. no `Directory.Exists` [1]
+7. no checkout check [1]
+8. a retired row accepted [1]
+9. resolution on every scope [1]
+10. no repeat check [1]
+11. any registry scope accepted [1]
+12. `scope` recorded on a degraded write [5]
+13. a generic notice [5]
+14. a bind job in the script [1]
+15. `session.repo_path` written [1]
+16. matching session notes closed [1]
+17. a checkout recognised only at its root [1, the worktree test]
+18. a slug minted for an unindexed repo [2]
+19. written as `user` [3]
+20. enrollment required [6]
+21. a notice on every remember [1]
+22. no `[project <p>]` echo [2]
+
+The review rework was falsified the same way:
+- cues read raw text: 2 red (the cue theory, and the two-spellings repeat test)
+- the not-indexed notice names the root: 1 red (the subdirectory test)
+- no scope-ignored notice: 1 red
+- the notice on every restatement: 1 red (its negative)
+- no `IsPathFullyQualified` guard: 1 red (`"."`)
+
+The relative-path half of `bad-dir` is held by `"."`, which exists relative to the process's
+working directory. It therefore passes `Directory.Exists` and reaches the `IsPathFullyQualified`
+guard on its own.
+
+## D100 — Role memory is keyed on the role the caller names, and delivered in that role's primer
+
+**What it is.** With `scope:"agent"` and `agent` set to a role key, `engram_remember` files a lesson
+at `/agents/<role-slug>/<fp64>`: scope `agent`, entity kind `note`, `learned_via observed`, and the
+predicate from D98's cue rule. It sits under a role entity `/agents/<role-slug>` of kind `agent`
+whose display name is the key as the first writer spelled it. The role is the hook payload's
+`agent_type` (`wrangl:architect`), never an instance name (`engram-architect-2`), which would split
+one role's memory per spawn. Two keys that slug alike share a path and the first writer's name; that
+is the same trade-off `SessionFacts.AgentPath` makes. There is no retroactive path: no existing
+session note ever becomes role memory.
+
+**Nothing crosses the two id spaces (D43).** The server cannot attribute an MCP call to a subagent,
+so the caller passes the key, and the primer is what tells it the key. The write cap counts the
+writing MCP session's own rows. The read keys on the payload's `agent_type`. Neither needs the other
+id space, which is the check P4 failed.
+
+**Noise control.**
+- Opt-in only.
+- At most three live agent-scope facts per role from one session, counted from the store. A fourth
+  is kept as a session note under `/sessions/<id>/<role>/` with the notice "role memory is for
+  lessons every future <role> needs; kept as a session note". It is never refused.
+- The repeat check runs before the cap, so re-recording a lesson already held returns its handle,
+  spends none of the cap, and is not demoted.
+- A missing `agent`, or one that slugs to nothing, gives a session note with "no usable agent key —
+  kept as a session note; pass your role key from the primer as agent".
+- Delivery is capped at five facts and the primer's 300-token budget.
+- Role memory never reaches a count or example line: `/agents/` is excluded from the histogram and
+  both example arms by path prefix, the same mechanism as sessions and directives, and from
+  `PrimerSummary.From` so both summary paths agree. `FactCatalog.ReadLongTerm` keeps them, because
+  recall reads it and the spec puts agent facts in default recall.
+- The known gap stands: nothing expires role memory. Newest-first delivery lets stale lessons fall
+  off the primer while staying recallable.
+
+**The role block.** `subagent-start`, and `session-start` when the payload carries `agent_type`
+without `agent_id` (a main `--agent` session), add a block after the directives. It is a header
+`Role memory for <key>:`, the key line `Your role memory key: <key>.`, then the newest five role
+facts.
+- The key line names no tool. The D15 guard's one exemption is not widened, and the how-to lives in
+  `engram_remember`'s `scope` description.
+- Every line is budgeted after the precedence line, so the block can never displace it.
+- The block is omitted when the role has no facts or no fact line fits. A primer for such a role is
+  byte-identical to one with no role, and a payload without a role makes no extra read.
+- "Newest" is the highest fact id, because that is the one ordering `PrimerSummary.From` can apply as
+  well as the SQL path, and the two must render the block identically.
+- The read is one path-range query on entity's unique index.
+- `role_fact_count` is set whenever the payload named a role, counting what was actually delivered.
+  `fact_count` stays null (D46).
+
+**The key line is emitted whenever the payload names a role, facts or not (review F2 ruling).**
+As first specced, an empty role emitted nothing, so a role that had never written was never told
+its key and role memory could never start: a write rule with no trigger loses (D51). So the
+invariant is amended:
+- An empty role's primer is the previous primer plus exactly the line
+  `Your role memory key: <agent_type>.`, with no header.
+- If facts exist but none fits the budget, the result is the same.
+- A payload without a role is still byte-identical.
+- The key line is the one part of the block budgeted first, and it is omitted only if it cannot fit
+  at all.
+- `agent`'s description now asks for that key, never an instance name. A write under an
+  instance-style key still lands; it is not refused, it is just no longer invited.
+- The description reads "if the primer gave you a role memory key", not "if you are a subagent",
+  because a main `--agent` session gets the key line too.
+- The ceiling moved from 6,963 to 7,012, then to 7,031 for that wording.
+
+The cost of the line is `TokenEstimator`'s `ceil(chars / 3.6)` over 23 characters plus the key.
+That comes to 11 tokens for `wrangl:architect` and 9 for `explorer`, about 8–12 for ordinary keys,
+on every `subagent-start` whose payload names a role. On the instance D46 describes (336
+subagent-starts against 54 sessions) that is roughly 3,000–4,000 primer tokens across those 336
+spawns, about 10 per spawn and none per main session without `--agent`.
+
+**Measured (E8).** Published binary, file-timed, 50 alternated runs per arm, with five role facts in
+the store: `subagent-start` p50 was 13.30 ms without a role and 13.40 ms with one. That is +0.09 ms,
+against a self-spread of 0.01 ms for the no-role arm run against itself. `session-start` was not
+timed separately; it makes the same read.
+
+**The tool-surface ceiling** moved from 6,852 to 6,963 for the `agent` wording in `scope`.
+
+**Falsified** against 7ec60f5, each break landed and then restored; red counts in brackets:
+1. cap 4 [1]
+2. cap across sessions [2]
+3. cap across roles [1]
+4. cap before repeat [1]
+5. deliver 6 [1]
+6. SQL oldest-first [2]
+7. in-memory oldest-first [1]
+8. header for an empty role [2]
+9. role read without a role [1]
+10. read widened to session notes [3]
+11. role lines unbudgeted [2]
+12. block before the precedence line [2]
+13. a tool name in the key line [3]
+14. raw key in the path [3]
+15. no display name [2]
+16. written as `session` [6]
+17. no missing-agent notice [1]
+18. session-start ignores `agent_id` [1, tier 3]
+19. no `role_fact_count` [1, tier 3]
+20. subagent-start drops the role [1, tier 3]
+
+Against 8360e6c (review F1):
+21. SQL `/agents/` exclusion disabled [2]
+22. `From` exclusion disabled [2]. The first attempt deleted the filter, left an unused variable,
+    and failed to compile under warnings-as-errors. It proved nothing and was redone as a
+    compiling break.
+
+Against df1a4a5 (F2 ruling):
+23. no key line for an empty role [5, one tier 3]
+24. header emitted with the key for an empty role [4]
+25. a key line without a role [6, two tier 3]
+26. instance-style keys refused [1]
+27. the old "your own name" description [1, golden]
 
 ## D101 — Five end-to-end tests that failed under load: what each now guards, and why
 

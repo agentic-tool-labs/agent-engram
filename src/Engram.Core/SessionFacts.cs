@@ -130,23 +130,64 @@ public static class SessionFacts
         bool sync = false)
     {
         var sessionId = SessionStore.EnsureSession(connection, transaction, sessionExternalId, now);
-        var path = PathFor(sessionId, agent, statement);
 
-        if (FactStore.FindLiveFactId(connection, transaction, path, Predicate) is { } existing)
+        return AppendAt(
+            connection,
+            transaction,
+            sessionId,
+            PathFor(sessionId, agent, statement),
+            Predicate,
+            Scope,
+            statement,
+            subject,
+            evidence,
+            now,
+            details,
+            sync,
+            reason: "re-recorded in the same session",
+            ensureParents: createdAt =>
+            {
+                FactStore.EnsureEntity(connection, transaction, SessionPath(sessionId), SessionKind, createdAt);
+
+                if (!string.IsNullOrWhiteSpace(agent))
+                {
+                    // Named, because the path only carries the slug and the model reads this back:
+                    // "task-gopher:task-gopher" and "task gopher task gopher" slug identically.
+                    FactStore.EnsureEntity(
+                        connection, transaction, AgentPath(sessionId, agent), AgentKind, createdAt, displayName: agent);
+                }
+            });
+    }
+
+    /// <summary>
+    /// The one note-append routine: a session note and a project note (D98) differ only in where
+    /// they are addressed, under which predicate and scope, and which parent entities they need.
+    /// A live fact already at <paramref name="path"/> under <paramref name="predicate"/> is a
+    /// repeat and returns its id with nothing written.
+    /// </summary>
+    internal static (long FactId, bool IsRepeat) AppendAt(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long sessionId,
+        string path,
+        string predicate,
+        string scope,
+        string statement,
+        string? subject,
+        string? evidence,
+        DateTimeOffset now,
+        string? details,
+        bool sync,
+        string reason,
+        Action<long>? ensureParents = null)
+    {
+        if (FactStore.FindLiveFactId(connection, transaction, path, predicate) is { } existing)
         {
             return (existing, true);
         }
 
         var createdAt = now.ToUnixTimeSeconds();
-        FactStore.EnsureEntity(connection, transaction, SessionPath(sessionId), SessionKind, createdAt);
-
-        if (!string.IsNullOrWhiteSpace(agent))
-        {
-            // Named, because the path only carries the slug and the model reads this back:
-            // "task-gopher:task-gopher" and "task gopher task gopher" slug identically.
-            FactStore.EnsureEntity(
-                connection, transaction, AgentPath(sessionId, agent), AgentKind, createdAt, displayName: agent);
-        }
+        ensureParents?.Invoke(createdAt);
 
         var result = FactStore.Remember(
             connection,
@@ -154,16 +195,16 @@ public static class SessionFacts
             new FactWrite(
                 SubjectPath: path,
                 SubjectKind: NoteKind,
-                Predicate: Predicate,
+                Predicate: predicate,
                 Body: statement,
-                Scope: Scope,
+                Scope: scope,
                 LearnedVia: LearnedVia,
                 Evidence: evidence,
                 Regenerable: false,
                 SessionId: sessionId,
                 Details: details),
             now,
-            reason: "re-recorded in the same session");
+            reason: reason);
 
         // The subject the model supplied is display text for the note, so it goes on the
         // entity — but only if it gave one. Defaulting it to the statement would name the
