@@ -727,6 +727,14 @@ public static class Sync
             {
                 toClose["valid_to"] = record.ValidTo;
                 toClose["superseded_by"] = successorId;
+
+                // The origin's retraction reason, when the close carries one, so Replay writes the
+                // same NULL-new row ApplyClose would. Never added when absent (D99).
+                if (record.Reason is not null)
+                {
+                    toClose["reason"] = record.Reason;
+                }
+
                 factLines[predecessor.Index] = toClose.ToJsonString();
             }
         }
