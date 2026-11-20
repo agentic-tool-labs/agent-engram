@@ -721,6 +721,14 @@ missing it: `WriteVersion1Store` rolls a *current*-schema store back, so `CREATE
 EXISTS` no-opped and a deliberately wrong migration left 18 of 18 green until the test dropped the
 index first (D60).
 
+**`ix_fact_superseded_by` and `ix_fact_object_ref` serve no query, and dropping either one returns
+compact to hours.** They exist for the foreign-key checks SQLite runs when a fact or an entity is
+deleted. Without them each deleted row scans fact: 73 ms per fact and 133 ms per entity on an
+890,829-fact store, so the shipped `compact --apply` finished 0 of 46 calls, and the first one ran for
+30 minutes. With them all 46 finish in 537 s of wall time, nearly all of it snapshots and VACUUM.
+`ix_fact_object_ref` looks like a duplicate of `ix_fact_object` and is not one: that index is live-only,
+so it cannot answer the check for a closed row, and it stays unwidened because recall plans against it (D92).
+
 **Recall says when a lane did not run, and that note is keyed to lane state, never to hit count.**
 With one lane the corroboration term degenerates to `(rank IS NOT NULL) > 1` — false for every row —
 so coverage cannot reach `high` and an overlap-only fact is absent entirely; the digest then reads

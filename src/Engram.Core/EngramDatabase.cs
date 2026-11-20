@@ -20,7 +20,7 @@ namespace Engram.Core;
 /// </remarks>
 public static class EngramDatabase
 {
-    public const int SchemaVersion = 19;
+    public const int SchemaVersion = 20;
 
     public const int BusyTimeoutMilliseconds = 5000;
 
@@ -581,6 +581,21 @@ public static class EngramDatabase
                 CREATE INDEX IF NOT EXISTS ix_symbol_name_nocase ON entity(name COLLATE NOCASE, path) WHERE kind = 'symbol';
                 """);
             WriteMeta(connection, transaction, "schema_version", "19");
+            transaction.Commit();
+        }
+
+        if (from < 20)
+        {
+            // Pure query planning: the foreign-key child checks behind deleting a fact or an
+            // entity scan fact once per deleted row without these. ix_fact_object is left alone
+            // because recall plans against it (compact-quadratic-deletes.md F1, F3).
+            using var transaction = BeginWrite(connection);
+            Execute(connection, transaction,
+                """
+                CREATE INDEX IF NOT EXISTS ix_fact_superseded_by ON fact(superseded_by) WHERE superseded_by IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS ix_fact_object_ref ON fact(object_id) WHERE object_id IS NOT NULL;
+                """);
+            WriteMeta(connection, transaction, "schema_version", "20");
             transaction.Commit();
         }
     }
