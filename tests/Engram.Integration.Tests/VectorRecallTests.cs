@@ -357,6 +357,35 @@ public sealed class VectorRecallTests : IDisposable
         Assert.Equal(1, candidate.Candidate.VectorRank);
     }
 
+    [Fact]
+    public void AFilteredRecall_WhoseVectorHitsAreAllOutsideTheFilter_GetsNothingFromTheLane_AndExplainSaysWhy()
+    {
+        // D85: the vector lane is not filtered before its k. Its only hit here is a project fact, so
+        // under types user it contributes nothing — and explain has to say so rather than report a
+        // lane that "fed the ranking".
+        RequireTheRealThings();
+        using var sandbox = new VectorSandbox();
+        var endpoint = StartStandInEmbedder(Path.Combine(sandbox.Home.Root, "stand-in"));
+
+        var factId = sandbox.AddFact("uploader", OnlyFindableByVector);
+        IndexFact(sandbox, factId, concept: 0);
+        WriteConfig(sandbox.Home, EmbeddingConfig(endpoint));
+
+        var unfiltered = EngramMcpTools.Recall(
+            sandbox.Home, new McpSessionId("s1"), new McpHomeState(false), NoRuntime(sandbox.Home), new SessionPinStore(), Query);
+        var filtered = EngramMcpTools.Recall(
+            sandbox.Home, new McpSessionId("s1"), new McpHomeState(false), NoRuntime(sandbox.Home), new SessionPinStore(), Query,
+            types: [MemoryScopes.User]);
+        Assert.Contains("backoff", unfiltered, StringComparison.Ordinal);
+        Assert.DoesNotContain("backoff", filtered, StringComparison.Ordinal);
+
+        var explanation = RetrievalExplainer.Explain(
+            sandbox.Connection, sandbox.Home, Query, 500, 20, null, DateTimeOffset.UtcNow, _ => null, types: [MemoryScopes.User]);
+        var lane = Assert.Single(explanation.Lanes, l => l.Name.StartsWith("vector", StringComparison.Ordinal));
+        Assert.Contains("not filtered by types", lane.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain(explanation.Candidates, c => c.Candidate.VectorRank is not null);
+    }
+
     public void Dispose()
     {
         foreach (var process in started)
