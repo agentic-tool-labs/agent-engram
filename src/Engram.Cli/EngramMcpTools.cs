@@ -86,13 +86,13 @@ public sealed class EngramMcpTools
         [Description("Depth the statement cannot carry — a full config, a long rationale, verbatim output. Most memories need none: if the statement holds it, stop there.")] string? details = null,
         [Description("What or who the fact is about, if not obvious from the statement.")] string? subject = null,
         [Description("Where this was learned — a file path, PR, or command output.")] string? evidence = null,
-        [Description("Your own name, if you are a subagent recording this fact rather than the main agent.")] string? agent = null,
+        [Description("Your role memory key as the primer gave it, if the primer gave you a role memory key; never an instance name, which splits your role's memory per spawn.")] string? agent = null,
         [Description(
             "The bracketed id of a raw user-statement capture this restates, e.g. \"f42\". Closes that "
                 + "capture so the rewritten version replaces it instead of duplicating it.")] string? supersedes = null,
         [Description("Flags for sync. Triggered by \"share engram\" plus content.")] bool sync = false,
         [Description("When to revisit this: a relative duration ('3d', '2w', '12h') or an ISO date. Surfaces in 'engram review list' and doctor once it passes.")] string? review_after = null,
-        [Description("session (default) or project. Use project for something true about this codebase beyond this session (a decision, a trap, a convention); session for working state.")] string? scope = null,
+        [Description("session (default), project, or agent. Use project for something true about this codebase beyond this session (a decision, a trap, a convention); agent, with agent = your role key from the primer, for a lesson every future agent of your role needs; session for working state.")] string? scope = null,
         [Description("With scope project: your current working directory, absolute. Engram finds the repository from it.")] string? project_dir = null)
     {
         if (!homeState.Initialized)
@@ -101,6 +101,7 @@ public sealed class EngramMcpTools
         }
 
         var wantsProject = scope == MemoryScopes.Project;
+        var wantsAgent = scope == MemoryScopes.Agent;
         if (scope is not null && !MemoryScopes.Writable.Contains(scope))
         {
             return $"Unknown scope '{scope}'; valid scopes: {string.Join(", ", MemoryScopes.Writable)}. Nothing was saved.";
@@ -162,6 +163,7 @@ public sealed class EngramMcpTools
 
         long factId;
         ProjectResolution? resolution = null;
+        RoleWrite? roleOutcome = null;
         using (var connection = EngramDatabase.OpenInitialized(home))
         {
             // Resolved before the write lock is taken: it can run git, bounded by
@@ -174,11 +176,20 @@ public sealed class EngramMcpTools
             var rememberNow = DateTimeOffset.UtcNow;
             using var rememberTransaction = EngramDatabase.BeginWrite(connection);
             bool isRepeat;
-            (factId, isRepeat) = resolution?.Project is { } project
-                ? ProjectNotes.Append(
-                    connection, rememberTransaction, session.Value, project, statement, subject, evidence, rememberNow, details, sync)
-                : SessionFacts.Append(
-                    connection, rememberTransaction, session.Value, statement, subject, evidence, agent, rememberNow, details, sync);
+            if (wantsAgent && RoleNotes.IsAddressable(agent))
+            {
+                (factId, roleOutcome) = RoleNotes.Append(
+                    connection, rememberTransaction, session.Value, agent!, statement, subject, evidence, rememberNow, details, sync);
+                isRepeat = roleOutcome == RoleWrite.Repeat;
+            }
+            else
+            {
+                (factId, isRepeat) = resolution?.Project is { } project
+                    ? ProjectNotes.Append(
+                        connection, rememberTransaction, session.Value, project, statement, subject, evidence, rememberNow, details, sync)
+                    : SessionFacts.Append(
+                        connection, rememberTransaction, session.Value, statement, subject, evidence, agent, rememberNow, details, sync);
+            }
 
             if (isRepeat)
             {
@@ -203,12 +214,13 @@ public sealed class EngramMcpTools
         }
 
         var writtenProject = resolution?.Project;
+        var writtenRole = roleOutcome is RoleWrite.Written or RoleWrite.Repeat;
 
         Telemetry.Append(home, new TelemetryRecord(
             Timestamp: DateTime.UtcNow.ToString("o"),
             SessionId: session.Value,
             Kind: TelemetryEventKind.Remember,
-            Scope: writtenProject is null ? null : MemoryScopes.Project,
+            Scope: writtenProject is not null ? MemoryScopes.Project : writtenRole ? MemoryScopes.Agent : null,
             ProjectUnresolved: resolution?.Reason is { } reason ? ProjectNotes.Code(reason) : null));
 
         var subjectText = string.IsNullOrWhiteSpace(subject) ? "(unspecified subject)" : subject;
@@ -221,6 +233,15 @@ public sealed class EngramMcpTools
         if (resolution is { Reason: not null })
         {
             response += "\n" + ProjectNotes.Notice(resolution, project_dir);
+        }
+
+        if (wantsAgent && roleOutcome is null)
+        {
+            response += "\nno usable agent key — kept as a session note; pass your role key from the primer as agent";
+        }
+        else if (roleOutcome == RoleWrite.Capped)
+        {
+            response += $"\nrole memory is for lessons every future {agent} needs; kept as a session note";
         }
 
         var config = ConfigFile.Load(home.ConfigPath);

@@ -87,7 +87,7 @@ internal static class HookCommand
     /// a user who forgot something that it is still remembered. Saying nothing is the
     /// honest degradation, and the caller already handles an empty primer.
     /// </remarks>
-    private static PrimerSummary LongTermFacts(EngramHome home)
+    private static PrimerSummary LongTermFacts(EngramHome home, string? role = null)
     {
         try
         {
@@ -95,7 +95,7 @@ internal static class HookCommand
             // checkpoint starvation caused by long-lived read snapshots in the MCP loop, so the
             // connection must not outlive the read.
             using var connection = EngramDatabase.OpenInitialized(home);
-            return PrimerSummary.Read(connection, DateTimeOffset.UtcNow);
+            return PrimerSummary.Read(connection, DateTimeOffset.UtcNow, role);
         }
         catch
         {
@@ -110,13 +110,13 @@ internal static class HookCommand
     /// connection beside it.
     /// </summary>
     private static (PrimerSummary Summary, bool OfferEnrollment) SessionStartPrimerInputs(
-        EngramHome home, ConfigFile? config, string startDirectory)
+        EngramHome home, ConfigFile? config, string startDirectory, string? role)
     {
         try
         {
             using var connection = EngramDatabase.OpenInitialized(home);
             var now = DateTimeOffset.UtcNow;
-            var summary = PrimerSummary.Read(connection, now);
+            var summary = PrimerSummary.Read(connection, now, role);
             var offerEnrollment = ShouldOfferEnrollment(connection, config, now, startDirectory);
             return (summary, offerEnrollment);
         }
@@ -282,15 +282,22 @@ internal static class HookCommand
         {
         }
 
-        var (summary, offerEnrollment) = SessionStartPrimerInputs(home, config, startDirectory);
-        var primer = PrimerBuilder.Build(summary, Precedence(config), offerEnrollment);
+        // A main session started with --agent: the payload carries agent_type and no agent_id, which
+        // a subagent's would have (D100). A plain session carries neither and gets no role block.
+        var role = payload is { AgentType: { Length: > 0 } agentType, AgentId: null or "" } ? agentType : null;
+
+        var (summary, offerEnrollment) = SessionStartPrimerInputs(home, config, startDirectory, role);
+        var primer = PrimerBuilder.Build(summary, Precedence(config), offerEnrollment, out var roleFactCount);
 
         try
         {
             Telemetry.Append(
                 home,
                 PrimerRecord(
-                    sessionId, TelemetryEventKind.SessionStart, summary.FactCount, summary.Directives.Count, primer));
+                    sessionId, TelemetryEventKind.SessionStart, summary.FactCount, summary.Directives.Count, primer) with
+                {
+                    RoleFactCount = summary.Role is null ? null : roleFactCount,
+                });
         }
         catch
         {
@@ -320,8 +327,8 @@ internal static class HookCommand
     // primer simply never arrives, which is indistinguishable from a subagent ignoring it.
     private static int RunSubagentStart(EngramHome home, TextWriter stdout, HookStdinInput? payload)
     {
-        var summary = LongTermFacts(home);
-        var primer = PrimerBuilder.BuildForSubagent(summary, Precedence(home));
+        var summary = LongTermFacts(home, payload?.AgentType);
+        var primer = PrimerBuilder.BuildForSubagent(summary, Precedence(home), out var roleFactCount);
 
         try
         {
@@ -335,6 +342,7 @@ internal static class HookCommand
             {
                 AgentId = payload?.AgentId,
                 AgentType = payload?.AgentType,
+                RoleFactCount = summary.Role is null ? null : roleFactCount,
             });
         }
         catch

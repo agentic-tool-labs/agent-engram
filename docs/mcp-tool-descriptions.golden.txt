@@ -75,7 +75,7 @@ Engram's durable memory, and where anything worth keeping goes even when another
   param: evidence
   Where this was learned — a file path, PR, or command output.
   param: agent
-  Your own name, if you are a subagent recording this fact rather than the main agent.
+  Your role memory key as the primer gave it, if the primer gave you a role memory key; never an instance name, which splits your role's memory per spawn.
   param: supersedes
   The bracketed id of a raw user-statement capture this restates, e.g. "f42". Closes that capture so the rewritten version replaces it instead of duplicating it.
   param: sync
@@ -83,7 +83,7 @@ Engram's durable memory, and where anything worth keeping goes even when another
   param: review_after
   When to revisit this: a relative duration ('3d', '2w', '12h') or an ISO date. Surfaces in 'engram review list' and doctor once it passes.
   param: scope
-  session (default) or project. Use project for something true about this codebase beyond this session (a decision, a trap, a convention); session for working state.
+  session (default), project, or agent. Use project for something true about this codebase beyond this session (a decision, a trap, a convention); agent, with agent = your role key from the primer, for a lesson every future agent of your role needs; session for working state.
   param: project_dir
   With scope project: your current working directory, absolute. Engram finds the repository from it.
 

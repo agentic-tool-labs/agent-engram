@@ -44,7 +44,12 @@ public class McpToolSurfaceBudgetTests
     // Re-baselined 6,591 -> 6,852 (D98) when engram_remember gained `scope` and `project_dir`,
     // both worded by the P4 spec: without `project_dir` a project note cannot resolve, and
     // without the scope guidance (D15) a model has no reason to pass it.
-    private const int MaxDefinitionChars = 6852;
+    //
+    // Re-baselined 6,852 -> 6,963 (D100) when `scope` gained `agent`: P5 puts the how-to of role
+    // memory in this description rather than the primer, whose key line may name no tool (D15).
+    // 6,963 -> 7,012 (D100, F2 ruling): `agent` asks for the role key, never an instance name.
+    // 7,012 -> 7,031: the key is for whoever the primer gave one, a main --agent session included.
+    private const int MaxDefinitionChars = 7031;
 
     // 10 -> 11 when engram_navigate joined for code navigation (docs/code-navigation-spec.md
     // §3.4): defined_at/imports read entity and fact tables directly rather than going through
