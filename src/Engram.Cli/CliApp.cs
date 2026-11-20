@@ -62,6 +62,7 @@ public static class CliApp
             "repair" => RepairCommand.Run(homePath, rest, stdout, stderr),
             "review" => ReviewCommand.Run(homePath, rest, stdout, stderr),
             "compact" => CompactCommand.Run(homePath, rest, stdout, stderr),
+            "reorganize" => ReorganizeCommand.Run(homePath, rest, stdout, stderr),
             "export" => ExportCommand.Run(homePath, rest, stdout, stderr),
             "import" => ImportCommand.Run(homePath, rest, stdout, stderr),
             "sync" => SyncCommand.Run(homePath, rest, stdout, stderr),
@@ -121,6 +122,7 @@ public static class CliApp
         writer.WriteLine("  repair [--apply]                   rebuild derived state — the lexical index, denormalized paths — never facts");
         writer.WriteLine("  review <list|clear <id>> [--apply]  list facts with a review date set, or clear one");
         writer.WriteLine("  compact [--path <prefix>] [--apply]  prune regenerable code facts: closed ones, or a whole subtree with --path");
+        writer.WriteLine("  reorganize <--ledger|--captures> [--apply]  re-file a tool's ledger out of user memory, or close misfiled captures");
         writer.WriteLine("  export [--path <prefix>] [--out <file>]  write facts as a portable JSONL bundle (stdout by default)");
         writer.WriteLine("  import <file> [--apply]            add a bundle's facts; never rewrites or closes what the store already has");
         writer.WriteLine("  sync <export|import|status> [--apply]  exchange facts with other machines through a shared directory");

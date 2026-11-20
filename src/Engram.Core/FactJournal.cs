@@ -31,10 +31,12 @@ public sealed record JournalFact(
 /// supersession edge adds nothing, because every record reaching that branch was already counted here (D68).
 /// </param>
 /// <param name="Conflicted">
-/// Records nothing was recovered for. Two shapes: a fact left out because the target already believes
-/// something else about that subject and predicate, and a fact whose body was already present but whose
-/// supersession edge the target disagreed with (D68) — the second also counts
-/// <paramref name="AlreadyPresent"/>, since both statements are true of it.
+/// Records nothing was recovered for. Three shapes: a fact left out because the target already believes
+/// something else about that subject and predicate; a fact whose body was already present but whose
+/// supersession edge the target disagreed with (D68); and a retraction whose body was already present but
+/// whose target row is live, closed by a replacement, or closed with no supersession row at all (D99). The
+/// last two also count <paramref name="AlreadyPresent"/>, since both statements are true of them. Counted
+/// on apply only, so a dry run's figure can be lower.
 /// </param>
 public sealed record ReplayResult(int Written, int AlreadyPresent, int Unresolved, int Conflicted);
 
@@ -81,13 +83,18 @@ public static class FactJournal
         return Path.Combine(home.BackupDir, FileName);
     }
 
-    /// <summary>Writes every fact in the store, live or closed, to the journal.</summary>
+    /// <summary>Writes the store's facts, live or closed, to the journal.</summary>
     /// <remarks>
-    /// Closed facts are included deliberately. A journal of only what is currently believed cannot
+    /// <para>Closed facts are included deliberately. A journal of only what is currently believed cannot
     /// reconstruct why it is believed — the supersession chain is the record of a mind changing,
-    /// and D8 protects it as authored truth exactly like the facts themselves.
+    /// and D8 protects it as authored truth exactly like the facts themselves.</para>
+    ///
+    /// <para><see cref="BackupScope.Authored"/> leaves out regenerable facts unless authored truth
+    /// depends on one — the same predicate <c>compact</c> protects with, so a fact the journal keeps
+    /// is exactly one compact would keep, and every relation, review and sync line it is written
+    /// beside resolves to a fact line in it.</para>
     /// </remarks>
-    public static int Write(SqliteConnection connection, EngramHome home, DateTimeOffset now)
+    public static int Write(SqliteConnection connection, EngramHome home, DateTimeOffset now, BackupScope scope)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(home);
@@ -102,7 +109,7 @@ public static class FactJournal
             using (var stream = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
             using (var writer = new StreamWriter(stream))
             {
-                written = WriteTo(connection, writer, pathPrefix: null, now);
+                written = WriteTo(connection, writer, pathPrefix: null, now, scope);
             }
 
             File.Move(partial, final, overwrite: true);
@@ -127,7 +134,16 @@ public static class FactJournal
         SqliteConnection connection,
         TextWriter writer,
         string? pathPrefix,
-        DateTimeOffset now)
+        DateTimeOffset now) =>
+        WriteTo(connection, writer, pathPrefix, now, scope: null);
+
+    /// <param name="scope">Null for <c>export</c>, whose header carries no scope and whose facts are all of them.</param>
+    private static int WriteTo(
+        SqliteConnection connection,
+        TextWriter writer,
+        string? pathPrefix,
+        DateTimeOffset now,
+        BackupScope? scope)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(writer);
@@ -144,10 +160,15 @@ public static class FactJournal
             header["path"] = pathPrefix;
         }
 
+        if (scope is { } named)
+        {
+            header["scope"] = BackupMarkers.NameOf(named);
+        }
+
         writer.WriteLine(header.ToJsonString());
 
         var written = 0;
-        foreach (var fact in Read(connection))
+        foreach (var fact in Read(connection, authoredOnly: scope == BackupScope.Authored))
         {
             if (pathPrefix is not null && !InSubtree(fact.Subject, pathPrefix))
             {
@@ -172,22 +193,29 @@ public static class FactJournal
         && (subject.Length == prefix.Length || subject[prefix.Length] is '/' or '#');
 
     /// <summary>Every fact in the store, oldest first, with its subject and object resolved.</summary>
-    public static IEnumerable<JournalFact> Read(SqliteConnection connection)
+    public static IEnumerable<JournalFact> Read(SqliteConnection connection) => Read(connection, authoredOnly: false);
+
+    /// <param name="authoredOnly">
+    /// Regenerable facts only where authored truth depends on them. The table is left unaliased
+    /// because <see cref="StoreCompactor.AuthoredDependencySql"/> names the outer row <c>fact</c>.
+    /// </param>
+    internal static IEnumerable<JournalFact> Read(SqliteConnection connection, bool authoredOnly)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
         using var command = connection.CreateCommand();
         command.CommandText =
             """
-            SELECT f.id, se.path, se.kind, f.predicate, f.body, oe.path, oe.kind, f.scope,
-                   f.learned_via, f.regenerable, f.evidence, f.valid_from, f.valid_to,
-                   f.superseded_by, s.reason, f.created_at, f.details
-            FROM fact f
-            JOIN entity se ON se.id = f.subject_id
-            LEFT JOIN entity oe ON oe.id = f.object_id
-            LEFT JOIN supersession s ON s.old_fact_id = f.id
-            ORDER BY f.id;
-            """;
+            SELECT fact.id, se.path, se.kind, fact.predicate, fact.body, oe.path, oe.kind, fact.scope,
+                   fact.learned_via, fact.regenerable, fact.evidence, fact.valid_from, fact.valid_to,
+                   fact.superseded_by, s.reason, fact.created_at, fact.details
+            FROM fact
+            JOIN entity se ON se.id = fact.subject_id
+            LEFT JOIN entity oe ON oe.id = fact.object_id
+            LEFT JOIN supersession s ON s.old_fact_id = fact.id
+            """
+            + (authoredOnly ? $"\nWHERE fact.regenerable = 0 OR {StoreCompactor.AuthoredDependencySql}" : string.Empty)
+            + "\nORDER BY fact.id;";
 
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -210,6 +238,32 @@ public static class FactJournal
                 reader.IsDBNull(14) ? null : reader.GetString(14),
                 reader.GetInt64(15),
                 reader.IsDBNull(16) ? null : reader.GetString(16));
+        }
+    }
+
+    /// <summary>
+    /// The header's <c>scope</c>: <c>full</c> when the header has none, which is what every journal
+    /// written before scopes existed is. Null when the first line is not a readable header.
+    /// </summary>
+    public static string? ReadScope(IEnumerable<string> lines)
+    {
+        ArgumentNullException.ThrowIfNull(lines);
+
+        var first = lines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+        if (first is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonNode.Parse(first) is JsonObject header && header.ContainsKey("format")
+                ? header["scope"]?.GetValue<string>() ?? BackupMarkers.FullScope
+                : null;
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException or FormatException)
+        {
+            return null;
         }
     }
 
@@ -297,6 +351,13 @@ public static class FactJournal
     /// journal replayed into a store that had been initialised (and so carries the seeded corpus)
     /// recovered nothing at all.</para>
     ///
+    /// <para><b>A forgotten fact keeps its retraction.</b> A journal record closed with no
+    /// superseder and a reason is what <c>Forget</c> leaves, and replay writes its NULL-new
+    /// <c>supersession</c> row — but only into a row this replay inserted, the same provenance rule
+    /// as an edge (D68). A matching row the target already held is never written to: one that
+    /// already carries a retraction counts nothing more, and any other state counts
+    /// <c>Conflicted</c> beside <c>AlreadyPresent</c> (D99).</para>
+    ///
     /// <para><c>session_id</c> is deliberately dropped. Sessions are local to a store, so carrying
     /// the number across would point a recovered fact at an unrelated session or a missing one.
     /// The provenance that survives is the part that means something anywhere: the subject, the
@@ -375,6 +436,16 @@ public static class FactJournal
                 if (match.AddressUsable)
                 {
                     idMapBuilder[fact.Id] = match.Id;
+
+                    // The body was here; whether its retraction was is a separate statement. Only a
+                    // closed row already carrying a NULL-new supersession row says so. Live, closed by
+                    // a replacement, or closed with no account all count Conflicted, and none is
+                    // written to: replay cannot tell a row it did not insert from one the target
+                    // closed on its own (D68, D99).
+                    if (IsRetraction(fact) && !RetractionRecorded(connection, transaction, match.Id))
+                    {
+                        conflicted++;
+                    }
                 }
                 else if (fact.SupersededBy is not null)
                 {
@@ -396,9 +467,17 @@ public static class FactJournal
                 continue;
             }
 
-            idMapBuilder[fact.Id] = Insert(connection, transaction, fact);
+            var newId = Insert(connection, transaction, fact);
+            idMapBuilder[fact.Id] = newId;
             inserted.Add(fact.Id);
             written++;
+
+            // Here, straight after Insert, is what makes provenance the test: this row is one this
+            // replay just wrote. No increment — the record was already counted Written (D68, D99).
+            if (IsRetraction(fact))
+            {
+                Retract(connection, transaction, newId, fact);
+            }
         }
 
         foreach (var fact in facts)
@@ -549,6 +628,54 @@ public static class FactJournal
         // address a supersession points at. Several closed duplicates give no basis for preferring
         // one.
         return new ExistingMatch(id, AddressUsable: !ambiguous || live);
+    }
+
+    /// <summary>
+    /// The shape <see cref="FactStore.Forget(SqliteConnection, SqliteTransaction, long, string, DateTimeOffset, long?)"/>
+    /// leaves in the journal: closed, no superseder, a reason (D99).
+    /// </summary>
+    /// <remarks>
+    /// The reason is the part that separates a retraction from a closed fact with no
+    /// <c>supersession</c> row at all — a pointer an earlier replay lost, or a close nothing
+    /// explained. Inventing a retraction for those would state an account the source never had.
+    /// </remarks>
+    private static bool IsRetraction(JournalFact fact) =>
+        fact.ValidTo is not null && fact.SupersededBy is null && fact.SupersessionReason is not null;
+
+    private static bool RetractionRecorded(SqliteConnection connection, SqliteTransaction transaction, long factId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT 1 FROM fact f JOIN supersession s ON s.old_fact_id = f.id
+            WHERE f.id = $id AND f.valid_to IS NOT NULL AND s.new_fact_id IS NULL;
+            """;
+        command.Parameters.AddWithValue("$id", factId);
+        return command.ExecuteScalar() is not null;
+    }
+
+    /// <summary>
+    /// Writes a journalled retraction's <c>supersession</c> row into a row this replay inserted.
+    /// <c>fact</c> is not touched: <see cref="Insert"/> already wrote it closed and unindexed.
+    /// </summary>
+    private static void Retract(SqliteConnection connection, SqliteTransaction transaction, long factId, JournalFact fact)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        // A forget stamps the fact's valid_to and the row's created_at with the same instant, so
+        // valid_to is the row's time. ON CONFLICT is defensive, as in Link: a row inserted moments
+        // ago cannot already have one.
+        command.CommandText =
+            """
+            INSERT INTO supersession (old_fact_id, new_fact_id, reason, created_at)
+            VALUES ($old, NULL, $reason, $createdAt)
+            ON CONFLICT(old_fact_id) DO NOTHING;
+            """;
+        command.Parameters.AddWithValue("$old", factId);
+        command.Parameters.AddWithValue("$reason", fact.SupersessionReason!);
+        command.Parameters.AddWithValue("$createdAt", fact.ValidTo!.Value);
+        command.ExecuteNonQuery();
     }
 
     private static long? CurrentSupersededBy(SqliteConnection connection, SqliteTransaction transaction, long factId)

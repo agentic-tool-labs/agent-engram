@@ -268,7 +268,7 @@ public sealed class Tui
     internal int Room => Math.Max(MinimumWidth, width()) - 1;
 
     /// <summary>One line, never wider than <paramref name="room"/>, ellipsed if it was.</summary>
-    private static string Clip(string text, int room)
+    internal static string Clip(string text, int room)
     {
         if (room <= 0)
         {

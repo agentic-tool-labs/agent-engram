@@ -174,13 +174,12 @@ public class CodeIndexerTests
         Assert.Equal(before, CodeFacts(connection).Count);
         Assert.Null(RepoEnrollment.Get(connection, identity)!.LastFullScanAt);
 
-        // Layer 2's guard (onDisk empty against prior state) would also produce the assertions
-        // above on its own, since a deleted root scans back with zero files either way — these
-        // pin the note to the Truncated branch specifically, so reverting only the Walk catch
-        // fix (leaving Layer 2 intact) still reddens this test rather than passing on Layer 2's
-        // unrelated coverage of the same outward effect.
-        Assert.Contains(report.Notes, note => note.Contains("partial", StringComparison.Ordinal));
-        Assert.DoesNotContain(report.Notes, note => note.Contains("already indexed", StringComparison.Ordinal));
+        // Since D94 a deleted root stops before the scan: git cannot start in a directory that is
+        // gone, so the origin is Unknown and the run does nothing. Walk's own catch is still held
+        // by RepoScannerTests.Summary_NamesTheUnreadableDirectoryAndItsCount.
+        Assert.Equal(
+            [CodeIndexer.UnknownOriginNote(CodeIndexer.ResolveRoot(repo), "git did not answer")],
+            report.Notes);
     }
 
     /// <summary>

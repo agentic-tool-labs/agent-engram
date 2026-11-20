@@ -5970,6 +5970,376 @@ because a plugin older than the binary still registers it and an unknown verb pr
 **Not measured.** Nothing here has run on an organization-managed install. That `prompt.submit` reaches a
 user-installed mod there rests on the docs not listing it as skipped.
 
+## D95 — The per-file fact read is a byte range over `ix_fact_path`
+
+`LiveCodeFacts.UnderFilePredicate` is the one definition of "facts about this file or a symbol in it",
+read by the indexer's per-file reconcile (`CodeIndexer.ReadLiveUnderSql`) and by the mod API's
+`path-facts` (`ModApi.PathFactsSql`). It matched "the path, then `#`" with `substr(fact.path, 1, $len)`,
+which SQLite cannot seek through, so both statements planned as `SCAN fact USING INDEX ix_fact_scope`:
+every live fact, once per file.
+
+**The rule.** The predicate is `fact.path = $p OR (fact.path >= $p || '#' AND fact.path < $p || '$')`,
+`$` being the code point after `#`. On the bundled SQLite (3.53.3) both statements plan as `MULTI-INDEX
+OR` over `ix_fact_path` (`path=?`, then `path>? AND path<?`). The range is exact only because
+`fact.path` declares no collation and compares BINARY over UTF-8: `$p#…` sorts inside it, and a sibling
+that extends the name (`Foo.cs2`, `Foo.cs$`, `Foo.csé`), a directory's children (`/`), and anything
+below `#` sort outside it. A `COLLATE` on the column or in the predicate changes what the bounds admit.
+No schema change and no index was added.
+
+**Measured**, on a copy of the real store (621,904 live facts at snapshot, 624,635 after the run):
+- One file: 255 ms → 0.6 ms (indexer statement), 85 ms → 0.1 ms (`path-facts`).
+- Identity, old predicate against new: all 5,360 distinct file paths with live facts under
+  `/projects/wrangl/code/wrangl-3` (248,389 rows) and 500 of the 32,086 elsewhere (seed 95, 8,339 rows):
+  zero ids in either EXCEPT direction. 468 s of old reads against 0.49 s of new.
+- `index --full --apply` of the wrangl checkout, published binaries, each on its own copy:
+  real/user/sys **545.1/327.1/197.3 s → 8.9/1.9/3.2 s**. Summary line identical (3,592 written,
+  12,614 unchanged, 234,914 closes skipped), and the two stores identical afterwards by count, id sum
+  and body length.
+- `index --drain --apply` of five touched files whose `file_state` rows were removed so all five are
+  analyzed: 0.52 s → 0.10 s, summary identical.
+
+**One divergence the identity run could not see.** The old form bound `$len` as the C# string length,
+UTF-16 code units, against SQLite's `substr`, which counts code points; for a path holding a surrogate
+pair (an emoji) the two disagree and the old predicate missed the file's symbols. The store holds no
+non-ASCII path, so the identity counts are unaffected. `LiveCodeFactsTests` covers it and reddens with
+the old form restored.
+
+**Guards.** `LiveCodeFactsTests` pins the matched set and the plan of both statements. Each was broken
+against the committed tree and went red: the old predicate restored (both plan pins and the non-ASCII
+case), `<` widened to `<=`, the upper bound widened to `%`, the lower bound widened to `>= $p`, and
+`COLLATE NOCASE` added (both plan pins and the matched set).
+
+**Rejected.** A `UNION ALL` of the two arms was not needed, since MULTI-INDEX OR appeared on the bundled
+SQLite. `LIKE $p || '#%'` was not tried: `LIKE` is case-insensitive by default, which disables the
+prefix optimization (see `DirectiveFacts.Read`), and `_` and `%` in a path would need escaping.
+## D94 — A git failure is never "no remote", and a complete scan retires what it superseded
+
+**Problem.** `repo_registry` is keyed on identity: origin URL, else the root path (D67). A new identity
+gets a new `repo_path`, `-2`, `-3` and so on, and nothing ever retired the old one. On the real store 45
+rows covered 20 checkouts, and 25 of them no longer described their checkout: 206,171 live regenerable
+facts (37.2% of all code facts) under paths whose checkout now resolves to another identity. Two causes:
+remotes that really changed, which D67 makes a new identity on purpose, and runs where the origin lookup
+failed and the root path stood in for it. `CodeEntityResolver` also picked an arbitrary row when several
+shared a `disk_path`, so a live file could resolve to a stale path.
+
+**Rule 1: three outcomes, never two.** `git remote get-url origin` stays the one call on the happy path
+and the only source of identity, so `url.*.insteadOf` rewriting keeps applying. Only when it yields
+nothing does `git config --get remote.origin.url` classify. Exit 1 is **NoRemote**, and the root path is
+the identity as before. Anything else is **Unknown**: a URL that `get-url` did not return, a corrupt
+config, an empty value, a timeout, git missing. On Unknown, writers (`index`, the `repo` verbs, the MCP
+enrollment tool, freshen) do nothing for that root and record no `index` event (D55). `--auto` refuses
+silently. Doctor reports `Warn` with no fix (D37).
+
+Observed on git 2.54.0 (Apple Git-157), and pinned in tests:
+
+| case | `config --get remote.origin.url` |
+|---|---|
+| no origin URL, with a `[remote "origin"]` section present (global `prune = true`) | exit 1 |
+| checkout with an origin | exit 0, the URL |
+| directory that is not a repository | exit 1 (so it stays NoRemote, as before) |
+| corrupt `.git/config` | exit 128 |
+| `remote.origin.url` set to empty | exit 0, empty value |
+
+`git remote`, the list, is never consulted: with a global `[remote "origin"]` section it lists `origin`
+in every repository, which the first draft of this rule would have read as Unknown, so checkouts with no
+remote would never have been indexed again. `config --get` is never the identity source either: it
+returns the URL before `insteadOf` rewriting, so switching to it would re-key every such user's
+repositories.
+
+**Rule 2: retirement.** A registry row is retired when a complete full scan of its checkout has just run
+under a different identity that git resolved positively. "Complete" is exactly the `stampFullScan`
+condition: `ScanStop.Complete`, not `empty-scan`, with `--apply`. It runs inside the transaction that
+stamps the scan and clears the suppression reason (D69). It sets `detached_at = now` on every row whose
+canonical `disk_path` equals the scanned root's, whose identity differs from the one this run resolved
+(never `EnrolledIdentity`), whose `repo_path` differs, and which is not already detached. A dry run
+notes "would retire". Nothing is deleted. The row for the identity git resolves now is never retired:
+`EnsureRepo` clears `detached_at` on the row it reuses, in the statement that re-homes a moved checkout,
+whatever its `disk_path`, so pointing a remote back un-retires that row and its next complete scan
+retires the other. (The re-home `UPDATE` alone did not: it runs only when `disk_path` differs, so at an
+unmoved checkout the re-resolved row stayed retired while being the live one.) A dry run clears nothing.
+
+A root that stays Unknown is never stamped, so it would be the most overdue pick on every pass. Every
+"next due" pick (the server tick, `index --freshen`) goes through `RepoFreshness.NextDueResolvable`,
+which skips an Unknown candidate and takes the next one in the same pass; drain-all and
+`repo index --all` already visit every root and skip the Unknown one. "Current" means what git resolves now,
+not the newest row: on the real store `fx` (the newest row) retires in favour of the bundle identity, and
+`agent-tools-3` in favour of `agent-tools-2`. Doctor adds one store-wide `indexing` row while retired
+paths still hold `file_state`, counted from `repo_registry` and `file_state` only. It names no command:
+until removal ships it says the paths are excluded from code lookup and removable in a later version,
+because a doctor that names a verb which does not exist teaches people to stop reading it (D37).
+
+**Known oddity, unchanged.** An in-repo `[remote "origin"]` section with no url (or an empty one) makes
+`git remote get-url origin` print `origin`, exit 0, so the identity is the literal string `origin`.
+This predates D94 and is recorded rather than changed.
+
+**Why `detached_at`.** Nothing set it before, and its two readers (`CodeEntityResolver`,
+`FileFreshness`) already exclude what a retired row must be excluded from. A new column would need a
+migration and edits to both readers for the same effect.
+
+**Rejected.** Changing identity derivation (disk path or root commit): it rewrites D67 and moves every
+row's key; root commit fails for forks and shallow clones. Retiring by newest `created_at`: wrong for the
+`-history` and bundle groups, and it lets a transient root-path row, which is the newest, retire the real
+origin row. Detection on demand in doctor or a verb: it has no completed-scan evidence, which D53
+requires before absence counts. Deleting at the end of the scan: destructive work is dry-run first, and
+compact's snapshot plus VACUUM do not belong in the maintenance child. Removal is a separate verb
+(eng-34 phase 3).
+## D92 — Compact's deletes are index-backed (schema v20)
+
+On the user's store (890,829 facts, 2.45 GB) the shipped `compact --apply` finished **0 of 46** calls. The
+first call ran 30 minutes at full CPU before it was killed, and it rolled back cleanly. With
+`foreign_keys = ON`, which `EngramDatabase.Open` sets, three checks scanned `fact` once for every deleted
+row:
+
+| Path | Cause | As shipped | Fix |
+|---|---|---|---|
+| P1: `DELETE FROM fact` | The foreign-key child check on `fact.superseded_by` had no index | 73 ms a fact | `ix_fact_superseded_by` |
+| P2: `EntitySql` | `subject_id = entity.id OR object_id = entity.id` | 1,340 entities in 76.8 s | Two `NOT EXISTS` probes |
+| P3: `DELETE FROM entity` | `ix_fact_object` is live-only, so it cannot serve the check on `fact.object_id` | 732 entities in 97.17 s | `ix_fact_object_ref` |
+
+**The partial form was enough.** Both new indexes are partial (`… IS NOT NULL`), because the check runs
+`col = ?` and that implies the column is not null. That was the expectation, not a proven fact. It held:
+on the bundled SQLite (tier 2) and on a copy of the real store, `superseded_by = ?` and `object_id = ?` seek
+the partial indexes, and every compact call completed. The full-index fallback the spec pre-decided was
+not used. Built on the real-store copy: 0.11 s and 0.21 s.
+
+**`ix_fact_object` is untouched.** Widening it would add every closed row to the index recall reads.
+`RecallRankerPlanTests` and `ForeignKeyIndexPlanTests` hold recall's plans. Most of the latter's
+statements are copies of private inline SQL, so an edit to one of those sites leaves the guard planning
+the old text. Only `BackfillBatchSql`, `PendingCountSql` and `PruneIneligibleSql` are read from
+production. On the real-store copy the
+statements C4 lists, and every other carrier of the regenerable-edge predicate, plan the same with and
+without v20, with one exception.
+
+**The exception is `VectorIndex.PruneIneligible`.** Under v20 its inner select
+(`regenerable IS 1 AND object_id IS NOT NULL`) moved from `SCAN fact` to a range seek on
+`ix_fact_object_ref`. The predicate matches 509,024 of 890,829 rows, so a seek plus a rowid lookup per row
+loses to one sequential pass. Medians of seven alternated warm runs on the real-store copy: inner select
+586.03 ms seeking against 210.08 ms scanning, and the whole `DELETE` 952.29 ms against 446.22 ms. A first
+run measured 530.96 against 198.37 and 806.62 against 404.04. A unary plus on that one term
+(`+object_id IS NOT NULL`) restores the v19 plan. `NOT INDEXED` was rejected because it would also refuse
+a better index a later schema adds. Its one caller is `engram embed --prune --apply`, which someone types,
+and which reaches the delete only when ineligible vectors were counted. One earlier measurement was
+invalid: 172.05 against 171.75 ms, taken after `backup take`, which opens the store without migrating
+it, so neither arm had the index. The 530.96/198.37 run above did differ by plan, and its "scan" arm
+was `NOT INDEXED` rather than the unary plus.
+
+**The split in P2 is no longer what removes the scan.** With `ix_fact_object_ref` present, the old `OR`
+form also seeks, as a `MULTI-INDEX OR` over `ix_fact_thread` and the new index. The split is kept because
+the spec named it and it reads plainly, and a plan assertion (no `MULTI-INDEX OR`) pins it.
+
+**Two guards change what is removed, and nothing else does.** An entity that carries an `entity_alias`
+row is kept even with no fact left. The `ON DELETE CASCADE` had deleted all 4,823 alias rows with no count,
+and no index run rebuilds rename history. The dry run and the apply report "entities kept for rename
+history". A regenerable fact that `fact_relation` (either end), `fact_review` or `fact_sync_request` names is
+kept too. None of those cascades, so deleting the fact used to fail the whole call on a foreign key. Both
+side-table checks and the authored supersession edge form one predicate, `StoreCompactor.AuthoredDependencySql`,
+which the backup journal filter is to reuse (the backup-slim stream cherry-picks 6b4e992).
+
+**Acceptance on a copy of the real store** (published binary, WAL mode):
+- All 46 calls complete. `foreign_key_check` is clean. A digest over authored facts, their supersessions,
+  `fact_relation`, `fact_review`, `fact_sync_request`, `entity_alias` and `session` is equal before and after.
+- Counts before and after: facts 890,829 → 68,613; entities 409,255 → 170,747; aliases 4,823 → 4,823;
+  registry rows 45 → 0.
+- The first call also migrated. Its D31 `pre-v20` snapshot took 6.30 s.
+- Summed over the calls: selection before each snapshot 16.13 s, snapshots 109.5 s, snapshot end to commit
+  44.52 s, checkpoints 2.17 s, VACUUM 365.0 s, wall 537.4 s. The median call takes 0.52 s from snapshot to
+  commit.
+- The spec's target was a summed transaction time under 30 s. That is **not shown**: 44.52 s is an upper
+  bound, because it includes `BackupStore.PruneAfterWrite`, which runs between the snapshot and the
+  transaction and cannot be separated from outside the process. Counting the selection before each
+  snapshot too, compaction work outside the snapshots and VACUUM is at most 60.65 s, against the
+  emulation's 19.28 s.
+- Re-index after a path compact (rocket, 65 aliases): 64 of 65 aliased entities are again the subject of a
+  live fact. No path is duplicated, so the indexer reuses the surviving entity. The 65th,
+  `engine/view/main.gd.uid` (renamed from `src/view/main.gd.uid`), is no longer on disk. No second
+  entity holds its path, and no fact references it, so nothing was left to re-index.
+
+**Not measured.** Where those 44.52 s go inside each call. The outlier is `agent-tools-2`, which took 7.31 s
+from snapshot to commit for 15,261 facts, against 3.33 s for 248,389 facts in `wrangl-3`. The real-store
+plan checks ran on Python's SQLite 3.54.1, not the bundled one, and tier 2 reproduced each switch on the
+bundled build. Snapshots and VACUUM are 88% of the wall time. Making them cheaper is a separate change.
+
+## D87 — Re-filing is close-and-reassert; `reorganize` moves the ledger out and closes misfiled captures
+
+The store held 5,960 live `user` facts and 5,624 of them were another tool's ledger: `/ah2/…`, predicate
+`records`, imported with `scope:"user"` and `learned_via:"stated"`, both false. Replayed recall packed that
+ledger in 54 of 270 recorded default queries. Separately, captures under `/user/about-you` and
+`/user/instructions` included agent text a person does not type.
+
+**The primitive.** `FactStore.Refile` moves one belief to another address and scope inside the caller's
+`BEGIN IMMEDIATE`: it writes a new fact through `Remember` at the target path with the same predicate,
+object, body, details, subject kind, regenerable flag, session and analyzer tier, the given scope and
+`learned_via`, `valid_from = now`, and evidence `"<old evidence>; re-filed from f<old>"`; then it closes the
+source with `superseded_by` set to the new fact and a supersession row whose reason names the move. A closed
+source is skipped. If the target already holds the identical body for that predicate and object, the source
+is closed onto that fact and nothing new is written. If the target holds a *different* live body, the two
+`valid_from` values decide. When the target's is the same or later, it is the newer belief about the
+subject: the source is closed onto it, nothing is inserted, and the case is counted as "superseded by newer
+target". This is what lets the step converge once wrangl writes `/tools/ah2` itself (U8). When the target
+is older, nothing is written and the source stays live ("left in place", listed by handle). A target is
+never re-asserted over and never closed. `FactStore.PlanRefile` is the one decision, called by the apply
+and by the dry run's four counts.
+
+**Rejected: `MoveSubtree` plus an `UPDATE` of `scope`.** `MoveSubtree` is licensed for `path` only (D2).
+Adding `scope` to the append-only exceptions beside `analyzer_tier` would change an invariant this does not
+need. The chosen route costs one fact row and one supersession row per moved fact (5,624 against ~890k).
+D57 `History` of a re-filed fact shows one version, because history is keyed by path; the trail is in the
+evidence and the supersession row. `SyncScope` syncs `scope='user'`, so the ledger stops syncing as user
+memory after the move, which is intended.
+
+**The verb.** `engram reorganize --ledger` re-files every live fact at or under `/ah2` to `/tools/ah2`
+(`MoveSubtree`'s `/`-or-`#` boundary, so `/ah2x` is not selected). The pair is fixed, not an option: there
+is no second caller, and an unbounded source prefix could re-file session notes or directives. The facts go
+to scope `tool`,
+`learned_via observed` (D19: a tool's observation, never the user's words). The original row keeps its
+historical `stated`. `engram reorganize --captures` lists suspects under deterministic rules, reported by
+name. Tier A is agent signature and can be closed as a set: R1 is an agent-report opener as the first word,
+R2 is a tooling-marker substring (bare `Subagent` dropped, because a person writes it), and R5 is a body that
+also exists as a `/sessions/` note. Tier B is shape only and is closed by handle: R3 is a `path.ext:line`
+citation, with no backtick clause, and R4 is over 400 UTF-16 code units. `--apply --tier a` and
+`--apply --only f…,f…` act. `--apply` alone is refused, and so is a handle that is not a printed suspect, so
+the verb cannot become a general forget. Captures are closed with `Forget` and never re-filed: a misfiled
+capture is not the user's belief anywhere. The verb is dry-run by default. `--apply` refuses while
+`ServerIsAlive`, because the server's recall and backlog read these rows (D38/D42). A dry run does not
+refuse: it only reads, and the capture list has to be reviewable without stopping memory for every
+session, so it prints one line saying an apply will need the server stopped. Every refusal, including a
+captures `--only` naming a non-suspect in a run that also asks for `--ledger`, is decided before either
+step writes. Before its first write the verb takes a `pre-reorganize` snapshot through `backup take`'s own
+routine, under its lock and with the journals beside it, so a later `backup replay` reads a journal as
+current as the snapshot. A held backup lock refuses the apply. It takes no snapshot when there is nothing
+to write.
+
+**Primer.** `PrimerSummary` neither counts nor samples `scope = 'tool'`. The histogram takes them out with a
+third, negative arm over `ix_fact_scope` and a `HAVING`, not with a scope filter on the two count arms,
+because those arms are answered from the partial indexes alone. The candidate arms skip the scope. A store
+with no tool rows reads exactly as before.
+
+**Measured on a copy of the real store** (621,904 live facts, published binary). Live counts before were
+code 553,641, session 62,303, user 5,960. `--ledger --apply` re-filed 5,624 in 12.30 s wall. Most of
+that is the `backup take` routine: the snapshot, with `VACUUM INTO` of the 2.4 GB store timed alone at
+~4.2 s, and an 890,829-fact journal. An earlier build that snapshotted without journals took 5.16 s, which
+puts the re-file itself at about 1 s. A second `--apply` found 0. On the
+captures, 299 were live and 60 suspect: R1 3, R2 0, R5 0, R3 5, R4 55, so tier A was 3 and tier B was 57.
+E6 counted R2 as 2, but both of those hits were the bare word `SubagentStart`, which the dropped clause
+matched. It counted R3 as 67 with identifier-shaped backtick spans included. `--tier a` closed 3, and a
+second run closed 0. Live counts after were code 553,641, session 62,303, tool 5,624, user 333. `repair`
+afterwards reported tokens in sync. It also reported **360,391 FTS rows missing**, identical on an untouched
+copy, so that drift was already in the store and is not from this change.
+
+**Not done here.** Wrangl's `bin/ah-memory-engram` has to write `/tools/ah2/…`, scope `tool`, `learned_via
+observed` before the real `--ledger --apply`, or new rows keep landing at `/ah2` (U8). Until then the step is
+safe to re-run, and once wrangl writes the new address, a re-recorded path converges through the
+newer-target rule. Engram adds no import-time remap and special-cases `ah2` nowhere but this step. A
+forward fix for misfiled captures waits on E7.
+
+## D93 — Scheduled snapshots leave out the vector index; the journal holds authored truth, from the snapshot
+
+`backups/` had reached 7.3 GB: three 2.45 GB snapshots and a ~531 MB journal per take. Two thirds of
+each snapshot was `fact_vec`, which the server's backlog regenerates from `fact`, and 822k of the
+journal's 891k lines were code facts that every snapshot also holds and an index run regenerates.
+Spec: `backup-derived-state.md` (eng-20), phases 1 and 2a; adr-1 accepted, adr-2 proposed.
+
+**Scope is the caller's, with no default.** `BackupStore.Take` takes `BackupScope.Full` or
+`Authored`. Full: `pre-vN` (D31) and `pre-restore`, whose whole job is to be the thing you wanted
+back. Authored: `backup take`, `pre-compact`, `pre-repair`, `pre-reorganize` — each rewrites only
+what an authored copy fully protects. An authored take runs the same `VACUUM INTO`, then on the
+`.partial` copy only: `VectorIndex.Drop` when sqlite-vec loads (a `vec0` table whose module cannot
+load is kept and marked `authored+vectors`), stamp `backup_scope` and `backup_omitted
+{"vectors": n}`, `VACUUM`, release the pool, rename. A guard refuses `home.DatabasePath` before
+anything opens. **Every live fact stays**, code facts included: a restore needs no re-index and a
+repo gone from disk loses nothing. Pruning live code facts (the spec's R2) was measured and dropped:
+22.8 s against an 8 s gate, 4,823 aliases deleted by cascade, and re-index parity unproven.
+
+**A slimming failure takes the copy again.** The spec's "rename the unslimmed partial" is false after
+a late failure: `Drop` commits in its own transaction before the stamp, so the copy on disk is
+neither full nor marked. Re-running `VACUUM INTO` costs ~4 s on a path that should never run, and is
+what makes "a backup is never lost to slimming" a guarantee. A test plants a trigger that aborts the
+stamp and asserts the vectors are still in the snapshot.
+
+**The journal is authored truth, written from the snapshot.** `FactJournal.Write(…, Authored)`
+keeps `regenerable = 0` facts and any regenerable fact `StoreCompactor.AuthoredDependencySql`
+protects — a supersession edge to an authored fact, or a relation, review or sync request naming
+it. One predicate, defined once beside compact's target selection, so every relation, review and
+sync line resolves to a fact line in the same journal. `TakeNow` opens the renamed snapshot and
+writes all four journals from it; a test writes a fact into the live store between the two and
+asserts the journal does not carry it. Headers gain `"scope"`; `FormatVersion` stays 1, since
+readers ignore unknown fields. `export` keeps the unfiltered path and writes no scope. Replay prints
+the scope — a header without one reads as `full` — and for `authored` says code facts come from a
+snapshot or `engram index`.
+
+**Restore says what it left out.** For a marked snapshot it prints the live lane-eligible facts with
+no vector (only when there are any, so an `authored+vectors` snapshot at full coverage prints
+nothing), and clears both markers from the restored store; the dry run reports that and writes
+nothing. Until the backlog finishes, recall's vector lane runs on partial coverage and recall does not
+say so — the D60 note fires only on `Unavailable`; `embed --status` and doctor show the pending count.
+`backup list` gains a scope column; an unmarked snapshot reads `full`.
+
+**Measured** on a copy of the real store (890,829 facts, 68,613 authored), published binary:
+`backup take` 10.7–11.1 s wall over three runs, against the spec's 7.8 s estimate: `VACUUM INTO`
+alone measured 4.34 s in the same session, the journal filter 0.49 s, so slimming (drop plus vacuum)
+is about 5.5 s here against E1a's 3.52 s. Snapshot 2,446,798,848 → **830,271,488 B** (366,789
+vectors dropped); `facts.jsonl` **39,944,804 B**, 68,613 lines, against ~531 MB. Restore into a fresh
+home 1.36 s and reports 261,513 facts to embed. The authored-truth digest (every authored fact,
+authored-touching supersession, relations, reviews, sync requests, enrollment, aliases, sessions) and
+the live regenerable set, registry and file state are identical between source and restored store;
+the live copy's digest is unchanged by the take. The journal replayed into an empty home (26.7 s)
+reproduces the journalled subset exactly and writes no regenerable fact, since none is depended on.
+
+**Found, not changed.** Replay rebuilds a supersession row only through `superseded_by`, so a forget
+row (`new_fact_id` NULL) is not reproduced by any replay, full or authored. Replay semantics were out
+of scope here. D99 fixes it.
+
+## D99 — Replay recreates a forgotten fact's retraction, only in a row it inserted
+
+`FactStore.Forget` is the only writer of a `supersession` row with `new_fact_id` NULL, and the journal
+already carries everything that row holds: `FactJournal.Read` LEFT JOINs `supersession`, so a forgotten
+fact is written closed, with `superseded_by` null and the forget's `reason`, and a forget stamps
+`valid_to` and the row's `created_at` with one instant. Replay dropped it — pass 2 acts only on a
+`superseded_by` — so a recovered store held the fact closed with no record of why or when, which reads
+as a supersession whose replacement was lost, and `ix_supersession_retracted` missed it. No journal
+format change: the record was always complete, only the reader ignored it.
+
+**A record is a retraction iff `valid_to` is set, `superseded_by` is null, and `reason` is set.** That
+is exactly the shape `Forget` leaves. The reason is what excludes a closed fact with no `supersession`
+row at all — a pointer an earlier replay lost, or a close nothing explained — and inventing a
+retraction for one of those would state an account the source never had. A `superseded_by` that does
+not resolve stays `Unresolved`: a NULL row there would turn a replacement into a forget.
+
+**Written only into a row this replay inserted, by D68's provenance rule, and for D68's reason.** A
+replay-inserted closed row and a pre-existing forgotten row are structurally identical, so the test is
+the `inserted` set straight after `Insert`, never a row-state predicate; `fact` is not touched (it is
+already closed, and `Insert` never indexed it), and the record adds no increment — it was counted
+`Written`. A retraction whose body the target already held is decided on the row `Existing()` returns:
+
+| Matched target row | Written | Extra count |
+|---|---|---|
+| Live | nothing; never closed (D32) | `Conflicted` |
+| Closed, has a NULL-new `supersession` row (any reason) | nothing | none — already recovered |
+| Closed, superseded by a replacement | nothing; its account stands | `Conflicted` |
+| Closed, no `supersession` row | nothing; no backfill | `Conflicted` |
+| Several closed duplicates, none live | nothing | none — no row to address |
+
+**No backfill, by user decision U1's default.** A store already replayed by an older binary holds its
+forgotten facts closed with no row, and stays that way: replay cannot tell such a row from one the
+target closed with no account, which is D68's whole premise. Counting it `Conflicted` beside
+`AlreadyPresent` makes it visible rather than silent. Allowing it would be an exception to D68.
+
+**The dry run counts exactly what it did before.** Retraction state, like D68's edges, is classified
+on apply only, so a dry run's `Conflicted` can be lower than the apply's; closing that gap for both
+would change existing dry-run output and is out of scope. Every caller of `FactJournal.Replay` gets
+the rule — `backup replay`, `import`, legacy import (whose retractions have always carried a reason),
+and sync.
+
+Guarded in `FactJournalTests` (N1–N14) and `ExportImportTests` (N15). Falsified against a committed
+tree: the pre-D99 `FactJournal.cs` reddens eight (N1–N3, N5, N6, N12, N13, N15); backfilling on the
+row-state predicate while keeping the counts reddens N5 on its row count; dropping the reason condition
+reddens N10 alone; applying the rule to an unresolved `superseded_by` reddens N8 alone; counting every
+matched retraction a conflict reddens N2 and N4; classifying an ambiguous match reddens N7; classifying
+in the dry run reddens N14; dropping the `superseded_by` condition reddens N8, N9 and three existing replay tests. Not fixed here, filed separately: a forget and a
+restatement in the same second share the identity key, so the live restatement matches the closed row
+and is never restored; `Sync.ApplyClose` with no superseder writes no `supersession` row; and
+`supersession.evidence` is never journalled.
+
 ## D84 — Prior sessions are enumerated from `session`; a NULL-session note takes no label
 
 **Supersedes D81's choice of CTE form**, not its reasoning. `RecallRanker`'s `prior_sessions` is
@@ -6198,6 +6568,48 @@ guarantee rests on the oracle comparison alone.
 
 `RecallTypesTests`' pre-D85 identity check now removes the tool arm from `excluded`. It compares rows
 only, because that arm has a plan of its own, and `RecallRankerPlanTests` pins that plan.
+
+## D96 — Scheduled snapshots also leave out closed code history, through `StoreCompactor`
+
+Spec: `backup-derived-state.md` §4.2 (phase 2b, eng-40); adr-2, accepted 2026-11-19. Builds on D93 and
+needs D92's indexes.
+
+**One definition of disposable.** On the `.partial` copy, after the vector drop, `Slim` runs
+`StoreCompactor.Compact(path: null, apply: true, onSnapshotCopy: true)`. The option skips compact's own
+`pre-compact` snapshot, its `VACUUM` and its vector sweep — the take owns the first two and has
+already dropped the table the third would sweep — and refuses before doing
+anything when the connection's file is `home.DatabasePath` — the same guard `Slim` has (D93). A delete
+written for backups would be a second definition of "regenerable and unneeded", and the first one to be
+tuned would leave the other behind. Path-null compact deletes no entity, `file_state` or
+`repo_registry` row, so no `entity_alias` cascade is reachable; the test seeds an alias on an entity
+whose only fact is closed history and asserts it survives. `backup_omitted` gains `facts_closed`, and
+restore prints `not recoverable: <n> closed code facts` only when it is above zero.
+
+**Below v20 the step is skipped, with a note in the take's output.** Unindexed, the foreign-key deletes
+cost about 73 ms a row on the real store (D92), hours per take. The vector drop and the stamp still run,
+and `facts_closed` is absent rather than zero. `backup take` opens with `Open`, not `OpenInitialized`,
+so a store this binary has not yet migrated takes the skip path until something else migrates it.
+
+**Measured** on a v20 copy of the 2.45 GB store (621,904 live facts, 268,583 closed regenerable, none
+protected). The snapshot went from **836,517,888 B** (vectors dropped and vacuumed, no 2b) to
+**668,307,456 B**: 168 MB, above the 50 MB bar in the spec. `BackupFingerprint` was equal across the source, the snapshot and the restored store, and the live, alias and entity
+counts were unchanged.
+
+**Drop first, then compact — the order was measured, and reversed.** The first build compacted before
+the drop, as the spec then said. `backup take` took **22.38 s** against **9.82 s** for the D93 binary
+on the v19 copy, and timed step by step in emulation 6.0 s of the difference was compact deleting the
+104,995 `fact_vec` rows of the pruned facts — rows the drop that follows removes anyway — with 1.41 s
+for the fact delete. It also made `backup_omitted.vectors` count only what the drop removed (261,794 of
+366,789). Ruled (spec §4.2, Q1): drop first, and skip the sweep in snapshot-copy mode rather than probing
+for a table that is gone. Re-measured: **16.76 s and 12.99 s** in two takes at load average ~13, same
+668,307,456 B, `vectors` 366,789. A copy marked `authored+vectors` keeps its table, so the vectors of
+facts compacted out of it stay behind as orphans; a later live compact sweeps them (D36). The sweep on
+the live store is unchanged, and a test holds it.
+
+**`pre-compact` keeps closed history** (Q2). It is the snapshot that undoes the compact after it, so
+pruning closed regenerable facts from it would remove exactly what that compact deletes. It still omits
+vectors. `Take` carries this as `keepClosedHistory`, which only `StoreCompactor` passes. `facts_closed` is
+absent from such a snapshot, so a restore names nothing as unrecoverable.
 
 ## D98 — A project note is filed by the directory its call names, never by a session binding
 

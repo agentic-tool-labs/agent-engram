@@ -11,6 +11,7 @@ public sealed record CompactReport(
     int SupersessionsRemoved,
     int VectorsRemoved,
     int EntitiesRemoved,
+    int EntitiesKeptForRenameHistory,
     int FileStatesRemoved,
     int ReposDeregistered,
     string? SnapshotName,
@@ -50,15 +51,30 @@ public sealed record CompactReport(
 /// </remarks>
 public static class StoreCompactor
 {
+    /// <summary>The first schema whose foreign-key columns compact deletes through are indexed (D92).</summary>
+    public const int IndexedDeletesSchemaVersion = 20;
+
+    /// <param name="onSnapshotCopy">
+    /// The connection is a snapshot copy being slimmed (D96): take no <c>pre-compact</c> snapshot,
+    /// run no <c>VACUUM</c>, both of which the caller owns, and skip the vector sweep, because the
+    /// caller has already dropped the vector index. Refuses, having done nothing, when
+    /// the connection's file is the live store.
+    /// </param>
     public static CompactReport Compact(
         SqliteConnection connection,
         EngramHome home,
         string? path,
         bool apply,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        bool onSnapshotCopy = false)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(home);
+
+        if (onSnapshotCopy)
+        {
+            BackupStore.RefuseLiveStore(connection.DataSource, home);
+        }
 
         var prefix = path is null || path.Length <= 1 ? path : path.TrimEnd('/');
         var notes = new List<string>();
@@ -80,10 +96,11 @@ public static class StoreCompactor
             // Orphaned vectors — rows whose fact is already gone — are swept alongside the
             // targets (D36 makes stray vector rows compact's problem). Counting touches the
             // vec0 module, which is loaded per connection and may simply not be installed;
-            // that costs the sweep and nothing else.
+            // that costs the sweep and nothing else. A snapshot copy skips it: the take drops the
+            // vector index before compacting, so there is nothing to sweep (D96).
             var vectors = 0;
             var vectorsCountable = false;
-            if (VectorIndex.Exists(connection))
+            if (!onSnapshotCopy && VectorIndex.Exists(connection))
             {
                 try
                 {
@@ -101,11 +118,13 @@ public static class StoreCompactor
             }
 
             var entities = 0;
+            var entitiesKept = 0;
             var fileStates = 0;
             var repos = 0;
             if (prefix is not null)
             {
                 entities = Scalar(connection, EntitySql("SELECT count(*) FROM entity"), ("$p", prefix));
+                entitiesKept = Scalar(connection, EntitySql("SELECT count(*) FROM entity", aliased: true), ("$p", prefix));
                 fileStates = Scalar(connection, FileStateSql("SELECT count(*) FROM file_state"), ("$p", prefix));
                 repos = Scalar(connection, RegistrySql("SELECT count(*) FROM repo_registry"), ("$p", prefix));
 
@@ -123,6 +142,7 @@ public static class StoreCompactor
                 supersessions,
                 vectors,
                 entities,
+                entitiesKept,
                 fileStates,
                 repos,
                 SnapshotName: null,
@@ -134,8 +154,14 @@ public static class StoreCompactor
                 return report;
             }
 
-            var snapshot = BackupStore.Take(connection, home, now, label: "pre-compact");
-            BackupStore.PruneAfterWrite(home, snapshot);
+            BackupSnapshot? snapshot = null;
+            if (!onSnapshotCopy)
+            {
+                // Keeps closed history: this snapshot exists to undo the compact that follows, and
+                // pruning that history from it would remove exactly what the compact deletes (D96).
+                snapshot = BackupStore.Take(connection, home, now, BackupScope.Authored, label: "pre-compact", keepClosedHistory: true);
+                BackupStore.PruneAfterWrite(home, snapshot);
+            }
 
             using (var transaction = EngramDatabase.BeginWrite(connection))
             {
@@ -179,6 +205,11 @@ public static class StoreCompactor
                 transaction.Commit();
             }
 
+            if (snapshot is null)
+            {
+                return report with { Applied = true };
+            }
+
             Execute(connection, null, "PRAGMA wal_checkpoint(TRUNCATE);");
             Execute(connection, null, "VACUUM;");
 
@@ -203,7 +234,7 @@ public static class StoreCompactor
         command.CommandText =
             "CREATE TEMP TABLE compact_target AS "
             + "SELECT id, valid_to IS NULL AS was_live FROM fact "
-            + $"WHERE regenerable = 1 AND {ModeSql(prefix)} AND NOT {AuthoredEdgeSql};";
+            + $"WHERE regenerable = 1 AND {ModeSql(prefix)} AND NOT {AuthoredDependencySql};";
         if (prefix is not null)
         {
             command.Parameters.AddWithValue("$p", prefix);
@@ -216,7 +247,7 @@ public static class StoreCompactor
     {
         using var command = connection.CreateCommand();
         command.CommandText =
-            $"SELECT count(*) FROM fact WHERE regenerable = 1 AND {ModeSql(prefix)} AND {AuthoredEdgeSql};";
+            $"SELECT count(*) FROM fact WHERE regenerable = 1 AND {ModeSql(prefix)} AND {AuthoredDependencySql};";
         if (prefix is not null)
         {
             command.Parameters.AddWithValue("$p", prefix);
@@ -237,6 +268,20 @@ public static class StoreCompactor
         + "AND other.regenerable = 0)";
 
     /// <summary>
+    /// Authored truth depends on this fact: it shares a supersession edge with an authored
+    /// fact, or a judged relation (either end), a review date or a sync request names it. None
+    /// of those three tables cascades, so deleting such a fact would fail the whole call on a
+    /// foreign key, and none of them is regenerated by an index run. A predicate on the outer
+    /// <c>fact</c> row. One EXISTS per column, so each probe uses that column's index.
+    /// </summary>
+    internal const string AuthoredDependencySql =
+        "(" + AuthoredEdgeSql
+        + " OR EXISTS (SELECT 1 FROM fact_relation r WHERE r.fact_id = fact.id)"
+        + " OR EXISTS (SELECT 1 FROM fact_relation r WHERE r.related_id = fact.id)"
+        + " OR EXISTS (SELECT 1 FROM fact_review v WHERE v.fact_id = fact.id)"
+        + " OR EXISTS (SELECT 1 FROM fact_sync_request q WHERE q.fact_id = fact.id))";
+
+    /// <summary>
     /// <paramref name="column"/> equals the prefix or sits under it, where "under" crosses
     /// a segment boundary — <c>/</c> into a subtree, <c>#</c> into a file's symbols — so
     /// <c>/code/api</c> never captures <c>/code/api-v2</c>.
@@ -245,14 +290,24 @@ public static class StoreCompactor
         $"({column} = $p OR (substr({column}, 1, length($p)) = $p "
         + $"AND substr({column}, length($p) + 1, 1) IN ('/', '#')))";
 
-    private static string EntitySql(string head) =>
+    /// <summary>
+    /// Code entities under the prefix that no surviving fact references. <paramref name="aliased"/>
+    /// false selects the ones to delete; true selects the ones kept only because a rename filed
+    /// an alias against them, which <c>ON DELETE CASCADE</c> would otherwise remove silently and
+    /// no index run rebuilds.
+    /// </summary>
+    internal static string EntitySql(string head, bool aliased = false) =>
         $"{head} WHERE kind IN ('repo', 'module', 'file', 'symbol', 'section') "
         + $"AND {Subtree("entity.path")} "
         // Written to hold before and after the fact delete: in a dry run the targets still
-        // exist, so "no remaining reference" has to look through them.
-        + "AND NOT EXISTS (SELECT 1 FROM fact "
-        + "WHERE (fact.subject_id = entity.id OR fact.object_id = entity.id) "
-        + "AND fact.id NOT IN (SELECT id FROM temp.compact_target));";
+        // exist, so "no remaining reference" has to look through them. Two NOT EXISTS rather
+        // than one with an OR: the OR kept either index from being used and scanned fact once
+        // per entity (1,340 entities took 76.8 s).
+        + "AND NOT EXISTS (SELECT 1 FROM fact WHERE fact.subject_id = entity.id "
+        + "AND fact.id NOT IN (SELECT id FROM temp.compact_target)) "
+        + "AND NOT EXISTS (SELECT 1 FROM fact WHERE fact.object_id = entity.id "
+        + "AND fact.id NOT IN (SELECT id FROM temp.compact_target)) "
+        + $"AND {(aliased ? string.Empty : "NOT ")}EXISTS (SELECT 1 FROM entity_alias a WHERE a.entity_id = entity.id);";
 
     /// <summary>
     /// A file's memory path is <c>repo_path || '/' || path</c> (the grammar's ForFile). The
