@@ -55,8 +55,9 @@ public static class StoreCompactor
     public const int IndexedDeletesSchemaVersion = 20;
 
     /// <param name="onSnapshotCopy">
-    /// The connection is a snapshot copy being slimmed (D96): take no <c>pre-compact</c> snapshot
-    /// and run no <c>VACUUM</c>, both of which the caller owns. Refuses, having done nothing, when
+    /// The connection is a snapshot copy being slimmed (D96): take no <c>pre-compact</c> snapshot,
+    /// run no <c>VACUUM</c>, both of which the caller owns, and skip the vector sweep, because the
+    /// caller has already dropped the vector index. Refuses, having done nothing, when
     /// the connection's file is the live store.
     /// </param>
     public static CompactReport Compact(
@@ -95,10 +96,11 @@ public static class StoreCompactor
             // Orphaned vectors — rows whose fact is already gone — are swept alongside the
             // targets (D36 makes stray vector rows compact's problem). Counting touches the
             // vec0 module, which is loaded per connection and may simply not be installed;
-            // that costs the sweep and nothing else.
+            // that costs the sweep and nothing else. A snapshot copy skips it: the take drops the
+            // vector index before compacting, so there is nothing to sweep (D96).
             var vectors = 0;
             var vectorsCountable = false;
-            if (VectorIndex.Exists(connection))
+            if (!onSnapshotCopy && VectorIndex.Exists(connection))
             {
                 try
                 {
@@ -155,7 +157,9 @@ public static class StoreCompactor
             BackupSnapshot? snapshot = null;
             if (!onSnapshotCopy)
             {
-                snapshot = BackupStore.Take(connection, home, now, BackupScope.Authored, label: "pre-compact");
+                // Keeps closed history: this snapshot exists to undo the compact that follows, and
+                // pruning that history from it would remove exactly what the compact deletes (D96).
+                snapshot = BackupStore.Take(connection, home, now, BackupScope.Authored, label: "pre-compact", keepClosedHistory: true);
                 BackupStore.PruneAfterWrite(home, snapshot);
             }
 

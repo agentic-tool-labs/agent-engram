@@ -6181,9 +6181,10 @@ bundled build. Snapshots and VACUUM are 88% of the wall time. Making them cheape
 Spec: `backup-derived-state.md` §4.2 (phase 2b, eng-40); adr-2, accepted 2026-11-19. Builds on D93 and
 needs D92's indexes.
 
-**One definition of disposable.** On the `.partial` copy, before the vector drop, `Slim` runs
+**One definition of disposable.** On the `.partial` copy, after the vector drop, `Slim` runs
 `StoreCompactor.Compact(path: null, apply: true, onSnapshotCopy: true)`. The option skips compact's own
-`pre-compact` snapshot and its `VACUUM`, both of which the take already owns, and refuses before doing
+`pre-compact` snapshot, its `VACUUM` and its vector sweep — the take owns the first two and has
+already dropped the table the third would sweep — and refuses before doing
 anything when the connection's file is `home.DatabasePath` — the same guard `Slim` has (D93). A delete
 written for backups would be a second definition of "regenerable and unneeded", and the first one to be
 tuned would leave the other behind. Path-null compact deletes no entity, `file_state` or
@@ -6199,9 +6200,20 @@ so a store this binary has not yet migrated takes the skip path until something 
 **Measured** on a v20 copy of the 2.45 GB store (621,904 live facts, 268,583 closed regenerable, none
 protected). The snapshot went from **836,517,888 B** (vectors dropped and vacuumed, no 2b) to
 **668,307,456 B**: 168 MB, above the 50 MB bar in the spec. `BackupFingerprint` was equal across the source, the snapshot and the restored store, and the live, alias and entity
-counts were unchanged. The binary's `backup take` took **22.38 s**, against **9.82 s** for the D93
-binary on the v19 copy. Timed step by step in emulation, 6.0 s of that difference is compact deleting
-the 104,995 `fact_vec` rows of the pruned facts — rows the drop that follows removes anyway — and 1.41 s
-is the fact delete. The spec places compact before the drop. That ordering is reported upward, not
-changed here. The same ordering means `backup_omitted.vectors` counts only what the drop removed
-(261,794 of the copy's 366,789).
+counts were unchanged.
+
+**Drop first, then compact — the order was measured, and reversed.** The first build compacted before
+the drop, as the spec then said. `backup take` took **22.38 s** against **9.82 s** for the D93 binary
+on the v19 copy, and timed step by step in emulation 6.0 s of the difference was compact deleting the
+104,995 `fact_vec` rows of the pruned facts — rows the drop that follows removes anyway — with 1.41 s
+for the fact delete. It also made `backup_omitted.vectors` count only what the drop removed (261,794 of
+366,789). Ruled (spec §4.2, Q1): drop first, and skip the sweep in snapshot-copy mode rather than probing
+for a table that is gone. Re-measured: **16.76 s and 12.99 s** in two takes at load average ~13, same
+668,307,456 B, `vectors` 366,789. A copy marked `authored+vectors` keeps its table, so the vectors of
+facts compacted out of it stay behind as orphans; a later live compact sweeps them (D36). The sweep on
+the live store is unchanged, and a test holds it.
+
+**`pre-compact` keeps closed history** (Q2). It is the snapshot that undoes the compact after it, so
+pruning closed regenerable facts from it would remove exactly what that compact deletes. It still omits
+vectors. `Take` carries this as `keepClosedHistory`, which only `StoreCompactor` passes. `facts_closed` is
+absent from such a snapshot, so a restore names nothing as unrecoverable.

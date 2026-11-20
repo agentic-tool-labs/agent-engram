@@ -133,6 +133,14 @@ public class BackupSlimTests
         }
     }
 
+    private static long IdOf(SqliteConnection connection, string body)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id FROM fact WHERE body = $b;";
+        command.Parameters.AddWithValue("$b", body);
+        return (long)command.ExecuteScalar()!;
+    }
+
     private static void Embed(SqliteConnection connection, params long[] ids)
     {
         VectorIndex.EnsureCreated(connection, new EmbeddingSpace("test-embedder", 4));
@@ -206,7 +214,9 @@ public class BackupSlimTests
         Assert.SkipUnless(VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
         using var sandbox = new VectorSandbox();
         var seeded = Seed(sandbox.Connection);
-        Embed(sandbox.Connection, seeded.Coffee, seeded.ReferencedByRelation);
+
+        // Bar v1 is closed code history 2b prunes; its vector still counts as omitted (D96, Q1).
+        Embed(sandbox.Connection, seeded.Coffee, seeded.ReferencedByRelation, IdOf(sandbox.Connection, "class Bar v1"));
         var source = AuthoredDigest.Read(sandbox.Connection);
         var fingerprint = BackupFingerprint.Read(sandbox.Connection);
 
@@ -215,7 +225,7 @@ public class BackupSlimTests
 
         Assert.Null(slim.Warning);
         Assert.False(HasTable(slim.Path, VectorIndex.TableName));
-        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredScope, 2, FactsClosed: 1), Markers(slim.Path));
+        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredScope, 3, FactsClosed: 1), Markers(slim.Path));
         using (var copy = EngramDatabase.Open(slim.Path))
         {
             Assert.Null(EngramDatabase.ReadMeta(copy, VectorIndex.ModelKey));
@@ -228,7 +238,7 @@ public class BackupSlimTests
 
         // The neighbour that must not match: a full snapshot keeps the index.
         Assert.True(HasTable(full.Path, VectorIndex.TableName));
-        Assert.Equal(2, VectorIndex.Count(sandbox.Connection));
+        Assert.Equal(3, VectorIndex.Count(sandbox.Connection));
     }
 
     // --- I2: the live store is never mutated by a take ----------------------------------------
@@ -581,6 +591,66 @@ public class BackupSlimTests
 
         Assert.Equal(["class Bar v1", "class Baz as indexed"], ClosedRegenerable(sandbox.Home.DatabasePath));
         Assert.Empty(BackupStore.List(sandbox.Home));
+    }
+
+    /// <summary>D96 Q1 negative: a compact of the live store still sweeps the vectors of what it prunes.</summary>
+    [Fact]
+    public void LiveCompact_StillSweepsTheVectorsOfWhatItPrunes()
+    {
+        Assert.SkipUnless(VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
+        using var sandbox = new VectorSandbox();
+        var seeded = Seed(sandbox.Connection);
+        Embed(sandbox.Connection, seeded.Coffee, IdOf(sandbox.Connection, "class Bar v1"));
+
+        var report = StoreCompactor.Compact(sandbox.Connection, sandbox.Home, path: null, apply: true, T0);
+
+        Assert.Equal(1, report.VectorsRemoved);
+        Assert.Equal(1, VectorIndex.Count(sandbox.Connection));
+    }
+
+    /// <summary>D96 Q1: on a snapshot copy compact leaves vector rows alone — the take has already dropped the table.</summary>
+    [Fact]
+    public void CompactOnASnapshotCopy_DoesNotSweepVectors()
+    {
+        Assert.SkipUnless(VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
+        using var sandbox = new VectorSandbox();
+        Seed(sandbox.Connection);
+        Embed(sandbox.Connection, IdOf(sandbox.Connection, "class Bar v1"));
+        var copyPath = Path.Combine(sandbox.Home.Root, "copy.db");
+        Sql(sandbox.Connection, $"VACUUM INTO '{copyPath}';");
+
+        try
+        {
+            using var copy = EngramDatabase.Open(copyPath, sandbox.Home.LibDir);
+            var report = StoreCompactor.Compact(copy, sandbox.Home, path: null, apply: true, T0, onSnapshotCopy: true);
+
+            Assert.Equal(1, report.ClosedPruned);
+            Assert.Equal(0, report.VectorsRemoved);
+            Assert.Equal(1, VectorIndex.Count(copy));
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(copyPath);
+        }
+    }
+
+    /// <summary>D96 Q2: a pre-compact snapshot keeps the closed code fact a scheduled snapshot omits.</summary>
+    [Fact]
+    public void PreCompactSnapshot_KeepsClosedCodeHistory_AScheduledSnapshotOmits()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Seed(connection);
+
+        var scheduled = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Authored);
+        Assert.DoesNotContain("class Bar v1", ClosedRegenerable(scheduled.Path));
+
+        var compact = StoreCompactor.Compact(connection, sandbox.Home, path: null, apply: true, T0.AddMinutes(1));
+        var preCompact = Path.Combine(sandbox.Home.BackupDir, compact.SnapshotName!);
+
+        Assert.Equal(1, compact.ClosedPruned);
+        Assert.Contains("class Bar v1", ClosedRegenerable(preCompact));
+        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredScope, 0), Markers(preCompact));
     }
 
     /// <summary>§9 negative case: a store still at v19 skips 2b with a note; Phase 1 still applies.</summary>
