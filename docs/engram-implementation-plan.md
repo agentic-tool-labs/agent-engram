@@ -6933,3 +6933,33 @@ Against df1a4a5 (F2 ruling):
 25. a key line without a role [6, two tier 3]
 26. instance-style keys refused [1]
 27. the old "your own name" description [1, golden]
+
+## D102 — Lane eligibility is written once, and every statement takes it from there
+
+**What it is.** The condition that keeps regenerable, object-bearing edges out of `fact_fts`,
+`fact_token` and `fact_vec` has one text: `EngramDatabase.RegenerableEdgeFor(alias)`. It is a
+template, and both forms of the eligibility predicate come from it. `LexicallyIndexed` is the
+unqualified form and `LexicallyIndexedFor("f")` the aliased one. Before this, seven call sites
+spelled it by hand: `FactStore.ReadLive` and `VersionCounts`, `FactTokenIndex.CountMissing` and the
+rebuild's read, and `VectorIndex`'s backfill batch, pending count and `CountEmbeddable`. Two copies
+had already disagreed once. Repair's detector lacked the exclusion and reported 360,391 phantom
+missing rows (#14).
+
+**The complement.** `CountIneligibleByPredicate` takes `RegenerableEdgeFor("f")`.
+`PruneIneligibleSql` keeps its hand spelling, because its `+object_id` is a planner hint (D92) and
+belongs to the statement, not the definition. Deriving it would have to inject the plus, and that
+would write the text a second time.
+
+**No plan moved, by construction.** Every statement's text is byte-identical to what it was. A
+throwaway assertion compared the derived strings and both vector statements against the old
+literals before it was deleted. So no plan was touched and none needed a timing. `LexicallyIndexed`,
+`BackfillBatchSql` and `PendingCountSql` went from `const` to `static readonly`, because a `const`
+cannot call the template. Every reader uses them at runtime.
+
+**Guards.** `LexicallyIndexedOnePlaceTests` fails on the literal predicate in any `src/` file, with
+any alias or none and across line breaks. The `new.`/`old.` trigger spelling is exempt, and
+`StoreRepairerTests.LexicallyIndexed_MatchesTheConditionInEveryFtsTrigger` still holds the triggers
+to the constant. The guard also asserts that its pattern matches what the template produces, so a
+reworded definition cannot leave it scanning for a spelling nobody uses. It does not see the bare
+complement: a hand copy of `f.regenerable IS 1 AND f.object_id IS NOT NULL` without the `NOT` passes,
+and that is also what keeps `PruneIneligibleSql` legal.

@@ -676,9 +676,25 @@ public static class EngramDatabase
     /// everything except regenerable, object-bearing edges. The rebuild's backfill and
     /// <see cref="StoreRepairer"/>'s missing-entry detector both read it, so the detector cannot
     /// expect what the rebuild will not insert; the schema triggers spell it with
-    /// <c>new.</c>/<c>old.</c> and a test holds them to this text.
+    /// <c>new.</c>/<c>old.</c> and a test holds them to this text. Every other statement that
+    /// filters on lane eligibility — FTS, <c>fact_token</c>, the vector backfill, recall — takes
+    /// it from here or from <see cref="LexicallyIndexedFor"/>, and a guard test fails on a
+    /// hand-written copy (D102).
     /// </summary>
-    internal const string LexicallyIndexed = "NOT (regenerable IS 1 AND object_id IS NOT NULL)";
+    internal static readonly string LexicallyIndexed = LexicallyIndexedFor(null);
+
+    /// <summary><see cref="LexicallyIndexed"/> with its columns qualified by <paramref name="alias"/>.</summary>
+    internal static string LexicallyIndexedFor(string? alias) => $"NOT ({RegenerableEdgeFor(alias)})";
+
+    /// <summary>
+    /// The complement of <see cref="LexicallyIndexedFor"/>: the regenerable, object-bearing edges
+    /// the lanes leave out. This template is the one place the condition's text is written.
+    /// </summary>
+    internal static string RegenerableEdgeFor(string? alias)
+    {
+        var p = alias is null ? string.Empty : alias + ".";
+        return $"{p}regenerable IS 1 AND {p}object_id IS NOT NULL";
+    }
 
     private static bool TableExists(SqliteConnection connection, string name)
     {
