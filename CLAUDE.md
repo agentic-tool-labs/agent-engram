@@ -50,7 +50,10 @@ index-vs-fact set difference compares `fact` against itself and calls any desync
 read the real index). And FTS5's own `'rebuild'` command re-reads the whole content
 table, closed beliefs included, while the index deliberately holds live facts only —
 rebuild through `EngramDatabase.RebuildFactFts`, which is the one implementation of what
-belongs in the index.
+belongs in the index. Both sides of the detector, "missing" and "extra", measure against only that, which is
+`EngramDatabase.LexicallyIndexed` — live code edges are excluded by design, and a detector
+counting them called **360,391** facts missing on a real store, so every `repair --apply`
+rebuilt the whole index and none converged.
 
 **`fact_token` is maintained from C# call sites, and `--tokens` reads the stamp only.** The overlap
 index cannot be trigger-maintained the way `fact_fts` is, because a trigger cannot call `Tokenizer`
