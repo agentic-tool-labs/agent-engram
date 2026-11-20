@@ -115,7 +115,12 @@ descriptor leak first. What survives the correction: `PrimerSummary.Read` replac
 the same primer and spawns nothing — went **69.5 → 43.4 ms over floor at 50,097** and 7.8 → 3.7 at
 5,308, with the primers byte-identical on both binaries at both sizes. The ~40 ms that remains at
 50,097 is the topic histogram, which transfers one row per distinct subject but still scans every
-live fact; at the 5,000 this instance holds it is ~4 ms. Nothing here breaches
+live fact; at the 5,000 this instance holds it is ~4 ms. The real store then grew to **621,904
+live facts**, where the published binary, timed through a file (p50, N=30, ~10 ms floor
+included), took **516 ms for `subagent-start` and 715 ms for `session-start`**; counting the
+histogram per `subject_id` over the two live partial indexes, probing each scope for its first
+fact instead of grouping, and driving `CountDue` from `fact_review` brought them to **176 ms and
+208 ms**, primers byte-identical (a same-binary calibration pair read within 2.2 ms). Nothing here breaches
 `file-touched`'s 10 ms rule, which is about that hook alone. So the rule does not rest on the
 arithmetic — an opening `file-touched` would still fit at
 p50. It rests on the word *unconditionally*. Under an indexer-shaped writer committing
