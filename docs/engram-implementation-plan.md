@@ -6297,6 +6297,13 @@ counts in brackets:
 21. a notice on every remember [1]
 22. no `[project <p>]` echo [2]
 
+The review rework was falsified the same way:
+- cues read raw text: 2 red (the cue theory, and the two-spellings repeat test)
+- the not-indexed notice names the root: 1 red (the subdirectory test)
+- no scope-ignored notice: 1 red
+- the notice on every restatement: 1 red (its negative)
+- no `IsPathFullyQualified` guard: 1 red (`"."`)
+
 The relative-path half of `bad-dir` is held by `"."`, which exists relative to the process's
 working directory. It therefore passes `Directory.Exists` and reaches the `IsPathFullyQualified`
 guard on its own.
