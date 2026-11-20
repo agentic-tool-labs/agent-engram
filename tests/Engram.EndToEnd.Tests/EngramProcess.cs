@@ -96,7 +96,7 @@ internal static class EngramProcess
         {
             throw new TimeoutException(
                 $"engram exited but its output pipes had not closed {sinceExit.Elapsed.TotalSeconds:0.0} s later "
-                    + $"(thread pool:{ThreadPool.ThreadCount} threads, {ThreadPool.PendingWorkItemCount} pending work items). "
+                    + $"(thread pool: {ThreadPool.ThreadCount} threads, {ThreadPool.PendingWorkItemCount} pending work items). "
                     + "Either something still holds the write end, or the readers were never scheduled.");
         }
 
