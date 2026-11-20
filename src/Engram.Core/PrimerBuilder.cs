@@ -51,7 +51,13 @@ public static class PrimerBuilder
     /// Returns an empty string only when there is nothing stored, precedence is off, and
     /// enrollment is not being offered.
     /// </remarks>
-    public static string Build(PrimerSummary summary, MemoryPrecedence precedence, bool offerEnrollment = false)
+    public static string Build(PrimerSummary summary, MemoryPrecedence precedence, bool offerEnrollment = false) =>
+        Build(summary, precedence, offerEnrollment, out _);
+
+    /// <inheritdoc cref="Build(PrimerSummary, MemoryPrecedence, bool)"/>
+    /// <param name="roleFactCount">Role facts the primer actually delivered (D100).</param>
+    public static string Build(
+        PrimerSummary summary, MemoryPrecedence precedence, bool offerEnrollment, out int roleFactCount)
     {
         var lines = new List<string>();
         var tokens = 0;
@@ -59,6 +65,8 @@ public static class PrimerBuilder
         TryAppendLine(lines, ref tokens, MemorySettings.PrimerLine(precedence));
 
         AppendDirectives(lines, summary.Directives);
+
+        roleFactCount = AppendRoleBlock(lines, ref tokens, summary);
 
         if (offerEnrollment)
         {
@@ -86,7 +94,12 @@ public static class PrimerBuilder
     /// never fires for a subagent — whatever the parent was told about where memory lives reaches
     /// the child only if the child is told the same thing through this path.
     /// </remarks>
-    public static string BuildForSubagent(PrimerSummary summary, MemoryPrecedence precedence)
+    public static string BuildForSubagent(PrimerSummary summary, MemoryPrecedence precedence) =>
+        BuildForSubagent(summary, precedence, out _);
+
+    /// <inheritdoc cref="BuildForSubagent(PrimerSummary, MemoryPrecedence)"/>
+    /// <param name="roleFactCount">Role facts the primer actually delivered (D100).</param>
+    public static string BuildForSubagent(PrimerSummary summary, MemoryPrecedence precedence, out int roleFactCount)
     {
         var lines = new List<string> { SubagentInstruction };
         var tokens = TokenEstimator.Estimate(SubagentInstruction);
@@ -94,6 +107,8 @@ public static class PrimerBuilder
         TryAppendLine(lines, ref tokens, MemorySettings.PrimerLine(precedence));
 
         AppendDirectives(lines, summary.Directives);
+
+        roleFactCount = AppendRoleBlock(lines, ref tokens, summary);
 
         TryAppendLine(lines, ref tokens, CoverageLine(summary.FactCount, summary.TopicCounts));
 
@@ -143,6 +158,50 @@ public static class PrimerBuilder
         {
             lines.Add($"- {directive}");
         }
+    }
+
+    /// <summary>
+    /// The role block (D100): a header, the line naming the role key, then the newest role facts
+    /// that fit the budget. Every line goes through the same budget as <see cref="TryAppendLine"/>,
+    /// after the precedence line, so the block can never displace it. The whole block is omitted
+    /// when the role has no facts or none fits, so such a primer is byte-identical to one built
+    /// without a role. The key line names no tool (D15).
+    /// </summary>
+    private static int AppendRoleBlock(List<string> lines, ref int tokens, PrimerSummary summary)
+    {
+        if (summary.Role is not { } role || summary.RoleFacts is not { Count: > 0 } facts)
+        {
+            return 0;
+        }
+
+        var header = $"Role memory for {role}:";
+        var key = $"Your role memory key: {role}.";
+        var used = tokens + TokenEstimator.Estimate(header) + TokenEstimator.Estimate(key);
+
+        var fitting = new List<string>();
+        foreach (var fact in facts.Take(RoleNotes.MaxDelivered))
+        {
+            var line = $"- {fact}";
+            var lineTokens = TokenEstimator.Estimate(line);
+            if (used + lineTokens > MaxTokens)
+            {
+                continue;
+            }
+
+            fitting.Add(line);
+            used += lineTokens;
+        }
+
+        if (fitting.Count == 0)
+        {
+            return 0;
+        }
+
+        lines.Add(header);
+        lines.Add(key);
+        lines.AddRange(fitting);
+        tokens = used;
+        return fitting.Count;
     }
 
     private static string? CoverageLine(int factCount, IReadOnlyDictionary<string, int> topicCounts)

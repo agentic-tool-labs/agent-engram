@@ -83,7 +83,7 @@ Engram's durable memory, and where anything worth keeping goes even when another
   param: review_after
   When to revisit this: a relative duration ('3d', '2w', '12h') or an ISO date. Surfaces in 'engram review list' and doctor once it passes.
   param: scope
-  session (default) or project. Use project for something true about this codebase beyond this session (a decision, a trap, a convention); session for working state.
+  session (default), project, or agent. Use project for something true about this codebase beyond this session (a decision, a trap, a convention); agent, with agent = your role key from the primer, for a lesson every future agent of your role needs; session for working state.
   param: project_dir
   With scope project: your current working directory, absolute. Engram finds the repository from it.
 

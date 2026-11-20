@@ -62,9 +62,9 @@ public class ProjectNotesTests
     }
 
     [Fact]
-    public void WritableScopes_AreSessionThenProject_FromTheRegistry()
+    public void WritableScopes_AreSessionProjectAgent_FromTheRegistry()
     {
-        Assert.Equal([MemoryScopes.Session, MemoryScopes.Project], MemoryScopes.Writable);
+        Assert.Equal([MemoryScopes.Session, MemoryScopes.Project, MemoryScopes.Agent], MemoryScopes.Writable);
         Assert.All(MemoryScopes.Writable, scope => Assert.Contains(scope, MemoryScopes.All));
     }
 }

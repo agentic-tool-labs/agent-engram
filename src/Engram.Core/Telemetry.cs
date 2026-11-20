@@ -360,7 +360,14 @@ public sealed record TelemetryRecord(
     /// Why a <c>scope:"project"</c> remember was kept as a session note: <c>no-dir</c>,
     /// <c>bad-dir</c>, <c>not-checkout</c>, <c>git-unknown</c> or <c>not-indexed</c> (D98).
     /// </summary>
-    [property: JsonPropertyName("project_unresolved")] string? ProjectUnresolved = null);
+    [property: JsonPropertyName("project_unresolved")] string? ProjectUnresolved = null,
+
+    /// <summary>
+    /// Role facts a primer delivered in its role block, set on a <c>subagent-start</c> or
+    /// <c>session-start</c> record whenever the payload named a role (D100). Its own field;
+    /// <c>fact_count</c> stays null on a primer (D46).
+    /// </summary>
+    [property: JsonPropertyName("role_fact_count")] int? RoleFactCount = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

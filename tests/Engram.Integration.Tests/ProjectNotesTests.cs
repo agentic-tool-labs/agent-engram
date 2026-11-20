@@ -272,7 +272,7 @@ public sealed class ProjectNotesTests : IDisposable
 
         var response = Remember(sandbox, "s1", "Something.", scope, projectDir: null);
 
-        Assert.Equal($"Unknown scope '{scope}'; valid scopes: session, project. Nothing was saved.", response);
+        Assert.Equal($"Unknown scope '{scope}'; valid scopes: session, project, agent. Nothing was saved.", response);
         Assert.Equal(before, FactCount(sandbox));
     }
 

@@ -33,17 +33,27 @@ namespace Engram.Core;
 /// Reuses this record's one-query read path rather than a new hook or query (D46); consumed by
 /// <c>doctor</c>, not rendered into the primer text itself.
 /// </param>
+/// <param name="Role">
+/// The role key a primer is built for (the hook payload's <c>agent_type</c>), or null when the
+/// payload carried none (D100).
+/// </param>
+/// <param name="RoleFacts">
+/// Up to <see cref="RoleNotes.MaxDelivered"/> live role-fact bodies, newest first; empty without a
+/// role.
+/// </param>
 public sealed record PrimerSummary(
     int FactCount,
     IReadOnlyDictionary<string, int> TopicCounts,
     IReadOnlyList<CannedFact> ExampleCandidates,
     IReadOnlyList<string> Directives,
-    int ReviewDueCount = 0)
+    int ReviewDueCount = 0,
+    string? Role = null,
+    IReadOnlyList<string>? RoleFacts = null)
 {
     /// <summary>
     /// Counts a catalog already in memory — the shape every existing caller and test hands over.
     /// </summary>
-    public static PrimerSummary From(IReadOnlyList<CannedFact> facts)
+    public static PrimerSummary From(IReadOnlyList<CannedFact> facts, string? role = null)
     {
         var topicCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var fact in facts)
@@ -51,7 +61,10 @@ public sealed record PrimerSummary(
             topicCounts[fact.Topic] = topicCounts.GetValueOrDefault(fact.Topic) + 1;
         }
 
-        return new PrimerSummary(facts.Count, topicCounts, facts, Directives: []);
+        return new PrimerSummary(
+            facts.Count, topicCounts, facts, Directives: [],
+            Role: RoleNotes.IsAddressable(role) ? role : null,
+            RoleFacts: RoleNotes.IsAddressable(role) ? RoleNotes.SelectDelivered(facts, role!) : []);
     }
 
     /// <summary>
@@ -65,7 +78,7 @@ public sealed record PrimerSummary(
     /// its segment splitting and topic-node resolution would diverge from a SQL copy the
     /// first time either side was tuned.
     /// </remarks>
-    public static PrimerSummary Read(SqliteConnection connection, DateTimeOffset now)
+    public static PrimerSummary Read(SqliteConnection connection, DateTimeOffset now, string? role = null)
     {
         var topicNames = FactStore.ReadEntityNames(connection, CannedFactSeeder.TopicKind);
         var sessionPrefix = SessionFacts.Root + "/";
@@ -107,7 +120,13 @@ public sealed record PrimerSummary(
         var directives = DirectiveFacts.ReadLive(connection).Select(d => d.Body).ToList();
         var reviewDueCount = FactReview.CountDue(connection, now.ToUnixTimeSeconds());
 
-        return new PrimerSummary(factCount, topicCounts, candidates, directives, reviewDueCount);
+        // The one extra read, an indexed path range, and only when the payload named a role.
+        var roleFacts = RoleNotes.IsAddressable(role) ? RoleNotes.ReadDelivered(connection, role!) : [];
+
+        return new PrimerSummary(
+            factCount, topicCounts, candidates, directives, reviewDueCount,
+            Role: RoleNotes.IsAddressable(role) ? role : null,
+            RoleFacts: roleFacts);
     }
 
     /// <remarks>
