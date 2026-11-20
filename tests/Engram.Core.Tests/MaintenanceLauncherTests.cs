@@ -201,6 +201,37 @@ public class MaintenanceLauncherTests
         }
     }
 
+    /// <summary>
+    /// The whole session-start script, byte for byte. P4 resolves a project per remember call
+    /// and binds nothing at session start (D98), so this text must not grow a job.
+    /// </summary>
+    [Fact]
+    public void TheSessionStartScript_IsExactlyThisText()
+    {
+        const string e = "'/opt/engram/bin/engram'";
+        const string h = " --home '/home/someone/.engram'";
+
+        var expected =
+            "exec </dev/null >/dev/null 2>&1; "
+            + "renice -n 10 -p $$ >/dev/null 2>&1 || :; "
+            + "taskpolicy -b -p $$ >/dev/null 2>&1 || :; "
+            + e + " maintenance claim --pid $$" + h + "; rc=$?; [ \"$rc\" -eq 1 ] && exit 0; "
+            + "{ "
+            + e + " backup take --if-due" + h + "; "
+            + e + " queue compact --apply --if-large" + h + "; "
+            + e + " repair --apply --tokens" + h + "; "
+            + e + " sync import --if-new --apply" + h + "; "
+            + e + " sync export --if-due --apply" + h + "; "
+            + e + " sync compact --apply --if-large" + h + "; "
+            + e + " index --drain-all --apply --auto '/repo'" + h + "; "
+            + e + " index --freshen --apply --skip '/repo'" + h + "; "
+            + "}";
+
+        Assert.Equal(
+            expected,
+            MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: true, "/repo", platform: OSPlatform.OSX));
+    }
+
     /// <summary>Each platform gets its own background line, and never the other's.</summary>
     [Fact]
     public void TheMacScriptCarriesBackgroundQos_AndNoIonice()

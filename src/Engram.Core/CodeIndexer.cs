@@ -865,6 +865,17 @@ public static class CodeIndexer
             : normalized;
     }
 
+    /// <summary>
+    /// The memory path of the live registry row for an identity, or null when the repo was never
+    /// indexed or its row is retired. Reads only; <see cref="EnsureRepo"/> stays the one place a
+    /// <c>repo_path</c> is minted (D98).
+    /// </summary>
+    public static string? LiveRepoPath(SqliteConnection connection, string identity) =>
+        ScalarText(
+            connection,
+            "SELECT repo_path, '' FROM repo_registry WHERE identity = $identity AND detached_at IS NULL;",
+            ("$identity", identity))?.First;
+
     private static string EnsureRepo(
         SqliteConnection connection,
         ConfigFile config,

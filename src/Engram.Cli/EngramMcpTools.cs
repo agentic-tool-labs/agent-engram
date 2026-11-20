@@ -91,11 +91,19 @@ public sealed class EngramMcpTools
             "The bracketed id of a raw user-statement capture this restates, e.g. \"f42\". Closes that "
                 + "capture so the rewritten version replaces it instead of duplicating it.")] string? supersedes = null,
         [Description("Flags for sync. Triggered by \"share engram\" plus content.")] bool sync = false,
-        [Description("When to revisit this: a relative duration ('3d', '2w', '12h') or an ISO date. Surfaces in 'engram review list' and doctor once it passes.")] string? review_after = null)
+        [Description("When to revisit this: a relative duration ('3d', '2w', '12h') or an ISO date. Surfaces in 'engram review list' and doctor once it passes.")] string? review_after = null,
+        [Description("session (default) or project. Use project for something true about this codebase beyond this session (a decision, a trap, a convention); session for working state.")] string? scope = null,
+        [Description("With scope project: your current working directory, absolute. Engram finds the repository from it.")] string? project_dir = null)
     {
         if (!homeState.Initialized)
         {
             return "Engram home is not initialised (run 'engram init'); this statement was not saved.";
+        }
+
+        var wantsProject = scope == MemoryScopes.Project;
+        if (scope is not null && !MemoryScopes.Writable.Contains(scope))
+        {
+            return $"Unknown scope '{scope}'; valid scopes: {string.Join(", ", MemoryScopes.Writable)}. Nothing was saved.";
         }
 
         if (DetailsCeiling.Error(details) is { } ceilingError)
@@ -149,13 +157,24 @@ public sealed class EngramMcpTools
         }
 
         long factId;
+        ProjectResolution? resolution = null;
         using (var connection = EngramDatabase.OpenInitialized(home))
         {
+            // Resolved before the write lock is taken: it can run git, bounded by
+            // GitFileLister.Timeout, and nothing else should wait on that (D98).
+            if (wantsProject)
+            {
+                resolution = ProjectNotes.Resolve(connection, project_dir);
+            }
+
             var rememberNow = DateTimeOffset.UtcNow;
             using var rememberTransaction = EngramDatabase.BeginWrite(connection);
             bool isRepeat;
-            (factId, isRepeat) = SessionFacts.Append(
-                connection, rememberTransaction, session.Value, statement, subject, evidence, agent, rememberNow, details, sync);
+            (factId, isRepeat) = resolution?.Project is { } project
+                ? ProjectNotes.Append(
+                    connection, rememberTransaction, session.Value, project, statement, subject, evidence, rememberNow, details, sync)
+                : SessionFacts.Append(
+                    connection, rememberTransaction, session.Value, statement, subject, evidence, agent, rememberNow, details, sync);
 
             if (isRepeat)
             {
@@ -179,16 +198,26 @@ public sealed class EngramMcpTools
             }
         }
 
+        var writtenProject = resolution?.Project;
+
         Telemetry.Append(home, new TelemetryRecord(
             Timestamp: DateTime.UtcNow.ToString("o"),
             SessionId: session.Value,
-            Kind: TelemetryEventKind.Remember));
+            Kind: TelemetryEventKind.Remember,
+            Scope: writtenProject is null ? null : MemoryScopes.Project,
+            ProjectUnresolved: resolution?.Reason is { } reason ? ProjectNotes.Code(reason) : null));
 
         var subjectText = string.IsNullOrWhiteSpace(subject) ? "(unspecified subject)" : subject;
         var evidenceText = string.IsNullOrWhiteSpace(evidence) ? string.Empty : $" (evidence: {evidence})";
         var agentText = string.IsNullOrWhiteSpace(agent) ? string.Empty : $" [via {agent}]";
+        var projectText = writtenProject is null ? string.Empty : $" [project {writtenProject}]";
 
-        var response = $"[{FactCatalog.HandleFor(factId)}] remembered: {subjectText} — \"{statement}\"{evidenceText}{agentText}";
+        var response = $"[{FactCatalog.HandleFor(factId)}] remembered: {subjectText} — \"{statement}\"{evidenceText}{agentText}{projectText}";
+
+        if (resolution is { Reason: not null })
+        {
+            response += "\n" + ProjectNotes.Notice(resolution, project_dir);
+        }
 
         var config = ConfigFile.Load(home.ConfigPath);
         if (RememberSettings.Read(config).Candidates)

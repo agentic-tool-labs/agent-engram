@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace Engram.Core;
 
@@ -323,8 +324,19 @@ public sealed class GitFileLister : IFileLister
             .ToArray();
     }
 
+    /// <summary>
+    /// Test seam: when a flow sets this, every <see cref="Run"/> on that flow counts itself, so a
+    /// test can assert that a path spawned no git process without racing parallel tests (D98).
+    /// </summary>
+    internal static readonly AsyncLocal<StrongBox<int>?> InvocationCounter = new();
+
     internal static string? Run(string workingDirectory, params string[] arguments)
     {
+        if (InvocationCounter.Value is { } counter)
+        {
+            counter.Value++;
+        }
+
         var info = new ProcessStartInfo("git")
         {
             WorkingDirectory = workingDirectory,

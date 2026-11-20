@@ -661,9 +661,18 @@ public static class FactStore
     /// statements would share a subject, so the second would supersede the first rather than
     /// corrupt anything. Widening it is a path change that would strand existing entities,
     /// so it is a migration, not a tweak.
+    ///
+    /// <para>
+    /// <paramref name="bytes"/> exists for namespaces shared across sessions, which accumulate
+    /// without the session segment that keeps a 32-bit collision harmless: a project note uses 8
+    /// (D98). The default stays 4, so every existing address is unchanged.
+    /// </para>
     /// </remarks>
-    public static string Fingerprint(string statement)
+    public static string Fingerprint(string statement, int bytes = 4)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(bytes, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(bytes, 32);
+
         var builder = new System.Text.StringBuilder(statement.Length);
 
         foreach (var character in statement)
@@ -681,7 +690,7 @@ public static class FactStore
         var hash = System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(builder.ToString().TrimEnd()));
 
-        return Convert.ToHexStringLower(hash.AsSpan(0, 4));
+        return Convert.ToHexStringLower(hash.AsSpan(0, bytes));
     }
 
     /// <summary>
