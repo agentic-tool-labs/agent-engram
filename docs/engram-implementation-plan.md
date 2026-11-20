@@ -6956,8 +6956,12 @@ the write transaction; the dry run uses the same routine.
   `valid_to` equals its `valid_from`. That row closed in the second the record began, so the record
   restates it.
 - **`AddressUsable` keeps D68's meaning**, measured over the round that paired: false iff that round
-  offered two or more unclaimed rows and the one taken is closed. It must count *unclaimed* rows of
-  the round's liveness. Counting every row would read the A/A′ fixed point as ambiguous.
+  had two or more eligible rows and the one taken is closed.
+  - The count covers rows of the round's liveness, which keeps the A/A′ fixed point unambiguous.
+  - It is taken before any pairing, claimed or not (reviewer finding 4, ruled). Counting only
+    unclaimed rows made it depend on order: of N identical closed records against N closed rows,
+    the last would get an address that D68 says none has. Now none gets one, and reordering the
+    journal gives the same idMap.
 - Rows this replay inserts are never candidates. Pass 1 branches on the pairing instead of a lookup,
   and both of its branches are otherwise unchanged. Pass 2 is untouched.
 

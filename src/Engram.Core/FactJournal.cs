@@ -583,8 +583,8 @@ public static class FactJournal
 
     /// <summary>The target row a journal record was paired with — one-to-one — and whether it names a usable address.</summary>
     /// <param name="AddressUsable">
-    /// False only when the round that paired it offered several unclaimed rows and the one taken is
-    /// closed: no basis exists to prefer any of them as the row a supersession would point at
+    /// False only when the round that paired it had several eligible rows (counted before any
+    /// pairing, claimed or not) and the one taken is closed: no basis exists to prefer any of them as the row a supersession would point at
     /// (D68 §4.2, adr-5).
     /// </param>
     private readonly record struct ExistingMatch(long Id, bool AddressUsable);
@@ -624,15 +624,21 @@ public static class FactJournal
         {
             Candidate? taken = null;
             var offered = 0;
+            // Ambiguity counts the round's whole eligible set, claimed or not, so it does not depend
+            // on journal order: N identical closed records against N closed rows are all
+            // "no basis to prefer" (D68), not all but the last.
             foreach (var candidate in candidates[i])
             {
-                if (claimedRows.Contains(candidate.Id) || !eligible(candidate))
+                if (!eligible(candidate))
                 {
                     continue;
                 }
 
-                taken ??= candidate;
                 offered++;
+                if (!claimedRows.Contains(candidate.Id))
+                {
+                    taken ??= candidate;
+                }
             }
 
             if (taken is { } row)

@@ -704,6 +704,20 @@ public sealed class SyncTests
 
             Assert.Equal("the new belief", BodyOf(connB, "/project/x"));
             Assert.Equal(0, SupersessionRows(connB, duplicate));
+
+            // Proof Backfill reached the duplicate and not the live copy: the copy it closed is
+            // left unlinked (D103's liveness-blind limit). If a plan change sends Backfill to the
+            // copy instead, this goes red rather than leaving the guard above silently disarmed.
+            using (var copy = connB.CreateCommand())
+            {
+                copy.CommandText =
+                    """
+                    SELECT f.superseded_by FROM fact f JOIN entity e ON e.id = f.subject_id
+                    WHERE e.path = '/project/x' AND f.body = 'the old belief' AND f.id <> $dup;
+                    """;
+                copy.Parameters.AddWithValue("$dup", duplicate);
+                Assert.IsType<DBNull>(copy.ExecuteScalar());
+            }
             using var pointer = connB.CreateCommand();
             pointer.CommandText = "SELECT superseded_by, valid_to FROM fact WHERE id = $id;";
             pointer.Parameters.AddWithValue("$id", duplicate);

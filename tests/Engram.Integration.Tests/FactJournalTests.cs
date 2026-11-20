@@ -1617,6 +1617,31 @@ public sealed class FactJournalTests
         Assert.Equal(2, FactRowCountFor(rebuilt, Gone, GoneBody));
     }
 
+    /// <summary>
+    /// Rule 4 is order-independent (finding 4 ruling): two identical closed records against two
+    /// closed rows give neither an address, in either journal order, so the idMaps are identical
+    /// and empty. Counting only unclaimed rows gave the second record an address.
+    /// </summary>
+    [Fact]
+    public void Replay_IdenticalClosedRecordsAgainstAsManyClosedRows_GetNoAddressInAnyOrder()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        SeedRawFact(rebuilt, Gone, "states", GoneBody, T0, validTo: T0.AddHours(1));
+        SeedRawFact(rebuilt, Gone, "states", GoneBody, T0, validTo: T0.AddHours(1));
+        var duplicate = Record(1, GoneBody, T0, T0.AddHours(1), supersededBy: null, reason: null);
+        var before = Snapshot(rebuilt);
+
+        var forward = FactJournal.Replay(rebuilt, [duplicate, duplicate with { Id = 2 }], apply: true, out var forwardMap);
+        var reversed = FactJournal.Replay(rebuilt, [duplicate with { Id = 2 }, duplicate], apply: true, out var reversedMap);
+
+        Assert.Equal(new ReplayResult(0, 2, 0, 0), forward);
+        Assert.Equal(forward, reversed);
+        Assert.Empty(forwardMap);
+        Assert.Empty(reversedMap);
+        Assert.Equal(before, Snapshot(rebuilt));
+    }
+
     /// <summary>Row 14: the same pair as edges on one object, through the edge arm of the key.</summary>
     [Fact]
     public void Replay_ASameSecondForgetAndRestatementOfAnEdge_IntoAnEmptyStore_WritesBoth()
