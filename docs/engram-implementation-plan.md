@@ -6754,11 +6754,15 @@ toplevel is its own, and a note from there reads as `not-indexed`.
 capture). The response gains one line naming why. The `remember` record's `project_unresolved`
 carries the same reason as a closed code (`no-dir`, `bad-dir`, `not-checkout`, `git-unknown`,
 `not-indexed`), so the adoption question can be split from the resolution one. `scope` is recorded
-only when a project note was actually written. `git-unknown` is reserved and not yet produced:
-when git cannot answer, `TryResolveIdentity` fails and the call reads as `not-indexed`. Producing
-it is a separate item. Until then, the `not-indexed` notice names `project_dir` as the call gave
-it, not a root git may have failed to find, so a subdirectory is never reported as unindexed on the
-strength of a failed lookup.
+only when a project note was actually written. When git cannot answer, `TryResolveIdentity` fails
+with its Unknown (D94) and the call reads as `git-unknown`, notice "could not ask git about
+<root> — kept as a session note"; a corrupt `.git/config` (exit 128) is the tested case. It was
+first mapped to `not-indexed` while the Unknown outcome was unreachable, and that was wrong in the
+direction that hides the cause: an identity nobody could read says nothing about whether the repo
+is indexed. A checkout with no `origin` is not an Unknown — its identity is the root path — so with
+no registry row it still reads as `not-indexed`. The `not-indexed` notice names `project_dir` as
+the call gave it, not a root git may have failed to find, so a subdirectory is never reported as
+unindexed on the strength of a failed lookup.
 
 A `scope` passed with `supersedes` is not applied, because a restatement keeps the capture's
 address. The response says so in one line ("scope ignored — a revision keeps the original's
@@ -6933,3 +6937,107 @@ Against df1a4a5 (F2 ruling):
 25. a key line without a role [6, two tier 3]
 26. instance-style keys refused [1]
 27. the old "your own name" description [1, golden]
+
+## D101 — Five end-to-end tests that failed under load: what each now guards, and why
+
+Spec: `e2e-flakes.md` (eng-29). Measured on one 18-core M-series machine, 18× `yes` as load. Each
+test was run 10× alone idle, 10× alone loaded, and 12× loaded in one test host with the seven other
+classes that once failed together. Other sessions kept the "idle" load average at 3–6 and drove the
+loaded runs as high as ~1000, so read the loaded numbers as a stress range, not a calibrated level.
+Alone, every test passed 10/10 idle and 10/10 loaded. Only the shared-host runs reproduced anything,
+which is the first finding: **these tests fail because of their neighbours, not because of the hook.**
+
+**`FileTouched_CompletesInUnder100Milliseconds` is relative now, and is renamed
+`FileTouched_AddsUnder50MillisecondsOverANoOp` for what it asserts.** It asserts median(hook) −
+median(no-op) < 50 ms over twenty interleaved pairs, alternating which arm goes first. Idle the hook
+median is ~10 ms. The five QA failures had medians of 110–300 ms, but their *fastest* runs were
+already 36–117 ms, four to twelve times the idle floor. What failed was the machine. D4 says the
+guard is the margin; this test was the one place still asserting an absolute number. It stays rather
+than being folded into the budget test because the two guard different things. The budget test
+catches a deterministic cost of about a millisecond, so it can see an opened database. This one
+catches a per-call wait of tens of milliseconds, such as a sleep or a lock wait.
+
+**`FileTouched_CostsNothingMeasurableOverStartingTheBinary` takes the best of up to three
+measurements.** The estimator and the max(1.0 ms, 10% of floor) allowance are unchanged. The
+allowance has 0.3 ms of headroom idle: the marginal cost is 0.54–0.90 ms, median 0.70, about 8% of an
+8.6 ms floor. Under load the marginal grows faster than the floor. The five observed failures ran at
+10.7%, 10.9%, 16.3%, 17.2% and 18.6% of theirs (2 of the 12 shared-host runs, plus three QA runs).
+A real violation shifts every sample of every attempt, so it still fails all three. Raising the ratio
+was rejected: the planted open is 22% of the idle floor, so a 20% allowance would leave it two points
+to fail by, and the QA failures already reach 18.6%.
+
+**The allowance is also capped: max(1.0 ms, min(10% of floor, 1.25 ms)).** Planting the open showed
+that the ten percent had stopped guarding anything. Through the .NET test host the floor is
+**13.3–24.1 ms**, against ~9 ms from a Python spawner on the same binary, so the allowance came out at
+1.33–2.41 ms. The plant costs 1.53–2.83 ms, so it escaped whenever the floor rose past about 20 ms: it
+passed 9 of 13 committed runs. That was not new. The original single attempt passed the plant on 1 of
+5 logged first attempts, and best-of-three only gave it three chances. Clean costs 0.45–1.45 ms per
+attempt, and best-of-three takes the lowest. With the cap, the plant fails all three attempts in 5 of
+5 runs, at 2.21–5.78 ms against 1.25. The price is the scaling's original reason: a runner whose
+fastest-of-100 noise stays above 1.25 ms in all three attempts fails this. A macOS runner with a
+32.49 ms floor was once measured keeping 2.68 ms.
+
+**Every disposable home is removed by one implementation, `TestHome.RemoveTree`.**
+`InstallerTestHome` had its own single-shot recursive delete. That copy failed with "Directory not
+empty" because session start's maintenance chain was still writing into `.engram` while it ran. The
+chain runs at reduced priority (D82) and outlives the hook by 0.19–0.22 s idle and by 0.6–24 s under
+load. It failed in 3 of 12 shared-host runs and never alone. `TestHome` already retried, and
+documented why.
+
+**`EngramProcess`'s post-exit pipe join is 30 s, and its message names no cause.** It fired once in
+QA, for seven tests in the same second. Several of them run commands that spawn nothing, so no
+inherited pipe explains it: the readers were not scheduled. The suspect is thread-pool starvation in
+the test host. The fifty-process test parks fifty pool threads in synchronous waits while the pipe
+readers need pool threads of their own. It is **not confirmed**: 24 shared-host runs never
+reproduced it, and an A/B with the pool minimum raised to 200 changed nothing measurable. So the
+message now reports the time since exit, `ThreadPool.ThreadCount` and
+`ThreadPool.PendingWorkItemCount`, which is what the next occurrence needs to settle it. Raising the
+bound hides nothing the 5 s bound caught. The leak it was named for, a detached chain holding the
+hook's pipe, lives about 0.2 s, far inside either bound, and `MaintenanceLauncherTests` is what
+guards that leak. A pipe held open forever still fails here, at 30.0 s. The harness's own test,
+`AnExitedProcessWhosePipeIsStillHeld…`, used a `sleep 30` stub and a 15 s limit, which a 30 s bound
+can no longer tell apart from the holder exiting. It now uses a `sleep 120` stub, asserts the
+timeout comes in under 60 s, and checks the new message. That costs the suite 30 s.
+
+**The thirty-process session-start test no longer counts records; a deterministic test guards the
+budget instead.** The count asserted 100% delivery, which D56 rules out: a record that waits out its
+500 ms retry budget is dropped by design. Measured with thirty-process rounds, idle and under 18×
+`yes`: the clean binary lost 0 of 600 both times, yet the test once saw 28 of 30 during an
+integration QA run. The count was also a weak guard for the budget it stood in for. Planting
+`TimeSpan.Zero` on session start's append lost only 9 of 600 idle and 11 of 600 loaded, so a
+`lost ≤ 2` tripwire would have caught it in 3 of 8 test-length runs. The thirty-process test keeps
+only its every-line-parses assertion, which detects a torn record and does not depend on load.
+`SessionStart_WaitsOutABriefCollision_RatherThanDroppingItsRecord` holds `telemetry.jsonl` with
+`FileShare.None` for 200 ms while a session start runs, releases it, and asserts the session-start
+record landed. Inside the budget the retry gets the file. With the budget at zero the first attempt
+collides and the record is lost: red 5 of 5 under the plant, green 5 of 5 clean. It needs no product
+seam.
+## D102 — Lane eligibility is written once, and every statement takes it from there
+
+**What it is.** The condition that keeps regenerable, object-bearing edges out of `fact_fts`,
+`fact_token` and `fact_vec` has one text: `EngramDatabase.RegenerableEdgeFor(alias)`. It is a
+template, and both forms of the eligibility predicate come from it. `LexicallyIndexed` is the
+unqualified form and `LexicallyIndexedFor("f")` the aliased one. Before this, seven call sites
+spelled it by hand: `FactStore.ReadLive` and `VersionCounts`, `FactTokenIndex.CountMissing` and the
+rebuild's read, and `VectorIndex`'s backfill batch, pending count and `CountEmbeddable`. Two copies
+had already disagreed once. Repair's detector lacked the exclusion and reported 360,391 phantom
+missing rows (#14).
+
+**The complement.** `CountIneligibleByPredicate` takes `RegenerableEdgeFor("f")`.
+`PruneIneligibleSql` keeps its hand spelling, because its `+object_id` is a planner hint (D92) and
+belongs to the statement, not the definition. Deriving it would have to inject the plus, and that
+would write the text a second time.
+
+**No plan moved, by construction.** Every statement's text is byte-identical to what it was. A
+throwaway assertion compared the derived strings and both vector statements against the old
+literals before it was deleted. So no plan was touched and none needed a timing. `LexicallyIndexed`,
+`BackfillBatchSql` and `PendingCountSql` went from `const` to `static readonly`, because a `const`
+cannot call the template. Every reader uses them at runtime.
+
+**Guards.** `LexicallyIndexedOnePlaceTests` fails on the literal predicate in any `src/` file, with
+any alias or none and across line breaks. The `new.`/`old.` trigger spelling is exempt, and
+`StoreRepairerTests.LexicallyIndexed_MatchesTheConditionInEveryFtsTrigger` still holds the triggers
+to the constant. The guard also asserts that its pattern matches what the template produces, so a
+reworded definition cannot leave it scanning for a spelling nobody uses. It does not see the bare
+complement: a hand copy of `f.regenerable IS 1 AND f.object_id IS NOT NULL` without the `NOT` passes,
+and that is also what keeps `PruneIneligibleSql` legal.

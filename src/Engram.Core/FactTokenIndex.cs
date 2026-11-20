@@ -103,7 +103,7 @@ public static class FactTokenIndex
         var candidates = ReadIds(
             connection,
             "SELECT id FROM fact WHERE valid_to IS NULL "
-            + "AND NOT (regenerable IS 1 AND object_id IS NOT NULL) "
+            + "AND " + EngramDatabase.LexicallyIndexed + " "
             + "AND id NOT IN (SELECT DISTINCT fact_id FROM fact_token);");
 
         if (candidates.Count == 0)
@@ -320,7 +320,7 @@ public static class FactTokenIndex
             SELECT f.id, f.path, e.name, f.body
               FROM fact f
               JOIN entity e ON e.id = f.subject_id
-             WHERE f.valid_to IS NULL AND NOT (f.regenerable IS 1 AND f.object_id IS NOT NULL);
+             WHERE f.valid_to IS NULL AND {EngramDatabase.LexicallyIndexedFor("f")};
             """;
 
         var facts = new List<(long, string, string, string)>();

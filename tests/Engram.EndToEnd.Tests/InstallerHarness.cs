@@ -306,13 +306,7 @@ internal sealed class InstallerTestHome : IDisposable
 #pragma warning restore CA1416
     }
 
-    public void Dispose()
-    {
-        if (Directory.Exists(Root))
-        {
-            Directory.Delete(Root, recursive: true);
-        }
-    }
+    public void Dispose() => TestHome.RemoveTree(Root);
 
     private static string Quote(string value) => "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
 }
