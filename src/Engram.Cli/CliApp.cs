@@ -171,6 +171,7 @@ public static class CliApp
         writer.WriteLine("  --budget <n>                       token budget to test against (default 500)");
         writer.WriteLine("  --limit <n>                        candidates to print (default 20)");
         writer.WriteLine("  --session <id>                     treat this host session's notes as working memory");
+        writer.WriteLine("  --types <a,b>                      limit to these kinds of memory, as engram_recall's types does");
         writer.WriteLine();
         writer.WriteLine("timeline options:");
         writer.WriteLine("  --before <n>                       facts to show before the anchor (default 5)");

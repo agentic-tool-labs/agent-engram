@@ -81,7 +81,8 @@ public static class RetrievalExplainer
         string? sessionExternalId,
         DateTimeOffset now,
         Func<string, string?> environment,
-        LocalRuntime? local = null)
+        LocalRuntime? local = null,
+        IReadOnlyList<string>? types = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(home);
@@ -102,17 +103,17 @@ public static class RetrievalExplainer
         var embedding = EmbeddingSettings.Read(ConfigFile.Load(home.ConfigPath));
         var vectorQuery = VectorLane.PrepareQuery(connection, home, embedding, query, environment, local);
 
-        var lexical = ReadLexical(connection, query, settings.SeedK, lanes);
+        var lexical = ReadLexical(connection, query, settings.SeedK, lanes, types);
 
         // Ahead of the fusion, not after it: these ranks are an input to the ranking this method
         // exists to describe. Reporting a lane that ran too late to affect the result would be
         // exactly the drift D30 forbids. The lane order printed below is unchanged — the overlap
         // report is still inserted at the front once its count is known.
-        var (vector, vectorSpace) = ReadVector(connection, vectorQuery, settings.SeedK, lanes);
+        var (vector, vectorSpace) = ReadVector(connection, vectorQuery, settings.SeedK, lanes, filtered: types is not null);
 
         var outcome = RecallRanker.Rank(
             connection, query, budgetTokens, settings.SeedK, currentSessionId, now, vectorQuery,
-            minCandidates: displayLimit);
+            minCandidates: displayLimit, types: types);
 
         lanes.Insert(0, OverlapLaneReport(outcome));
 
@@ -172,9 +173,11 @@ public static class RetrievalExplainer
         SqliteConnection connection,
         string query,
         int seedK,
-        List<LaneReport> lanes)
+        List<LaneReport> lanes,
+        IReadOnlyList<string>? types)
     {
-        var hits = FactStore.SearchRanked(connection, query, seedK);
+        // Filtered exactly as Rank's lex lane is, through the one predicate (MemoryScopes.FilterSql).
+        var hits = FactStore.SearchRanked(connection, query, seedK, types);
         lanes.Add(new LaneReport(
             "lexical (fts5/bm25)",
             hits.Count > 0 ? LaneState.Contributing : LaneState.Unavailable,
@@ -200,9 +203,13 @@ public static class RetrievalExplainer
         SqliteConnection connection,
         VectorLaneQuery prepared,
         int seedK,
-        List<LaneReport> lanes)
+        List<LaneReport> lanes,
+        bool filtered)
     {
         const string Name = "vector (sqlite-vec)";
+        // The vector lane is not filtered before its k (D85): its hits are global, and the ones
+        // outside a types filter are dropped at `scored`, so they cannot rank.
+        var unfiltered = filtered ? "; not filtered by types — hits outside the filter do not rank" : string.Empty;
 
         if (prepared.State is not VectorLaneState.Queried)
         {
@@ -228,8 +235,8 @@ public static class RetrievalExplainer
             Name,
             matches.Count > 0 ? LaneState.Contributing : LaneState.Unavailable,
             matches.Count > 0
-                ? $"{matches.Count} hits in {prepared.Space}, nearest {matches[0].Distance.ToString("0.000", CultureInfo.InvariantCulture)}, fused into the ranking"
-                : $"{prepared.Space} is queryable and empty for this query"));
+                ? $"{matches.Count} hits in {prepared.Space}, nearest {matches[0].Distance.ToString("0.000", CultureInfo.InvariantCulture)}, fused into the ranking{unfiltered}"
+                : $"{prepared.Space} is queryable and empty for this query{unfiltered}"));
 
         return (
             matches.Select((m, i) => new VectorHit(m.FactId, m.Distance, i + 1)).ToDictionary(h => h.FactId),

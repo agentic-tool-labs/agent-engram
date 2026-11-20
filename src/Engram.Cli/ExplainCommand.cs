@@ -20,6 +20,7 @@ internal static class ExplainCommand
         int? budget = null;
         var limit = 20;
         string? session = null;
+        IReadOnlyList<string>? types = null;
         var terms = new List<string>();
 
         for (var i = 0; i < rest.Length; i++)
@@ -47,6 +48,15 @@ internal static class ExplainCommand
 
                 case "--session" when i + 1 < rest.Length:
                     session = rest[++i];
+                    break;
+
+                case "--types" when i + 1 < rest.Length:
+                    if (!MemoryScopes.TryNormalize(rest[++i].Split(','), out types, out var typesError))
+                    {
+                        stderr.WriteLine($"error: {typesError}");
+                        return 1;
+                    }
+
                     break;
 
                 default:
@@ -100,7 +110,8 @@ internal static class ExplainCommand
             session,
             DateTimeOffset.UtcNow,
             Environment.GetEnvironmentVariable,
-            local);
+            local,
+            types);
 
         Write(explanation, limit, stdout);
         return 0;

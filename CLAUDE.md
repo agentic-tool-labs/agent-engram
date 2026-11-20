@@ -653,11 +653,19 @@ done, and the test that would prove it needs a 40,000-fact corpus to defend a co
 does not exist. Restore a guard before raising `seed_k`, or bound it. Recall's own change is a
 move and not a redesign: `BuildCandidates` formats a line **after** the lane check rather than for
 every live fact, carrying the source record — a reference copy, where a `Func<string>` per entry
-would swap one allocation for another on the same O(corpus) path. Bounded materialization of the
-candidate set is designed and **deferred**, and is now the only remaining item — retargeted, because
-the floor it was priced against no longer exists: what it addresses is the one case still above the
-spec target, 125.9 ms for a term matching 45,132 of 50,097 facts, which is D44's coverage counts
-computed over the whole scored set. An ordinary query at that size is 2.5 ms and needs nothing.
+would swap one allocation for another on the same O(corpus) path. **Bounded materialization is done
+(D90), and it changes no result.** Every overlap hit is still ranked. `scored` joins only the
+first `$limit` *eligible* hits plus every lexical, vector and current-session hit. Ranks are unique,
+so whatever is left out fuses strictly below `$limit` rows already kept. D44's totals are counted
+from small sets, because a corroborated fact is always in lex or vec. The one assumption is that
+`fact_token` holds live facts only (D59): a stale token row is counted in the totals and never
+returned. Measured on the 2.4 GB, 621,904-fact snapshot, overlap on, vector off, over the 30-query
+attribution sample:
+- JIT statement p50: 117.2 → 68.9 ms.
+- Published `explain` over its 9.7 ms floor: 156.5 → 108.7 ms.
+- 270 recorded queries × 19 configurations: byte-identical.
+What remains is the lexical lane: ~46 ms of its own on that store, 17.9 ms if the `fact` join moves
+after its `LIMIT` (D91, L1).
 **The floor work itself is done.** The design named next in this paragraph — an **inverted
 literal-token index** (token → fact) over subject name plus body, merged into the same integer
 overlap score, picked because it is equivalence-testable — is `fact_token` (D59), and the cutover
@@ -706,6 +714,14 @@ D18 makes `Off` a supported configuration and D37 says a diagnostic reporting a 
 one people stop reading. A query that legitimately matches nothing must keep saying so, with no
 note. `RecallRanker.OverlapUnavailableDetail` is shared with `RetrievalExplainer`'s lane row so the
 two surfaces cannot word the same state differently (D60).
+
+**`prior_sessions` is driven from `session`, and its cost is in the facts a session holds before its
+first live note.** Measured on a JIT host, CTE p50: **57.28 → 4.85 ms** on the real snapshot (62,303
+live notes), but **5.05 → 8.18 ms** on a D81-style history-heavy rebuild and **5.42 → 25.56 ms** on an
+adversarial one, rows identical on all three. It was chosen because live notes are what grows; if
+anything starts closing session notes in bulk, re-measure, and the fix is a partial
+`fact(session_id) WHERE valid_to IS NULL` index, a migration. A NULL-session note takes no label and
+renders `p?` (D84).
 
 **Falsify against a committed tree, and assert the patch landed.** A harness that restores arms with
 `git checkout --` restores to HEAD, so an uncommitted change under test is reverted by its own
