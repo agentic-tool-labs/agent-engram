@@ -377,8 +377,10 @@ CREATE TABLE file_state (
 CREATE TABLE repo_registry (
   repo_path                   TEXT PRIMARY KEY,  -- memory path, e.g. /projects/acme/code/acme-api
   identity                    TEXT NOT NULL,     -- normalized git remote URL, else normalized root path
-  disk_path                   TEXT,              -- last seen location; NULL once detached
-  detached_at                 INTEGER,           -- non-NULL when the checkout is gone from disk
+  disk_path                   TEXT,              -- last seen location; kept once detached, as evidence
+  detached_at                 INTEGER,           -- non-NULL = no longer the live registration of any
+                                                  -- checkout: superseded at its disk_path by another
+                                                  -- identity (eng-34, D94). Re-home clears it.
   created_at                  INTEGER NOT NULL,
   last_scan_suppressed_reason TEXT CHECK (last_scan_suppressed_reason IN ('truncated','empty-scan'))
                                                   -- NULL = last run's deletions were not suppressed;

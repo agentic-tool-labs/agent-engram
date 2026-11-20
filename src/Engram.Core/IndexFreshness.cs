@@ -85,12 +85,14 @@ public sealed class IndexFreshness(EngramHome home, Action<string>? log = null)
         var settings = IndexingSettings.Read(config);
         var now = DateTimeOffset.UtcNow;
 
-        var candidate = RepoFreshness.NextDue(
+        // An Unknown origin starts nothing and records nothing (D94), and does not consume the tick.
+        var candidate = RepoFreshness.NextDueResolvable(
             connection,
             IndexingSettings.FullScanIntervalMinutes,
             now,
             includeAmbient: true,
-            NoExclusions);
+            NoExclusions,
+            (skipped, failure) => log?.Invoke(CodeIndexer.UnknownOriginNote(skipped.Root, failure)));
 
         if (candidate is null)
         {
