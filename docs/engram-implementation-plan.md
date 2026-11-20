@@ -6307,3 +6307,80 @@ The review rework was falsified the same way:
 The relative-path half of `bad-dir` is held by `"."`, which exists relative to the process's
 working directory. It therefore passes `Directory.Exists` and reaches the `IsPathFullyQualified`
 guard on its own.
+
+## D100 — Role memory is keyed on the role the caller names, and delivered in that role's primer
+
+**What it is.** With `scope:"agent"` and `agent` set to a role key, `engram_remember` files a lesson
+at `/agents/<role-slug>/<fp64>`: scope `agent`, entity kind `note`, `learned_via observed`, and the
+predicate from D98's cue rule. It sits under a role entity `/agents/<role-slug>` of kind `agent`
+whose display name is the key as the first writer spelled it. The role is the hook payload's
+`agent_type` (`wrangl:architect`), never an instance name (`engram-architect-2`), which would split
+one role's memory per spawn. Two keys that slug alike share a path and the first writer's name; that
+is the same trade-off `SessionFacts.AgentPath` makes. There is no retroactive path: no existing
+session note ever becomes role memory.
+
+**Nothing crosses the two id spaces (D43).** The server cannot attribute an MCP call to a subagent,
+so the caller passes the key, and the primer is what tells it the key. The write cap counts the
+writing MCP session's own rows. The read keys on the payload's `agent_type`. Neither needs the other
+id space, which is the check P4 failed.
+
+**Noise control.**
+- Opt-in only.
+- At most three live agent-scope facts per role from one session, counted from the store. A fourth
+  is kept as a session note under `/sessions/<id>/<role>/` with the notice "role memory is for
+  lessons every future <role> needs; kept as a session note". It is never refused.
+- The repeat check runs before the cap, so re-recording a lesson already held returns its handle,
+  spends none of the cap, and is not demoted.
+- A missing `agent` gives a session note with "no agent given — kept as a session note; pass your
+  role key from the primer as agent".
+- Delivery is capped at five facts and the primer's 300-token budget.
+- The known gap stands: nothing expires role memory. Newest-first delivery lets stale lessons fall
+  off the primer while staying recallable.
+
+**The role block.** `subagent-start`, and `session-start` when the payload carries `agent_type`
+without `agent_id` (a main `--agent` session), add a block after the directives. It is a header
+`Role memory for <key>:`, the key line `Your role memory key: <key>.`, then the newest five role
+facts.
+- The key line names no tool. The D15 guard's one exemption is not widened, and the how-to lives in
+  `engram_remember`'s `scope` description.
+- Every line is budgeted after the precedence line, so the block can never displace it.
+- The block is omitted when the role has no facts or no fact line fits. A primer for such a role is
+  byte-identical to one with no role, and a payload without a role makes no extra read.
+- "Newest" is the highest fact id, because that is the one ordering `PrimerSummary.From` can apply as
+  well as the SQL path, and the two must render the block identically.
+- The read is one path-range query on entity's unique index.
+- `role_fact_count` is set whenever the payload named a role, counting what was actually delivered.
+  `fact_count` stays null (D46).
+
+**Open, reported up.** Because an empty role emits no block, a role that has never written does not
+see its key in the primer. Its first lesson needs the model to pass its `agent_type` unprompted. The
+spec's byte-identity invariant forces this; it is built as specified and flagged for a ruling.
+
+**Measured (E8).** Published binary, file-timed, 50 alternated runs per arm, with five role facts in
+the store: `subagent-start` p50 was 13.30 ms without a role and 13.40 ms with one. That is +0.09 ms,
+against a self-spread of 0.01 ms for the no-role arm run against itself. `session-start` was not
+timed separately; it makes the same read.
+
+**The tool-surface ceiling** moved from 6,852 to 6,963 for the `agent` wording in `scope`.
+
+**Falsified** against 7ec60f5, each break landed and then restored; red counts in brackets:
+1. cap 4 [1]
+2. cap across sessions [2]
+3. cap across roles [1]
+4. cap before repeat [1]
+5. deliver 6 [1]
+6. SQL oldest-first [2]
+7. in-memory oldest-first [1]
+8. header for an empty role [2]
+9. role read without a role [1]
+10. read widened to session notes [3]
+11. role lines unbudgeted [2]
+12. block before the precedence line [2]
+13. a tool name in the key line [3]
+14. raw key in the path [3]
+15. no display name [2]
+16. written as `session` [6]
+17. no missing-agent notice [1]
+18. session-start ignores `agent_id` [1, tier 3]
+19. no `role_fact_count` [1, tier 3]
+20. subagent-start drops the role [1, tier 3]
