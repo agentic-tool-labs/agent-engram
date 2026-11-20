@@ -21,6 +21,9 @@ public class FileTouchedBudgetTests
     /// </summary>
     private const double MaxMarginalCostMs = 1.0;
 
+    /// <summary>The ceiling on the floor-scaled allowance (D101); see where it is applied.</summary>
+    private const double MaxScaledAllowanceMs = 1.25;
+
     /// <summary>
     /// The difference of minimums, not of medians. Process-start noise is one-sided — a
     /// sample is only ever slower than the deterministic work, never faster — so the
@@ -85,7 +88,14 @@ public class FileTouchedBudgetTests
             // threshold measures the runner, not the hook. Ten percent of the floor only
             // rises above the local 1.0 ms when the floor itself says the machine is slow —
             // locally the max() keeps the threshold the planted open (1.19 ms) failed.
-            var allowance = Math.Max(MaxMarginalCostMs, floorCost * 0.1);
+            //
+            // Capped at 1.25 ms (D101), because the scaling admitted the violation it exists to
+            // catch: through this test host the floor runs 13.3–24.1 ms, not the 8.6 ms the ten
+            // percent was calibrated on, so the uncapped allowance (1.33–2.41 ms) let a planted
+            // open (1.53–2.83 ms) pass. Clean costs 0.45–1.45 ms, and best-of-three takes the
+            // lowest attempt. The price is the slow-runner headroom above: a runner whose
+            // fastest-of-100 noise stays over 1.25 ms in all three attempts fails this.
+            var allowance = Math.Max(MaxMarginalCostMs, Math.Min(floorCost * 0.1, MaxScaledAllowanceMs));
 
             if (marginal < allowance)
             {

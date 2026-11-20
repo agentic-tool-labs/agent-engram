@@ -123,7 +123,7 @@ public class HookFileTouchedTests
     }
 
     [Fact]
-    public void FileTouched_CompletesInUnder100Milliseconds()
+    public void FileTouched_AddsUnder50MillisecondsOverANoOp()
     {
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
 
