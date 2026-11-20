@@ -71,6 +71,27 @@ public sealed class DiagnosticsTests : IDisposable
     private static void WriteConfig(SandboxHome sandbox, string toml) =>
         File.WriteAllText(sandbox.Home.ConfigPath, toml);
 
+    /// <summary>
+    /// D97: an unparseable <c>auto_remove_retired</c> reads as off and doctor says so — otherwise
+    /// the switch someone set is silently not on. The nearest case that must not warn is a valid
+    /// <c>true</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("\"yes\"", true)]
+    [InlineData("true", false)]
+    public void IndexingProblems_AreReported(string value, bool warns)
+    {
+        using var sandbox = new SandboxHome();
+        WriteConfig(sandbox, $"[indexing]\nauto_remove_retired = {value}\n");
+
+        var report = Run(sandbox);
+
+        Assert.Equal(
+            warns,
+            report.Checks.Any(c => c.Name == "indexing" && c.State == DiagnosisState.Warn
+                && c.Detail.Contains("auto_remove_retired must be true or false", StringComparison.Ordinal)));
+    }
+
     /// <summary>A healthy server on this home, launched from <paramref name="from"/>.</summary>
     private static ServerLifecycle LiveServer(SandboxHome sandbox, string from, string version)
     {
