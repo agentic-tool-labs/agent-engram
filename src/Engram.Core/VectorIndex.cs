@@ -45,24 +45,24 @@ public static class VectorIndex
 
     // A vec0 equality probe loads vector data even when only fact_id is selected. Scanning
     // its non-null primary keys once avoids a vector read per fact on every idle poll.
-    internal const string BackfillBatchSql =
+    internal static readonly string BackfillBatchSql =
         $"""
         SELECT f.id, f.body
         FROM fact f
         WHERE f.valid_to IS NULL
           AND f.id NOT IN (SELECT fact_id FROM {TableName})
-          AND NOT (f.regenerable IS 1 AND f.object_id IS NOT NULL)
+          AND {EngramDatabase.LexicallyIndexedFor("f")}
         ORDER BY f.id
         LIMIT $limit;
         """;
 
-    internal const string PendingCountSql =
+    internal static readonly string PendingCountSql =
         $"""
         SELECT COUNT(*)
         FROM fact f
         WHERE f.valid_to IS NULL
           AND f.id NOT IN (SELECT fact_id FROM {TableName})
-          AND NOT (f.regenerable IS 1 AND f.object_id IS NOT NULL);
+          AND {EngramDatabase.LexicallyIndexedFor("f")};
         """;
 
     /// <summary>The text embedded for a fact. Change this and <see cref="InputVersion"/>.</summary>
@@ -220,7 +220,7 @@ public static class VectorIndex
         using var command = connection.CreateCommand();
         command.CommandText =
             "SELECT COUNT(*) FROM fact WHERE valid_to IS NULL "
-            + "AND NOT (regenerable IS 1 AND object_id IS NOT NULL);";
+            + "AND " + EngramDatabase.LexicallyIndexed + ";";
 
         return Convert.ToInt32(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }
@@ -461,7 +461,7 @@ public static class VectorIndex
              SELECT f.predicate, COUNT(*)
              FROM {TableName} v
              JOIN fact f ON f.id = v.fact_id
-             WHERE f.regenerable IS 1 AND f.object_id IS NOT NULL
+             WHERE {EngramDatabase.RegenerableEdgeFor("f")}
              GROUP BY f.predicate
              ORDER BY f.predicate;
              """;
@@ -486,7 +486,9 @@ public static class VectorIndex
     /// 952.29 ms against 446.22 ms (medians of seven alternated warm runs). Not
     /// <c>NOT INDEXED</c>, which would also refuse a better index later. One caller,
     /// <c>engram embed --prune --apply</c>: typed by a person, and it reaches this only when
-    /// ineligible vectors were counted.
+    /// ineligible vectors were counted. It is the one spelling of the edge condition not taken
+    /// from <see cref="EngramDatabase.RegenerableEdgeFor"/>, because the plus is part of the
+    /// statement and not of the definition (D102).
     /// </remarks>
     internal const string PruneIneligibleSql =
         $"""

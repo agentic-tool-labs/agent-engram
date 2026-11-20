@@ -23,7 +23,7 @@ public sealed class EngramProcessTests
         try
         {
             var stub = Path.Combine(dir.FullName, "holds-pipe.sh");
-            File.WriteAllText(stub, "#!/bin/sh\nsleep 30 &\nexit 0\n");
+            File.WriteAllText(stub, "#!/bin/sh\nsleep 120 &\nexit 0\n");
 #pragma warning disable CA1416 // The SkipWhen above is what makes this unreachable on Windows.
             File.SetUnixFileMode(
                 stub, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -34,11 +34,11 @@ public sealed class EngramProcessTests
                 () => EngramProcess.Execute(stub, dir.FullName, stdin: null, args: []));
             clock.Stop();
 
-            Assert.Contains("pipes never closed", failure.Message);
+            Assert.Contains("pipes had not closed", failure.Message);
 
-            // The join bound is 5 seconds. Anything near the sleep's 30 means the wait
-            // was on the pipe holder after all, and the bound proved nothing.
-            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(15), $"took {clock.Elapsed}");
+            // The join bound is 30 seconds (D101). Anything near the sleep's 120 means the
+            // wait was on the pipe holder after all, and the bound proved nothing.
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(60), $"took {clock.Elapsed}");
         }
         finally
         {

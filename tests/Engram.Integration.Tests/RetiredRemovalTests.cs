@@ -470,6 +470,43 @@ public class RetiredRemovalTests
         Assert.All(events, e => Assert.Equal(StoreCompactor.TriggerManual, e.Trigger));
     }
 
+    /// <summary>
+    /// D96: the pre-compact snapshot keeps closed history (<c>keepClosedHistory: true</c>), because
+    /// it is what undoes the removal. A scheduled authored snapshot would prune exactly the closed
+    /// code fact the apply then deletes.
+    /// </summary>
+    [Fact]
+    public void Manual_Apply_SnapshotKeepsTheClosedCodeFactTheApplyDeletes()
+    {
+        using var sandbox = new SandboxHome();
+        var retired = Retire(sandbox, "history", daysAgo: 0);
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            var path = $"{retired.RetiredPath}/src/Kept.cs#Kept";
+            FactStore.Remember(connection, new FactWrite(path, "symbol", "declares", "class Kept v1", "code", "observed", Regenerable: true), Now.AddMinutes(-2));
+            FactStore.Remember(connection, new FactWrite(path, "symbol", "declares", "class Kept v2", "code", "observed", Regenerable: true), Now.AddMinutes(-1));
+        }
+
+        Assert.Equal(1L, Count(sandbox, "SELECT COUNT(*) FROM fact WHERE body = 'class Kept v1' AND valid_to IS NOT NULL;"));
+
+        var report = Run(sandbox, apply: true, auto: false);
+
+        Assert.Single(report.Prefixes);
+        Assert.Equal(0, FactsUnder(sandbox, retired.RetiredPath));
+        var snapshot = Assert.Single(Snapshots(sandbox));
+        try
+        {
+            using var copy = EngramDatabase.Open(snapshot);
+            using var command = copy.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM fact WHERE body = 'class Kept v1' AND regenerable = 1 AND valid_to IS NOT NULL;";
+            Assert.Equal(1L, (long)command.ExecuteScalar()!);
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(snapshot);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
