@@ -26,9 +26,16 @@ public sealed class EngramMcpTools
         LocalRuntime local,
         SessionPinStore pins,
         [Description("What you want to know, as a few keywords or a short question.")] string query,
-        [Description("Maximum tokens to spend on the response. Defaults to 500.")] int? budget_tokens = null)
+        [Description("Maximum tokens to spend on the response. Defaults to 500.")] int? budget_tokens = null,
+        [Description("session,user,project,agent,code,tool; omit=all but tool")] string[]? types = null)
     {
-        var result = RecallSearch.Run(home, local, query, budget_tokens, session.Value, pins.PinnedFor(session)).Result;
+        if (!MemoryScopes.TryNormalize(types, out var filter, out var error))
+        {
+            return error!;
+        }
+
+        var detail = RecallSearch.Run(home, local, query, budget_tokens, session.Value, pins.PinnedFor(session), filter);
+        var result = detail.Result;
 
         if (homeState.Initialized)
         {
@@ -42,7 +49,9 @@ public sealed class EngramMcpTools
                 Coverage: RecallEngine.ToText(result.Coverage),
                 SessionFactCount: result.SessionFactCount,
                 LongTermFactCount: result.LongTermFactCount,
-                PriorSessionFactCount: result.PriorSessionFactCount));
+                PriorSessionFactCount: result.PriorSessionFactCount,
+                Types: filter,
+                PackedByScope: RecallRanker.PackedByScope(detail.Packed)));
         }
 
         return result.Text;

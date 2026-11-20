@@ -15,12 +15,17 @@ namespace Engram.Core;
 public static class LiveCodeFacts
 {
     /// <summary>A SQL predicate over <c>fact.path</c>; bind it with <see cref="BindFile"/>.</summary>
+    /// <remarks>
+    /// "Starts with <c>$p#</c>" is written as the half-open range <c>[$p#, $p$)</c>, <c>$</c> being
+    /// the code point after <c>#</c>, so SQLite answers both arms from <c>ix_fact_path</c> as a
+    /// MULTI-INDEX OR. The <c>substr</c> form it replaces scanned every live fact once per file:
+    /// 0.10 s a file, 95–99% of a full index run (D95). The range is exact only because
+    /// <c>fact.path</c> declares no collation and so compares BINARY, byte by byte over UTF-8; a
+    /// <c>COLLATE</c> on the column or here would change what the bounds admit.
+    /// </remarks>
     public const string UnderFilePredicate =
-        "(fact.path = $p OR (substr(fact.path, 1, $len) = $p AND substr(fact.path, $len + 1, 1) = '#'))";
+        "(fact.path = $p OR (fact.path >= $p || '#' AND fact.path < $p || '$'))";
 
-    public static void BindFile(SqliteCommand command, string filePath)
-    {
+    public static void BindFile(SqliteCommand command, string filePath) =>
         command.Parameters.AddWithValue("$p", filePath);
-        command.Parameters.AddWithValue("$len", filePath.Length);
-    }
 }

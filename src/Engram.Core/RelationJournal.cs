@@ -51,7 +51,7 @@ public static class RelationJournal
     }
 
     /// <summary>Writes every <c>fact_relation</c> row in the store to the journal.</summary>
-    public static int Write(SqliteConnection connection, EngramHome home, DateTimeOffset now)
+    public static int Write(SqliteConnection connection, EngramHome home, DateTimeOffset now, BackupScope scope)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(home);
@@ -66,7 +66,7 @@ public static class RelationJournal
             using (var stream = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
             using (var writer = new StreamWriter(stream))
             {
-                written = WriteTo(connection, writer, now);
+                written = WriteTo(connection, writer, now, scope);
             }
 
             File.Move(partial, final, overwrite: true);
@@ -80,7 +80,10 @@ public static class RelationJournal
         return written;
     }
 
-    public static int WriteTo(SqliteConnection connection, TextWriter writer, DateTimeOffset now)
+    public static int WriteTo(SqliteConnection connection, TextWriter writer, DateTimeOffset now) =>
+        WriteTo(connection, writer, now, scope: null);
+
+    private static int WriteTo(SqliteConnection connection, TextWriter writer, DateTimeOffset now, BackupScope? scope)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(writer);
@@ -92,6 +95,11 @@ public static class RelationJournal
             ["schema_version"] = EngramDatabase.ReadSchemaVersion(connection),
             ["written_at"] = now.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture),
         };
+        if (scope is { } named)
+        {
+            header["scope"] = BackupMarkers.NameOf(named);
+        }
+
         writer.WriteLine(header.ToJsonString());
 
         var written = 0;

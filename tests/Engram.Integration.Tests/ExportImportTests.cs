@@ -168,6 +168,42 @@ public class ExportImportTests
         Assert.False(File.Exists(sandbox.Home.DatabasePath));
     }
 
+    /// <summary>
+    /// N15 of D99: an import is the same replay, so a forgotten fact in the bundle arrives with its
+    /// retraction — reason and time — rather than closed with no account of why.
+    /// </summary>
+    [Fact]
+    public void Import_OfAForgottenFact_CarriesItsRetraction()
+    {
+        using var source = new SandboxHome();
+        var bundle = Path.Combine(source.Home.Root, "forgotten.jsonl");
+        using (var connection = EngramDatabase.OpenInitialized(source.Home))
+        {
+            var retired = Write(connection, "/projects/retraction-test", "an old belief");
+            FactStore.Forget(connection, retired, "changed his mind", T0.AddMinutes(1));
+        }
+
+        Assert.Equal(0, CliApp.Run(
+            ["--home", source.Home.Root, "export", "--path", "/projects/retraction-test", "--out", bundle],
+            new StringWriter(),
+            new StringWriter()));
+
+        using var target = new SandboxHome();
+        Assert.Equal(0, CliApp.Run(
+            ["--home", target.Home.Root, "import", bundle, "--apply"],
+            new StringWriter(),
+            new StringWriter()));
+
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        Assert.Equal(1L, Count(rebuilt,
+            $"""
+             SELECT count(*) FROM supersession s JOIN fact f ON f.id = s.old_fact_id
+             WHERE f.path = '/projects/retraction-test' AND s.new_fact_id IS NULL
+               AND s.reason = 'changed his mind' AND s.created_at = {T0.AddMinutes(1).ToUnixTimeSeconds()}
+               AND f.valid_to = s.created_at AND f.superseded_by IS NULL;
+             """));
+    }
+
     private static long Write(SqliteConnection connection, string path, string body) =>
         FactStore.Remember(
             connection,

@@ -36,7 +36,7 @@ public class BackupStoreTests
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
 
-        var snapshot = BackupStore.Take(connection, sandbox.Home, T0);
+        var snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         using var restored = EngramDatabase.Open(snapshot.Path);
         Assert.Equal(
@@ -67,7 +67,7 @@ public class BackupStoreTests
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
 
-        var snapshot = BackupStore.Take(connection, sandbox.Home, T0);
+        var snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         var naive = Path.Combine(sandbox.Home.BackupDir, "naive.db");
         File.Copy(sandbox.Home.DatabasePath, naive);
@@ -89,7 +89,7 @@ public class BackupStoreTests
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
 
-        BackupStore.Take(connection, sandbox.Home, T0);
+        BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         Assert.Empty(Directory.EnumerateFiles(sandbox.Home.BackupDir, "*.partial"));
     }
@@ -101,8 +101,8 @@ public class BackupStoreTests
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
 
-        BackupStore.Take(connection, sandbox.Home, T0);
-        BackupStore.Take(connection, sandbox.Home, T0);
+        BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
+        BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         Assert.Equal(2, BackupStore.List(sandbox.Home).Count);
     }
@@ -113,7 +113,7 @@ public class BackupStoreTests
         using var sandbox = new SandboxHome(initialize: false);
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
 
-        var snapshot = BackupStore.Take(connection, sandbox.Home, T0);
+        var snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         Assert.Equal(EngramDatabase.SchemaVersion, snapshot.SchemaVersion);
         Assert.Contains("-v" + EngramDatabase.SchemaVersion, snapshot.Name, StringComparison.Ordinal);
@@ -146,7 +146,7 @@ public class BackupStoreTests
         using var sandbox = new SandboxHome(initialize: false);
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-        BackupStore.Take(connection, sandbox.Home, T0);
+        BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         Write(connection, "/knowledge/testing/merlin", "It stoops at speed.", T0);
 
@@ -162,7 +162,7 @@ public class BackupStoreTests
         using var sandbox = new SandboxHome(initialize: false);
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-        BackupStore.Take(connection, sandbox.Home, T0);
+        BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         var decision = BackupStore.Due(sandbox.Home, connection, Settings(), T0.AddHours(9));
 
@@ -176,7 +176,7 @@ public class BackupStoreTests
         using var sandbox = new SandboxHome(initialize: false);
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-        BackupStore.Take(connection, sandbox.Home, T0);
+        BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         Write(connection, "/knowledge/testing/merlin", "It stoops at speed.", T0.AddHours(1));
 
@@ -194,7 +194,7 @@ public class BackupStoreTests
         using var sandbox = new SandboxHome(initialize: false);
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         var id = Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-        BackupStore.Take(connection, sandbox.Home, T0);
+        BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         FactStore.Forget(connection, id, "no longer true", T0.AddHours(1));
 
@@ -214,7 +214,7 @@ public class BackupStoreTests
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         var a = Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
         var b = Write(connection, "/knowledge/testing/merlin", "It stoops at speed.", T0);
-        BackupStore.Take(connection, sandbox.Home, T0);
+        BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         using (var transaction = EngramDatabase.BeginWrite(connection))
         {
@@ -238,7 +238,7 @@ public class BackupStoreTests
         using var sandbox = new SandboxHome(initialize: false);
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         var a = Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-        BackupStore.Take(connection, sandbox.Home, T0);
+        BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
         using (var transaction = EngramDatabase.BeginWrite(connection))
         {
@@ -363,7 +363,7 @@ public class BackupStoreTests
         for (var i = 0; i < 4; i++)
         {
             Write(connection, $"/knowledge/testing/n{i}", $"Fact {i}.", T0);
-            BackupStore.Take(connection, sandbox.Home, T0.AddMinutes(i * 20));
+            BackupStore.Take(connection, sandbox.Home, T0.AddMinutes(i * 20), BackupScope.Full);
         }
 
         var plan = BackupStore.Plan(BackupStore.List(sandbox.Home), Settings(hourly: 24, daily: 7, weekly: 4));
@@ -471,10 +471,10 @@ public class BackupStoreTests
         Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
         for (var i = 0; i < 5; i++)
         {
-            BackupStore.Take(connection, sandbox.Home, T0.AddHours(i));
+            BackupStore.Take(connection, sandbox.Home, T0.AddHours(i), BackupScope.Full);
         }
 
-        var forced = BackupStore.Take(connection, sandbox.Home, T0.AddHours(10), "pre-compact");
+        var forced = BackupStore.Take(connection, sandbox.Home, T0.AddHours(10), BackupScope.Full, "pre-compact");
         BackupStore.PruneAfterWrite(sandbox.Home, forced);
 
         var left = BackupStore.List(sandbox.Home);
@@ -491,10 +491,10 @@ public class BackupStoreTests
         Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
         for (var i = 0; i < 4; i++)
         {
-            BackupStore.Take(connection, sandbox.Home, T0.AddHours(i));
+            BackupStore.Take(connection, sandbox.Home, T0.AddHours(i), BackupScope.Full);
         }
 
-        var forced = BackupStore.Take(connection, sandbox.Home, T0.AddHours(10), "pre-repair");
+        var forced = BackupStore.Take(connection, sandbox.Home, T0.AddHours(10), BackupScope.Full, "pre-repair");
         BackupStore.PruneAfterWrite(sandbox.Home, forced);
 
         Assert.Equal(5, BackupStore.List(sandbox.Home).Count);
@@ -509,7 +509,7 @@ public class BackupStoreTests
             Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
             for (var i = 0; i < 5; i++)
             {
-                BackupStore.Take(connection, sandbox.Home, T0.AddHours(i));
+                BackupStore.Take(connection, sandbox.Home, T0.AddHours(i), BackupScope.Full);
             }
         }
 
@@ -536,7 +536,7 @@ public class BackupStoreTests
         using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
         {
             Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-            BackupStore.Take(connection, sandbox.Home, T0);
+            BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
         }
 
         var before = Directory.EnumerateFileSystemEntries(sandbox.Home.Root, "*", SearchOption.AllDirectories).Order().ToList();
@@ -575,7 +575,7 @@ public class BackupStoreTests
         using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
         {
             Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-            snapshot = BackupStore.Take(connection, sandbox.Home, T0);
+            snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
 
             var doomed = Write(connection, "/knowledge/testing/merlin", "It stoops at speed.", T0);
             FactStore.Forget(connection, doomed, "test", T0);
@@ -601,7 +601,7 @@ public class BackupStoreTests
         using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
         {
             Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-            snapshot = BackupStore.Take(connection, sandbox.Home, T0);
+            snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
             Write(connection, "/knowledge/testing/merlin", "It stoops at speed.", T0);
         }
 
@@ -651,7 +651,7 @@ public class BackupStoreTests
         using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
         {
             Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-            snapshot = BackupStore.Take(connection, sandbox.Home, T0);
+            snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
         }
 
         SqliteConnection.ClearAllPools();
@@ -683,7 +683,7 @@ public class BackupStoreTests
         using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
         {
             Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-            snapshot = BackupStore.Take(connection, sandbox.Home, T0);
+            snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
         }
 
         SqliteConnection.ClearAllPools();
@@ -705,7 +705,7 @@ public class BackupStoreTests
         using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
         {
             Write(connection, "/knowledge/testing/kestrel", "It binds loopback only.", T0);
-            snapshot = BackupStore.Take(connection, sandbox.Home, T0);
+            snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Full);
         }
 
         SqliteConnection.ClearAllPools();

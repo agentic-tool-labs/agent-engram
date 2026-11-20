@@ -134,6 +134,70 @@ public class PrimerSummaryEquivalenceTests
         AssertPrimersMatch(connection);
     }
 
+    /// <summary>
+    /// Every shape the histogram's two partial-index arms and the per-scope probe have to agree
+    /// on at once: live edge and non-edge facts, one subject holding both (the arms' outer SUM),
+    /// one subject with several live predicates, closed facts — the lowest id of the first
+    /// preferred scope among them, so a probe that did not skip closed rows would pick it —
+    /// session notes, a session whose only note is closed, a directive, and three scopes, one of
+    /// which ('session') has no qualifying fact at all. Each arm the SQL has is exercised here;
+    /// dropping either histogram arm reddens this test.
+    /// </summary>
+    [Fact]
+    public void EdgesClosedFactsSessionsAndDirectivesTogether() =>
+        AssertPrimersMatch(seeded: false, connection =>
+        {
+            var closedFirst = Write(connection, "/knowledge/alpha/closed", "Retracted first.", "user", 1);
+            FactStore.Forget(connection, closedFirst, "test", T0.AddSeconds(2));
+            Write(connection, "/knowledge/alpha/a", "Project body.", "project", 3);
+            Write(connection, "/knowledge/alpha/b", "User body.", "user", 4);
+            Edge(connection, "/knowledge/alpha/b", "/knowledge/beta/target", "relates", 5);
+            Edge(connection, "/knowledge/beta/x", "/knowledge/alpha/a", "uses", 6);
+            Edge(connection, "/knowledge/beta/x", "/knowledge/alpha/b", "uses", 7);
+            FactStore.Remember(connection,
+                new FactWrite("/knowledge/beta/x", "note", "prefers", "Several predicates.", "user", "stated"),
+                T0.AddSeconds(8));
+            FactStore.Remember(connection,
+                new FactWrite("/knowledge/beta/x", "note", "decided", "Another predicate.", "user", "stated"),
+                T0.AddSeconds(9));
+            var closedLater = Write(connection, "/knowledge/gamma/closed", "Closed later.", "project", 10);
+            FactStore.Forget(connection, closedLater, "test", T0.AddSeconds(11));
+
+            SessionFacts.Append(connection, "live-session", "A live session note.", null, null, null, T0.AddSeconds(12));
+            var closedNote = SessionFacts.Append(
+                connection, "closed-session", "A note later retracted.", null, null, null, T0.AddSeconds(13));
+            FactStore.Forget(connection, closedNote, "test", T0.AddSeconds(14));
+
+            DirectiveFacts.Add(connection, "Always answer in plain English.", T0.AddSeconds(15));
+        });
+
+    /// <summary>
+    /// Tool-scope records (D87) are neither counted nor sampled, including a subject whose only
+    /// live facts are tool records and the lowest-id fact of the whole store being one — the cases
+    /// the histogram's negative arm, its HAVING, and both candidate arms each have to handle.
+    /// </summary>
+    [Fact]
+    public void ToolScopeRecordsAreNeitherCountedNorSampled()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Write(connection, "/tools/ah2/repo/t/train/1", "Ledger first in the catalog.", FactStore.ToolScope, 1);
+        Write(connection, "/tools/ah2/repo/t/train/2", "Another ledger row.", FactStore.ToolScope, 2);
+        Write(connection, "/knowledge/mixed/a", "A tool record shares this subject.", FactStore.ToolScope, 3);
+        FactStore.Remember(connection,
+            new FactWrite("/knowledge/mixed/a", "note", "decided", "A user belief on it.", "user", "stated"),
+            T0.AddSeconds(4));
+        Write(connection, "/knowledge/alpha/b", "Project body.", "project", 5);
+
+        AssertPrimersMatch(connection);
+
+        var summary = PrimerSummary.Read(connection, Now);
+        Assert.Equal(2, summary.FactCount);
+        Assert.Equal(2, summary.TopicCounts.Values.Sum());
+        Assert.DoesNotContain(summary.ExampleCandidates, fact => fact.Scope == FactStore.ToolScope);
+        Assert.DoesNotContain("Ledger", PrimerBuilder.Build(summary, MemorySettings.DefaultPrecedence), StringComparison.Ordinal);
+    }
+
     private static void AssertPrimersMatch(bool seeded, Action<SqliteConnection> arrange)
     {
         using var sandbox = new SandboxHome(initialize: false);
@@ -150,7 +214,16 @@ public class PrimerSummaryEquivalenceTests
 
     private static void AssertPrimersMatch(SqliteConnection connection)
     {
-        var reference = FactCatalog.ReadLongTerm(connection, Now);
+        // ReadLongTerm keeps directives as ordinary facts; the primer delivers them in their own
+        // block instead (D-1), so the reference takes them out of the catalog and hands them over
+        // as Directives — a no-op for every fixture that writes none. Tool-scope records stay in
+        // the catalog (recall reads it) but not in the primer (D87).
+        var directivePrefix = DirectiveFacts.Root + "/";
+        var reference = PrimerSummary.From(FactCatalog.ReadLongTerm(connection, Now)
+                .Where(fact => fact.SubjectPath?.StartsWith(directivePrefix, StringComparison.Ordinal) != true)
+                .Where(fact => fact.Scope != FactStore.ToolScope)
+                .ToList())
+            with { Directives = DirectiveFacts.ReadLive(connection).Select(d => d.Body).ToList() };
         var summary = PrimerSummary.Read(connection, Now);
 
         foreach (var precedence in Precedences)
@@ -166,7 +239,7 @@ public class PrimerSummaryEquivalenceTests
         // Two empty strings are equal, so every corpus that holds something is also held to
         // producing a coverage line — otherwise a summary that read nothing would pass by
         // agreeing with a reference the test never checked was non-trivial.
-        if (reference.Count > 0)
+        if (reference.FactCount > 0)
         {
             Assert.Contains(
                 "Memory holds",
@@ -174,10 +247,18 @@ public class PrimerSummaryEquivalenceTests
         }
     }
 
-    private static void Write(
+    private static long Write(
         SqliteConnection connection, string path, string body, string scope, int second) =>
         FactStore.Remember(
             connection,
             new FactWrite(path, "note", "notes", body, scope, "stated"),
+            T0.AddSeconds(second)).FactId;
+
+    private static void Edge(
+        SqliteConnection connection, string subject, string target, string predicate, int second) =>
+        FactStore.Remember(
+            connection,
+            new FactWrite(subject, "note", predicate, $"{subject} {predicate} {target}.", "project", "stated",
+                ObjectPath: target, ObjectKind: "note"),
             T0.AddSeconds(second));
 }

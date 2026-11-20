@@ -361,7 +361,20 @@ public sealed record TelemetryRecord(
     /// <see cref="StoreCompactor.AutoOverBudget"/>; absent otherwise. A bool, not a duration
     /// (D55). Only that kind sets it.
     /// </summary>
-    [property: JsonPropertyName("over_budget")] bool? OverBudget = null);
+    [property: JsonPropertyName("over_budget")] bool? OverBudget = null,
+
+    /// <summary>
+    /// The <c>types</c> filter a <see cref="TelemetryEventKind.Recall"/> was asked for, normalized to
+    /// registry order; absent when none was passed (D85).
+    /// </summary>
+    [property: JsonPropertyName("types")] IReadOnlyList<string>? Types = null,
+
+    /// <summary>
+    /// Packed lines of a <see cref="TelemetryEventKind.Recall"/> by memory type
+    /// (<see cref="RecallRanker.PackedByScope"/>), on every recall record. Lines, not
+    /// <c>fact_count</c>, whose meaning is unchanged (D43, D46).
+    /// </summary>
+    [property: JsonPropertyName("packed_by_scope")] IReadOnlyDictionary<string, int>? PackedByScope = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;
