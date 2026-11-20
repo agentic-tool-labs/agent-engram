@@ -925,19 +925,22 @@ public class BackupSlimTests
         Assert.Equal(0, Cli(source.Home, "take").Exit);
 
         using var target = new SandboxHome();
-        using var baseline = new SandboxHome();
+
+        // The target's own seed, read before the replay: a second freshly initialized home would
+        // carry the same seed stamped with its own clock, and differ whenever the two land in
+        // different seconds.
+        IReadOnlyDictionary<string, IReadOnlyList<string>> seeded;
+        using (var fresh = EngramDatabase.OpenInitialized(target.Home))
+        {
+            seeded = AuthoredDigest.Read(fresh, journalSubset: true);
+        }
+
         var replay = Cli(target.Home, "replay", FactJournal.PathIn(source.Home), "--apply");
 
         Assert.Equal(0, replay.Exit);
         Assert.DoesNotContain("could not", replay.Stdout, StringComparison.Ordinal);
         Assert.DoesNotContain("pointed outside", replay.Stdout, StringComparison.Ordinal);
         Assert.DoesNotContain("outside this journal", replay.Stdout, StringComparison.Ordinal);
-
-        IReadOnlyDictionary<string, IReadOnlyList<string>> seeded;
-        using (var fresh = EngramDatabase.OpenInitialized(baseline.Home))
-        {
-            seeded = AuthoredDigest.Read(fresh, journalSubset: true);
-        }
 
         using var replayed = EngramDatabase.OpenInitialized(target.Home);
         var actual = AuthoredDigest.Read(replayed, journalSubset: true)
