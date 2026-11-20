@@ -6981,11 +6981,39 @@ machine", `created_at` = the record's `valid_to`, `ON CONFLICT DO NOTHING`. Noth
 the update touches no row. E-b confirmed both gaps on ad6f965: a synced forget and a backfilled
 edge each had 0 rows.
 
-**Not done here.** A synced retraction still writes no row: the close record carries no reason, and
-adding one is a format change waiting on the user (U-b). `SyncTests` holds today's 0 rows as the
-expectation, so U-b flips that test. `LookupExact`, `TryResolveSuccessorId` and the backfill's own
-subquery use the same key without a liveness filter. With an A/A′ pair present they may pick either
-row. Known limit, not fixed.
+**F-b part 2 (user choice U-b: yes).** A synced forget wrote no row either: the close record had no
+reason to write. The `"t":"close"` record now carries an optional `"reason"`. It is the origin's
+NULL-new `supersession` reason, read beside the row in `LookupExact`, and it is emitted only when
+the close names no successor and that row exists. It is absent otherwise, never null. When
+`ApplyClose` is the call that closed the row, the close names no successor, and `Reason` is
+present, it writes `(old, NULL, reason, created_at = valid_to)` through the same
+`InsertSupersession`, `ON CONFLICT DO NOTHING`. A missing, null or non-string `reason` writes
+nothing. A no-successor close may be a lost pointer rather than a forget, and stating an account
+the source never had is what D99 forbids. Old binaries ignore the key, old chunks carry none, and
+both import as before.
+
+**Known limits.**
+- A deferred close loses its reason. `sync_deferred_close` has no column for it, so a retraction
+  that is deferred and applied on a later retry lands with no row. Adding the column is a migration
+  (U-b2) and is not built.
+- `MergeSameBatchClosesIntoFactLines` folds a close into the fact line, writing `valid_to` and
+  `superseded_by` but not `reason`. That covers a forget whose fact line and close reach a machine
+  in one batch. Such a forget still lands with no row. The spec does not cover this path; it was
+  reported, not built.
+- `LookupExact`, `TryResolveSuccessorId` and the backfill's own subquery use the same key with no
+  liveness filter, so with an A/A′ pair present they may pick either row.
+
+**Falsified against a committed tree** (each patch confirmed by `git diff --quiet`, then restored):
+- Rule 6 broken, with pairing re-read per record during pass 1 so it sees this replay's inserts:
+  rows 3, 4 and 11 redden. Row 1 stays green because rule 3's exception also rescues A′ there,
+  which the spec had not predicted.
+- Claiming disabled: row 4 reddens.
+- Rule 3's exception dropped: row 7 reddens.
+- Round 1 dropped, leaving one liveness-blind round: rows 2 and 4 and D68 test 1 redden.
+- The backfill's insert deleted: the backfill test reddens.
+- `reason` not emitted: the retraction test reddens.
+- `reason` ignored on apply: the retraction test reddens.
+- A reason invented when absent: the three no-usable-reason cases and row 3 redden.
 
 **F-c tripwire.** `supersession.evidence` is not journalled and is not being journalled. Its only
 writer, `Remember`'s supersede branch, stores the same value as the superseding fact's
