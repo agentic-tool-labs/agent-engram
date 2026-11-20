@@ -6410,3 +6410,10 @@ Against 8360e6c (review F1):
 22. `From` exclusion disabled [2]. The first attempt deleted the filter, left an unused variable,
     and failed to compile under warnings-as-errors. It proved nothing and was redone as a
     compiling break.
+
+Against df1a4a5 (F2 ruling):
+23. no key line for an empty role [5, one tier 3]
+24. header emitted with the key for an empty role [4]
+25. a key line without a role [6, two tier 3]
+26. instance-style keys refused [1]
+27. the old "your own name" description [1, golden]
