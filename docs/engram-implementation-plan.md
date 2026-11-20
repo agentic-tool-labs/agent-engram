@@ -5969,3 +5969,75 @@ because a plugin older than the binary still registers it and an unknown verb pr
 
 **Not measured.** Nothing here has run on an organization-managed install. That `prompt.submit` reaches a
 user-installed mod there rests on the docs not listing it as skipped.
+
+## D94 — A git failure is never "no remote", and a complete scan retires what it superseded
+
+**Problem.** `repo_registry` is keyed on identity: origin URL, else the root path (D67). A new identity
+gets a new `repo_path`, `-2`, `-3` and so on, and nothing ever retired the old one. On the real store 45
+rows covered 20 checkouts, and 25 of them no longer described their checkout: 206,171 live regenerable
+facts (37.2% of all code facts) under paths whose checkout now resolves to another identity. Two causes:
+remotes that really changed, which D67 makes a new identity on purpose, and runs where the origin lookup
+failed and the root path stood in for it. `CodeEntityResolver` also picked an arbitrary row when several
+shared a `disk_path`, so a live file could resolve to a stale path.
+
+**Rule 1: three outcomes, never two.** `git remote get-url origin` stays the one call on the happy path
+and the only source of identity, so `url.*.insteadOf` rewriting keeps applying. Only when it yields
+nothing does `git config --get remote.origin.url` classify. Exit 1 is **NoRemote**, and the root path is
+the identity as before. Anything else is **Unknown**: a URL that `get-url` did not return, a corrupt
+config, an empty value, a timeout, git missing. On Unknown, writers (`index`, the `repo` verbs, the MCP
+enrollment tool, freshen) do nothing for that root and record no `index` event (D55). `--auto` refuses
+silently. Doctor reports `Warn` with no fix (D37).
+
+Observed on git 2.54.0 (Apple Git-157), and pinned in tests:
+
+| case | `config --get remote.origin.url` |
+|---|---|
+| no origin URL, with a `[remote "origin"]` section present (global `prune = true`) | exit 1 |
+| checkout with an origin | exit 0, the URL |
+| directory that is not a repository | exit 1 (so it stays NoRemote, as before) |
+| corrupt `.git/config` | exit 128 |
+| `remote.origin.url` set to empty | exit 0, empty value |
+
+`git remote`, the list, is never consulted: with a global `[remote "origin"]` section it lists `origin`
+in every repository, which the first draft of this rule would have read as Unknown, so checkouts with no
+remote would never have been indexed again. `config --get` is never the identity source either: it
+returns the URL before `insteadOf` rewriting, so switching to it would re-key every such user's
+repositories.
+
+**Rule 2: retirement.** A registry row is retired when a complete full scan of its checkout has just run
+under a different identity that git resolved positively. "Complete" is exactly the `stampFullScan`
+condition: `ScanStop.Complete`, not `empty-scan`, with `--apply`. It runs inside the transaction that
+stamps the scan and clears the suppression reason (D69). It sets `detached_at = now` on every row whose
+canonical `disk_path` equals the scanned root's, whose identity differs from the one this run resolved
+(never `EnrolledIdentity`), whose `repo_path` differs, and which is not already detached. A dry run
+notes "would retire". Nothing is deleted. The row for the identity git resolves now is never retired:
+`EnsureRepo` clears `detached_at` on the row it reuses, in the statement that re-homes a moved checkout,
+whatever its `disk_path`, so pointing a remote back un-retires that row and its next complete scan
+retires the other. (The re-home `UPDATE` alone did not: it runs only when `disk_path` differs, so at an
+unmoved checkout the re-resolved row stayed retired while being the live one.) A dry run clears nothing.
+
+A root that stays Unknown is never stamped, so it would be the most overdue pick on every pass. Every
+"next due" pick (the server tick, `index --freshen`) goes through `RepoFreshness.NextDueResolvable`,
+which skips an Unknown candidate and takes the next one in the same pass; drain-all and
+`repo index --all` already visit every root and skip the Unknown one. "Current" means what git resolves now,
+not the newest row: on the real store `fx` (the newest row) retires in favour of the bundle identity, and
+`agent-tools-3` in favour of `agent-tools-2`. Doctor adds one store-wide `indexing` row while retired
+paths still hold `file_state`, counted from `repo_registry` and `file_state` only. It names no command:
+until removal ships it says the paths are excluded from code lookup and removable in a later version,
+because a doctor that names a verb which does not exist teaches people to stop reading it (D37).
+
+**Known oddity, unchanged.** An in-repo `[remote "origin"]` section with no url (or an empty one) makes
+`git remote get-url origin` print `origin`, exit 0, so the identity is the literal string `origin`.
+This predates D94 and is recorded rather than changed.
+
+**Why `detached_at`.** Nothing set it before, and its two readers (`CodeEntityResolver`,
+`FileFreshness`) already exclude what a retired row must be excluded from. A new column would need a
+migration and edits to both readers for the same effect.
+
+**Rejected.** Changing identity derivation (disk path or root commit): it rewrites D67 and moves every
+row's key; root commit fails for forks and shallow clones. Retiring by newest `created_at`: wrong for the
+`-history` and bundle groups, and it lets a transient root-path row, which is the newest, retire the real
+origin row. Detection on demand in doctor or a verb: it has no completed-scan evidence, which D53
+requires before absence counts. Deleting at the end of the scan: destructive work is dry-run first, and
+compact's snapshot plus VACUUM do not belong in the maintenance child. Removal is a separate verb
+(eng-34 phase 3).

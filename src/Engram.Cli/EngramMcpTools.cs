@@ -541,10 +541,15 @@ public sealed class EngramMcpTools
             return $"'{decision}' is not a recognized decision; expected enroll, decline, or later. Nothing was recorded.";
         }
 
+        if (!CodeIndexer.TryResolveIdentity(root, out var identity, out var originFailure))
+        {
+            return $"{CodeIndexer.UnknownOriginNote(root, originFailure)}. Nothing was recorded; ask again once git answers.";
+        }
+
         RepoCommand.RepoDecisionResult result;
         using (var connection = EngramDatabase.OpenInitialized(home))
         {
-            result = RepoCommand.ApplyDecision(home, connection, root, normalized, session.Value, DateTimeOffset.UtcNow);
+            result = RepoCommand.ApplyDecision(home, connection, root, identity, normalized, session.Value, DateTimeOffset.UtcNow);
         }
 
         return normalized switch
