@@ -374,7 +374,19 @@ public sealed record TelemetryRecord(
     /// (<see cref="RecallRanker.PackedByScope"/>), on every recall record. Lines, not
     /// <c>fact_count</c>, whose meaning is unchanged (D43, D46).
     /// </summary>
-    [property: JsonPropertyName("packed_by_scope")] IReadOnlyDictionary<string, int>? PackedByScope = null);
+    [property: JsonPropertyName("packed_by_scope")] IReadOnlyDictionary<string, int>? PackedByScope = null,
+
+    /// <summary>
+    /// The scope a <see cref="TelemetryEventKind.Remember"/> actually wrote, only when it is not
+    /// <c>session</c>; a degraded project write records none (D98).
+    /// </summary>
+    [property: JsonPropertyName("scope")] string? Scope = null,
+
+    /// <summary>
+    /// Why a <c>scope:"project"</c> remember was kept as a session note: <c>no-dir</c>,
+    /// <c>bad-dir</c>, <c>not-checkout</c>, <c>git-unknown</c> or <c>not-indexed</c> (D98).
+    /// </summary>
+    [property: JsonPropertyName("project_unresolved")] string? ProjectUnresolved = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

@@ -82,6 +82,10 @@ Engram's durable memory, and where anything worth keeping goes even when another
   Flags for sync. Triggered by "share engram" plus content.
   param: review_after
   When to revisit this: a relative duration ('3d', '2w', '12h') or an ISO date. Surfaces in 'engram review list' and doctor once it passes.
+  param: scope
+  session (default) or project. Use project for something true about this codebase beyond this session (a decision, a trap, a convention); session for working state.
+  param: project_dir
+  With scope project: your current working directory, absolute. Engram finds the repository from it.
 
 tool: engram_revise
 Replace a stored belief with a corrected statement, recording why. The old fact is closed, never erased, and the new one takes its place in recall. Use it when the user or fresh evidence contradicts something stored; engram_forget retracts without a replacement.

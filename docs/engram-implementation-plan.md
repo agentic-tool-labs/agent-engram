@@ -6568,6 +6568,7 @@ guarantee rests on the oracle comparison alone.
 
 `RecallTypesTests`' pre-D85 identity check now removes the tool arm from `excluded`. It compares rows
 only, because that arm has a plan of its own, and `RecallRankerPlanTests` pins that plan.
+
 ## D96 — Scheduled snapshots also leave out closed code history, through `StoreCompactor`
 
 Spec: `backup-derived-state.md` §4.2 (phase 2b, eng-40); adr-2, accepted 2026-11-19. Builds on D93 and
@@ -6609,6 +6610,7 @@ the live store is unchanged, and a test holds it.
 pruning closed regenerable facts from it would remove exactly what that compact deletes. It still omits
 vectors. `Take` carries this as `keepClosedHistory`, which only `StoreCompactor` passes. `facts_closed` is
 absent from such a snapshot, so a restore names nothing as unrecoverable.
+
 ## D97 — Retired registry paths are removed by compact, by hand or opt-in at session start
 
 **Problem.** D94 marks a superseded registry row retired and deletes nothing. What it left behind — on
@@ -6711,3 +6713,112 @@ resolve to nothing once the eligible prefixes are gone, by asking `SyncScope.Res
 
 **The in-lock re-check repeats the suppression test**, not only "still retired, winner still there": a
 truncated scan landing between the git check and `BEGIN IMMEDIATE` keeps the row.
+
+## D98 — A project note is filed by the directory its call names, never by a session binding
+
+**What it is.** `engram_remember` gains `scope` (`session` by default, or `project`) and
+`project_dir`. A note is durable only when the writer says so at write time; nothing is promoted
+afterwards. With a resolved project it lands at `/projects/<p>/notes/<fp64>`, entity kind `note`,
+scope `project`, `learned_via observed` (D19). Its predicate comes from a fixed cue match, first
+match wins: `warns` for `never`, `do not`, `don't`, `must not`, `trap`, `gotcha` or `breaks` as
+whole words in any case; `decided` for `decided`, `chose` or `rejected`; else `holds`. The
+predicate is display and FTS text, and the path carries uniqueness. **The cues match
+`FactStore.Normalize`'s form, the same text the fingerprint hashes**, so one path always carries
+one predicate. Matched on raw text, "don't" (warns) and "don’t" (curly apostrophe: holds), or
+"Do-not" and "do not", shared a path under two predicates. The repeat check is path plus
+predicate, so the second write became a second live fact at the same address. `don't` is spelled
+`don ?t` in the normalized form. The accepted scopes come from
+`MemoryScopes.Writable` (session, project); `agent` joins at P5. Any other value is an error naming
+them, and nothing is written. The mod `remember` op is unchanged and always writes a session note.
+
+**Why per call, and not per session.** The spec first bound `session.repo_path` from the
+session-start hook's `cwd`, keyed on Claude Code's `session_id`. `engram_remember` writes under the
+transport's `Mcp-Session-Id`, and D43 measured those id spaces as disjoint. The bound row would never
+have been the one a remember looks up, so every project write would have degraded, and the "bound"
+and "not yet bound" cases would have been indistinguishable. So the project comes from the call's
+own `project_dir`:
+1. `RepoEnrollment.FindCheckoutRoot`: is there a `.git` above it at all? This is filesystem only.
+2. `CodeIndexer.ResolveRoot`, then `ResolveIdentity`.
+3. `CodeIndexer.LiveRepoPath`: the `repo_registry` row for that identity with `detached_at IS NULL`.
+4. The project is the second segment of that row's `repo_path`.
+
+Enrollment is not consulted. The project is an address, not indexing consent, and only a live
+registry row knows the slug. Minting one here would be a second minting path beside `EnsureRepo`.
+A linked worktree resolves to its main checkout's project through the shared origin identity. That
+is a stated limit: in a repo with no `origin`, the identity is the toplevel path, a worktree's
+toplevel is its own, and a note from there reads as `not-indexed`.
+`session.repo_path` stays unwritten, because nothing reads it. Nothing at session start changed:
+`MaintenanceLauncherTests` pins the script byte for byte.
+
+**A failed resolution writes a session note, never a refusal** (D64: a bounced write risks the
+capture). The response gains one line naming why. The `remember` record's `project_unresolved`
+carries the same reason as a closed code (`no-dir`, `bad-dir`, `not-checkout`, `git-unknown`,
+`not-indexed`), so the adoption question can be split from the resolution one. `scope` is recorded
+only when a project note was actually written. `git-unknown` is reserved and not yet produced:
+before eng-34, `ResolveIdentity` falls back to the root path when git cannot answer, which then
+finds no row and reads as `not-indexed`. That outcome row is enabled and tested in a follow-up after
+eng-34 (PR #16) merges. Until then, the `not-indexed` notice names `project_dir` as the call gave
+it, not a root git may have failed to find, so a subdirectory is never reported as unindexed on the
+strength of a failed lookup.
+
+A `scope` passed with `supersedes` is not applied, because a restatement keeps the capture's
+address. The response says so in one line ("scope ignored — a revision keeps the original's
+address") rather than reading as obeyed.
+
+**Why the leaf is 64 bits.** `FactStore.Fingerprint` keeps 4 bytes. Under `/sessions/<id>/` a
+collision is harmless, because the session segment separates the paths. A shared namespace has no
+such segment, so a collision there is a lost write: the repeat rule hands back another statement's
+handle. The expected count is about n²/2³³, roughly 36% at 62,000 notes. The function takes a
+length; the default stays 4, so no existing address moves. The test uses a real 32-bit collision,
+found by birthday search: "project note collision probe 36851" and "… 77915" share `0528fe15`.
+
+**One append routine.** `SessionFacts.AppendAt` writes both kinds. They differ by path, predicate,
+scope and parent entities. A repeat of a live identical statement, under the same normalization,
+returns the existing handle and writes nothing, as it always has for session notes.
+
+**Measured (N1).** On the published binary, through a raw MCP client against a disposable-home
+server, 50 calls per arm with the arms alternated: a `scope:"project"` remember into an indexed
+checkout cost **p50 +19.5 / p95 +21.5 ms** over the same call without scope, and +20.3 / +25.6 ms on
+a repeat run. That is the two git subprocesses. It is inside the 50 ms bar the spec set, so no
+`ByRoot` cache goes in front of them. A remember without `scope:"project"` runs no git at all, and
+a test asserts it through a per-flow invocation counter on `GitFileLister`.
+
+**Not done, deliberately.** `Diagnostics.CheckRepo` keeps its own query. It joins `file_state` and
+does not filter `detached_at`, so sharing `LiveRepoPath` would change what doctor reports. The tool
+surface ceiling moved from 6,591 to 6,852 for the two parameters the spec words.
+
+**Falsified** against the committed tree. Each break was confirmed landed, then restored; red
+counts in brackets:
+1. default fingerprint length 8 [2]
+2. project leaf 4 bytes [4]
+3. `never` dropped from the cue [1]
+4. `decided` tested before `warns` [1]
+5. no word boundaries [1]
+6. no `Directory.Exists` [1]
+7. no checkout check [1]
+8. a retired row accepted [1]
+9. resolution on every scope [1]
+10. no repeat check [1]
+11. any registry scope accepted [1]
+12. `scope` recorded on a degraded write [5]
+13. a generic notice [5]
+14. a bind job in the script [1]
+15. `session.repo_path` written [1]
+16. matching session notes closed [1]
+17. a checkout recognised only at its root [1, the worktree test]
+18. a slug minted for an unindexed repo [2]
+19. written as `user` [3]
+20. enrollment required [6]
+21. a notice on every remember [1]
+22. no `[project <p>]` echo [2]
+
+The review rework was falsified the same way:
+- cues read raw text: 2 red (the cue theory, and the two-spellings repeat test)
+- the not-indexed notice names the root: 1 red (the subdirectory test)
+- no scope-ignored notice: 1 red
+- the notice on every restatement: 1 red (its negative)
+- no `IsPathFullyQualified` guard: 1 red (`"."`)
+
+The relative-path half of `bad-dir` is held by `"."`, which exists relative to the process's
+working directory. It therefore passes `Directory.Exists` and reaches the `IsPathFullyQualified`
+guard on its own.

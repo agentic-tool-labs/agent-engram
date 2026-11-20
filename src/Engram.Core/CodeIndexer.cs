@@ -922,6 +922,17 @@ public static class CodeIndexer
     }
 
     /// <summary>
+    /// The memory path of the live registry row for an identity, or null when the repo was never
+    /// indexed or its row is retired. Reads only; <see cref="EnsureRepo"/> stays the one place a
+    /// <c>repo_path</c> is minted (D98).
+    /// </summary>
+    public static string? LiveRepoPath(SqliteConnection connection, string identity) =>
+        ScalarText(
+            connection,
+            "SELECT repo_path, '' FROM repo_registry WHERE identity = $identity AND detached_at IS NULL;",
+            ("$identity", identity))?.First;
+
+    /// <summary>
     /// <see cref="TryResolveIdentity(string, out string, out string)"/> for a root already known to
     /// resolve. Throws on Unknown rather than falling back to the root path, which is the fallback
     /// D94 removed.

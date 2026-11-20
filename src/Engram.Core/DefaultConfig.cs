@@ -124,7 +124,8 @@ public static class DefaultConfig
         # /tools/<tool>/… holds another tool's records (scope "tool"): kept, but not the
         # user's memory, so the primer neither counts nor samples them (D87).
         # Code is not a root: a codebase belongs to a project, so it lands at
-        # /projects/<name>/code/<repo>/… beside that project's decisions (D27).
+        # /projects/<name>/code/<repo>/… beside that project's decisions (D27). A note the
+        # model files with scope "project" lands at /projects/<name>/notes/<fingerprint> (D98).
 
         [memory]
         # Whether the session primer states that Engram outranks any other memory system this
