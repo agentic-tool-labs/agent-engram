@@ -685,4 +685,25 @@ public class RepoScannerTests
             File.SetUnixFileMode(blocked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
     }
+
+    // The counter has to count every git process, and TryResolveIdentity calls RunWithStatus
+    // directly. With the increment moved up into Run the rest of the suite stays green, because
+    // every other counted path goes through Run; this is the one call that does not.
+    [Fact]
+    public void InvocationCounter_CountsARunWithStatusCallThatNeverGoesThroughRun()
+    {
+        using var repo = new TempRepo();
+        var counter = new System.Runtime.CompilerServices.StrongBox<int>();
+        GitFileLister.InvocationCounter.Value = counter;
+        try
+        {
+            GitFileLister.RunWithStatus(repo.Root, ["--version"]);
+        }
+        finally
+        {
+            GitFileLister.InvocationCounter.Value = null;
+        }
+
+        Assert.Equal(1, counter.Value);
+    }
 }
