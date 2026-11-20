@@ -369,7 +369,9 @@ them — and that took it from ~531 MB to 39,944,804 B on the real store. `expor
 schema version that wrote it — the journal is addressed by path and predicate, so it replays into
 any later one (D32). `backup replay` is additive and idempotent, matching on subject, predicate,
 body and `valid_from`: it never rewrites or closes a fact the target store already had, because a
-recovery tool that can retire live beliefs is worse than the loss it was called to fix. **What it
+recovery tool that can retire live beliefs is worse than the loss it was called to fix. Matching is
+one-to-one, liveness first: each target row answers for at most one journal record, so a fact
+forgotten and restated in the same second comes back as both rows (D103). **What it
 therefore cannot write, it skips and counts — it does not abort.** `ux_fact_live` allows one live
 fact per subject and predicate, so a journalled belief the target disagrees with cannot go in
 without closing the target's, which the previous sentence forbids; the insert used to violate the

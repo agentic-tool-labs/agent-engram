@@ -6933,3 +6933,69 @@ Against df1a4a5 (F2 ruling):
 25. a key line without a role [6, two tier 3]
 26. instance-style keys refused [1]
 27. the old "your own name" description [1, golden]
+
+## D103 — Replay pairs journal records with target rows one-to-one, liveness first; a synced backfill writes its edge row
+
+**The defect (F-a).** Replay identity is subject path, predicate, body and `valid_from`, plus the
+object path for an edge (D32). That key is not unique. `Remember` stamps whole seconds, and after a
+`Forget` the same statement is a new row, so "state A, forget A, state A again" within one second
+leaves a closed row and a live row with one key. Replay matched many-to-one. A was inserted closed,
+then A′ matched the row just inserted for A, counted `AlreadyPresent`, and was never written: the
+live belief was lost, and any verdict on A′ would resolve to the closed row. The same happens for
+revise A→B→A in one second and for a source holding closed exact duplicates.
+
+**The decision (adr-5).** The key is unchanged, so D32's contract and every old journal stand. What
+changed is how records pair with rows that share a key. `FactJournal.Assign` computes the pairing
+once, before pass 1, against the rows the target held before this replay. On apply it reads inside
+the write transaction; the dry run uses the same routine.
+- **Round 1, same liveness.** In journal order, each record takes the lowest-id unclaimed row whose
+  liveness matches its own. A taken row is claimed.
+- **Round 2, cross liveness**, for records round 1 left unpaired. This keeps D68 and D99 for states
+  that really disagree: a retraction whose row the target still holds live, or an old live record
+  whose row has since been forgotten. One exception: a live record never takes a closed row whose
+  `valid_to` equals its `valid_from`. That row closed in the second the record began, so the record
+  restates it.
+- **`AddressUsable` keeps D68's meaning**, measured over the round that paired: false iff that round
+  offered two or more unclaimed rows and the one taken is closed. It must count *unclaimed* rows of
+  the round's liveness. Counting every row would read the A/A′ fixed point as ambiguous.
+- Rows this replay inserts are never candidates. Pass 1 branches on the pairing instead of a lookup,
+  and both of its branches are otherwise unchanged. Pass 2 is untouched.
+
+Liveness and not exact `valid_to`, because `valid_to` would give D68's all-closed ambiguous pair a
+basis to pick a row and change what D68 and D99 decided. This amends D68 §4.2: a closed record now
+prefers a closed row over a live twin, because pointing it at the live twin is the defect.
+
+**What moved, on purpose.** A target still holding A live (an older snapshot) now pairs A′ with
+the live row and inserts A closed with its retraction: `(1,1,0,0)`, where it was `(0,2,0,1)`. Two
+identical closed records now both land, `(2,0,0,0)` where it was `(1,1,0,0)`, because the source
+really held two rows. No existing test's counts moved. One known mis-case is accepted: a journal
+written in the same second as a state-then-forget, replayed into the post-forget store, inserts a
+live copy of a belief forgotten in the second it was stated.
+
+**F-b part 1.** `Sync.BackfillSupersededBy` set `superseded_by` for a pass-1 close whose successor
+arrived later in the same import, and never wrote the edge's `supersession` row. A pointer with no
+row is journalled with `reason = null`, and a later replay's `Link` then invents "replayed from the
+fact journal". When the backfill's update moves a pointer from NULL to an id, it now writes the
+same row `ApplyClose` writes, through one shared `InsertSyncedEdge`: reason "synced from another
+machine", `created_at` = the record's `valid_to`, `ON CONFLICT DO NOTHING`. Nothing is written when
+the update touches no row. E-b confirmed both gaps on ad6f965: a synced forget and a backfilled
+edge each had 0 rows.
+
+**Not done here.** A synced retraction still writes no row: the close record carries no reason, and
+adding one is a format change waiting on the user (U-b). `SyncTests` holds today's 0 rows as the
+expectation, so U-b flips that test. `LookupExact`, `TryResolveSuccessorId` and the backfill's own
+subquery use the same key without a liveness filter. With an A/A′ pair present they may pick either
+row. Known limit, not fixed.
+
+**F-c tripwire.** `supersession.evidence` is not journalled and is not being journalled. Its only
+writer, `Remember`'s supersede branch, stores the same value as the superseding fact's
+`fact.evidence`, which the journal carries, and nothing reads the column. Anything that starts
+reading `supersession.evidence` must read the superseding fact's `fact.evidence` instead, or reopen
+this as a journal-format change.
+
+**F-d tripwire.** The primer's per-scope example probe walks every `agent`-scope fact and finds
+none, because they all live under `/agents/`. That is the shape the `session` scope already has, and
+the cost was accepted there. It is deferred until live `agent`-scope facts exceed 10,000 or a
+file-timed `subagent-start` attributes more than 5 ms to that arm. The fix then is a guard test that
+every live `agent` and `session` fact sits under its prefix, followed by excluding both scopes from
+the walk.

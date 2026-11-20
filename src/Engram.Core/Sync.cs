@@ -1108,14 +1108,40 @@ public static class Sync
                 SELECT f.id FROM fact f
                 JOIN entity e ON e.id = f.subject_id
                 WHERE e.path = $subject AND f.predicate = $predicate AND f.body = $body AND f.valid_from = $validFrom
-            ) AND superseded_by IS NULL;
+            ) AND superseded_by IS NULL
+            RETURNING id;
             """;
         update.Parameters.AddWithValue("$supersededBy", successorId.Value);
         update.Parameters.AddWithValue("$subject", record.Subject);
         update.Parameters.AddWithValue("$predicate", record.Predicate);
         update.Parameters.AddWithValue("$body", record.Body);
         update.Parameters.AddWithValue("$validFrom", record.ValidFrom);
-        update.ExecuteNonQuery();
+
+        // The pointer moved, so the edge needs the row ApplyClose would have written had the
+        // successor been here then: a superseded_by with no row is journalled with no reason, and
+        // a later replay's Link invents one. Nothing when the update touched no row.
+        if (update.ExecuteScalar() is long factId)
+        {
+            InsertSyncedEdge(connection, transaction, factId, successorId.Value, record.ValidTo);
+        }
+    }
+
+    /// <summary>The <c>supersession</c> row for an edge a sync close linked.</summary>
+    private static void InsertSyncedEdge(SqliteConnection connection, SqliteTransaction transaction, long oldId, long newId, long createdAt)
+    {
+        using var supersession = connection.CreateCommand();
+        supersession.Transaction = transaction;
+        supersession.CommandText =
+            """
+            INSERT INTO supersession (old_fact_id, new_fact_id, reason, created_at)
+            VALUES ($old, $new, $reason, $createdAt)
+            ON CONFLICT(old_fact_id) DO NOTHING;
+            """;
+        supersession.Parameters.AddWithValue("$old", oldId);
+        supersession.Parameters.AddWithValue("$new", newId);
+        supersession.Parameters.AddWithValue("$reason", "synced from another machine");
+        supersession.Parameters.AddWithValue("$createdAt", createdAt);
+        supersession.ExecuteNonQuery();
     }
 
     /// <summary>Applies an Apply-resolved close: sets <c>valid_to</c>/<c>superseded_by</c> the same way <c>engram_revise</c>/<c>engram_forget</c> do (D8).</summary>
@@ -1155,19 +1181,7 @@ public static class Sync
 
             if (supersededById is { } target)
             {
-                using var supersession = connection.CreateCommand();
-                supersession.Transaction = transaction;
-                supersession.CommandText =
-                    """
-                    INSERT INTO supersession (old_fact_id, new_fact_id, reason, created_at)
-                    VALUES ($old, $new, $reason, $createdAt)
-                    ON CONFLICT(old_fact_id) DO NOTHING;
-                    """;
-                supersession.Parameters.AddWithValue("$old", factId);
-                supersession.Parameters.AddWithValue("$new", target);
-                supersession.Parameters.AddWithValue("$reason", "synced from another machine");
-                supersession.Parameters.AddWithValue("$createdAt", record.ValidTo);
-                supersession.ExecuteNonQuery();
+                InsertSyncedEdge(connection, transaction, factId, target, record.ValidTo);
             }
         }
     }

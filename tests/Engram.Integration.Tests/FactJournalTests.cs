@@ -1411,4 +1411,233 @@ public sealed class FactJournalTests
         command.Parameters.AddWithValue("$path", objectPath);
         Assert.Equal("@angular/core", (string)command.ExecuteScalar()!);
     }
+
+    // ---- adr-5: records pair with target rows one-to-one, liveness first (F-a table) ----
+
+    private const string Restated = "/project/restated";
+    private const string RestatedBody = "a belief forgotten and restated in one second";
+    private const string EdgeObject = "/project/edge-target";
+
+    /// <summary>A: stated and forgotten within T0 — closed, valid_to = valid_from, a reason.</summary>
+    private static JournalFact SameSecondForget(long id, string? @object = null) =>
+        new(id, Restated, "note", "states", RestatedBody, @object, @object is null ? null : "note", "project",
+            "stated", false, null, T0.ToUnixTimeSeconds(), T0.ToUnixTimeSeconds(), null, "no longer true",
+            T0.ToUnixTimeSeconds());
+
+    /// <summary>A′: the same statement made again within T0 — live, same key as A.</summary>
+    private static JournalFact SameSecondRestatement(long id, string? @object = null) =>
+        new(id, Restated, "note", "states", RestatedBody, @object, @object is null ? null : "note", "project",
+            "stated", false, null, T0.ToUnixTimeSeconds(), null, null, null, T0.ToUnixTimeSeconds());
+
+    private sealed record KeyRow(long Id, long? ValidTo, long? SupersededBy);
+
+    /// <summary>Every row holding the A/A′ key, lowest id first.</summary>
+    private static List<KeyRow> KeyRows(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT f.id, f.valid_to, f.superseded_by FROM fact f JOIN entity e ON e.id = f.subject_id
+            WHERE e.path = $path AND f.body = $body AND f.valid_from = $validFrom
+            ORDER BY f.id;
+            """;
+        command.Parameters.AddWithValue("$path", Restated);
+        command.Parameters.AddWithValue("$body", RestatedBody);
+        command.Parameters.AddWithValue("$validFrom", T0.ToUnixTimeSeconds());
+        using var reader = command.ExecuteReader();
+        var rows = new List<KeyRow>();
+        while (reader.Read())
+        {
+            rows.Add(new KeyRow(
+                reader.GetInt64(0),
+                reader.IsDBNull(1) ? null : reader.GetInt64(1),
+                reader.IsDBNull(2) ? null : reader.GetInt64(2)));
+        }
+
+        return rows;
+    }
+
+    /// <summary>Dry run first, then apply; the two must agree on Written + AlreadyPresent (F-a invariant).</summary>
+    private static ReplayResult ApplyAgreeingWithDryRun(
+        SqliteConnection connection, IReadOnlyList<JournalFact> facts, out IReadOnlyDictionary<long, long> idMap)
+    {
+        var dry = FactJournal.Replay(connection, facts, apply: false);
+        var applied = FactJournal.Replay(connection, facts, apply: true, out idMap);
+        Assert.Equal(applied.Written + applied.AlreadyPresent, dry.Written + dry.AlreadyPresent);
+        Assert.Equal(applied.Written, dry.Written);
+        return applied;
+    }
+
+    /// <summary>Row 1/3 state: one closed row carrying its retraction, one live, tokenised row with none.</summary>
+    private static void AssertForgottenAndRestatedBothPresent(SqliteConnection connection)
+    {
+        var rows = KeyRows(connection);
+        Assert.Equal(2, rows.Count);
+        var closed = Assert.Single(rows, r => r.ValidTo is not null);
+        var live = Assert.Single(rows, r => r.ValidTo is null);
+
+        Assert.Equal(T0.ToUnixTimeSeconds(), closed.ValidTo);
+        Assert.Null(closed.SupersededBy);
+        var retraction = Assert.Single(SupersessionRowsFor(connection, closed.Id));
+        Assert.Null(retraction.NewFactId);
+        Assert.Equal("no longer true", retraction.Reason);
+        Assert.False(HasTokenRow(connection, closed.Id));
+
+        Assert.Null(live.SupersededBy);
+        Assert.Empty(SupersessionRowsFor(connection, live.Id));
+        Assert.True(HasTokenRow(connection, live.Id));
+    }
+
+    /// <summary>Row 1: the same-second forget and restatement both come back. Before adr-5 A′ matched A's freshly inserted row and was lost.</summary>
+    [Fact]
+    public void Replay_ASameSecondForgetAndRestatement_IntoAnEmptyStore_WritesBoth()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+
+        var result = ApplyAgreeingWithDryRun(rebuilt, [SameSecondForget(1), SameSecondRestatement(2)], out _);
+
+        Assert.Equal(new ReplayResult(2, 0, 0, 0), result);
+        AssertForgottenAndRestatedBothPresent(rebuilt);
+    }
+
+    /// <summary>
+    /// Row 2 and the fixed point: replaying the same pair into what row 1 produced writes nothing,
+    /// pairs each record with its own row, and a third run counts exactly what the second did.
+    /// </summary>
+    [Fact]
+    public void Replay_ASameSecondForgetAndRestatement_Twice_IsAFixedPointAndMapsEachToItsOwnRow()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        List<JournalFact> facts = [SameSecondForget(1), SameSecondRestatement(2)];
+        FactJournal.Replay(rebuilt, facts, apply: true);
+        var before = Snapshot(rebuilt);
+
+        var second = ApplyAgreeingWithDryRun(rebuilt, facts, out var idMap);
+        var third = FactJournal.Replay(rebuilt, facts, apply: true);
+
+        Assert.Equal(new ReplayResult(0, 2, 0, 0), second);
+        Assert.Equal(second, third);
+        Assert.Equal(before, Snapshot(rebuilt));
+        var rows = KeyRows(rebuilt);
+        Assert.Equal(rows.Single(r => r.ValidTo is not null).Id, idMap[1]);
+        Assert.Equal(rows.Single(r => r.ValidTo is null).Id, idMap[2]);
+    }
+
+    /// <summary>Row 3: journal order reversed (A′ before A). Before adr-5 A matched A′'s row, was lost, and counted a conflict.</summary>
+    [Fact]
+    public void Replay_ASameSecondRestatementBeforeItsForget_IntoAnEmptyStore_WritesBoth()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+
+        var result = ApplyAgreeingWithDryRun(rebuilt, [SameSecondRestatement(1), SameSecondForget(2)], out _);
+
+        Assert.Equal(new ReplayResult(2, 0, 0, 0), result);
+        AssertForgottenAndRestatedBothPresent(rebuilt);
+    }
+
+    /// <summary>
+    /// Row 4: an older snapshot still holding A live. Round 1 pairs A′ with the live row; A, left
+    /// unpaired, is inserted closed with its retraction. The live row is not touched (D8, D68).
+    /// </summary>
+    [Fact]
+    public void Replay_ASameSecondForgetAndRestatement_IntoAStoreStillBelievingIt_PairsTheRestatementWithTheLiveRow()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var liveId = SeedRawFact(rebuilt, Restated, "states", RestatedBody, T0);
+
+        var result = ApplyAgreeingWithDryRun(rebuilt, [SameSecondForget(1), SameSecondRestatement(2)], out var idMap);
+
+        Assert.Equal(new ReplayResult(1, 1, 0, 0), result);
+        Assert.Equal(liveId, idMap[2]);
+        Assert.NotEqual(liveId, idMap[1]);
+        Assert.Null(ValidToOf(rebuilt, liveId));
+        Assert.Empty(SupersessionRowsFor(rebuilt, liveId));
+        AssertForgottenAndRestatedBothPresent(rebuilt);
+    }
+
+    /// <summary>
+    /// Row 7: the target forgot A in the second it was stated, and A′ arrives alone (the sync split).
+    /// A closed row whose valid_to equals the live record's valid_from is never its pair, so A′ is
+    /// written. The neighbour that must still pair — a row forgotten a second later — is row 8,
+    /// <see cref="Replay_AStaleLiveRecord_PairsWithARowForgottenLater_AndStaysForgotten"/>.
+    /// </summary>
+    [Fact]
+    public void Replay_ARestatementAgainstARowForgottenInTheSameSecond_WritesTheRestatement()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var closedId = SeedRawFact(rebuilt, Restated, "states", RestatedBody, T0, validTo: T0);
+        SeedRetractionRow(rebuilt, closedId, T0, "no longer true");
+
+        var result = ApplyAgreeingWithDryRun(rebuilt, [SameSecondRestatement(1)], out var idMap);
+
+        Assert.Equal(new ReplayResult(1, 0, 0, 0), result);
+        Assert.NotEqual(closedId, idMap[1]);
+        Assert.Equal(T0.ToUnixTimeSeconds(), ValidToOf(rebuilt, closedId));
+        AssertForgottenAndRestatedBothPresent(rebuilt);
+    }
+
+    /// <summary>
+    /// Row 8, the negative of row 7's exception: a row forgotten one second after the record began
+    /// is the stale record's own row, so round 2 pairs it and nothing is resurrected.
+    /// </summary>
+    [Fact]
+    public void Replay_AStaleLiveRecord_PairsWithARowForgottenLater_AndStaysForgotten()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var closedId = SeedRawFact(rebuilt, Restated, "states", RestatedBody, T0, validTo: T0.AddSeconds(1));
+        var before = Snapshot(rebuilt);
+
+        var result = ApplyAgreeingWithDryRun(rebuilt, [SameSecondRestatement(1)], out var idMap);
+
+        Assert.Equal(new ReplayResult(0, 1, 0, 0), result);
+        Assert.Equal(closedId, idMap[1]);
+        Assert.Equal(before, Snapshot(rebuilt));
+    }
+
+    /// <summary>
+    /// Row 11: a source that held two closed exact duplicates gets both back. Deliberate change —
+    /// before adr-5 the second matched the first's freshly inserted row and counted present.
+    /// </summary>
+    [Fact]
+    public void Replay_TwoIdenticalClosedRecords_IntoAnEmptyStore_WritesBoth()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var duplicate = Record(1, GoneBody, T0, T0.AddHours(1), supersededBy: null, reason: null);
+
+        var result = ApplyAgreeingWithDryRun(rebuilt, [duplicate, duplicate with { Id = 2 }], out _);
+
+        Assert.Equal(new ReplayResult(2, 0, 0, 0), result);
+        Assert.Equal(2, FactRowCountFor(rebuilt, Gone, GoneBody));
+    }
+
+    /// <summary>Row 14: the same pair as edges on one object, through the edge arm of the key.</summary>
+    [Fact]
+    public void Replay_ASameSecondForgetAndRestatementOfAnEdge_IntoAnEmptyStore_WritesBoth()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+
+        var result = ApplyAgreeingWithDryRun(
+            rebuilt, [SameSecondForget(1, EdgeObject), SameSecondRestatement(2, EdgeObject)], out _);
+
+        Assert.Equal(new ReplayResult(2, 0, 0, 0), result);
+        AssertForgottenAndRestatedBothPresent(rebuilt);
+
+        using var command = rebuilt.CreateCommand();
+        command.CommandText =
+            """
+            SELECT COUNT(*) FROM fact f JOIN entity o ON o.id = f.object_id
+            WHERE o.path = $object AND f.body = $body;
+            """;
+        command.Parameters.AddWithValue("$object", EdgeObject);
+        command.Parameters.AddWithValue("$body", RestatedBody);
+        Assert.Equal(2L, (long)command.ExecuteScalar()!);
+    }
 }

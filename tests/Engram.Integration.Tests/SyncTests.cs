@@ -377,6 +377,102 @@ public sealed class SyncTests
         }
     }
 
+    /// <summary>
+    /// E-b, retraction case: a forget on A reaches B as a close with no successor. Records what
+    /// B holds today — closed, no pointer — and how many <c>supersession</c> rows it has.
+    /// </summary>
+    [Fact]
+    public void ForgettingOnA_ThenSyncing_ClosesBsCopy_AndCountsItsSupersessionRows()
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            using var connA = EngramDatabase.OpenInitialized(a.Home);
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+
+            var id = Write(connA, "/project/x", "a passing belief", T0);
+            var machineA = Sync.ResolveMachineId(syncRoot);
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(1), apply: true, CloseResolver.DefaultRetryCeiling);
+
+            Assert.True(FactStore.Forget(connA, id, "no longer true", T0.AddMinutes(2)));
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(3), apply: true, CloseResolver.DefaultRetryCeiling);
+
+            var closedId = FactId(connB, "/project/x", "a passing belief", liveOnly: false);
+            Assert.NotNull(closedId);
+            Assert.Null(FactId(connB, "/project/x", "a passing belief", liveOnly: true));
+            Assert.Null(SupersededByOf(connB, "/project/x", "a passing belief"));
+            Assert.Equal(0, SupersessionRows(connB, closedId!.Value));
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// E-b, backfill case and F-b part 1: a revise whose close and successor arrive in one batch is
+    /// linked by <c>BackfillSupersededBy</c>, and that link must carry its edge row — a pointer with
+    /// no row is journalled with no reason, and a later replay invents one.
+    /// </summary>
+    [Fact]
+    public void RevisingOnA_ThenSyncingInOneBatch_BackfillWritesTheEdgeRow()
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            using var connA = EngramDatabase.OpenInitialized(a.Home);
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+
+            Write(connA, "/project/x", "the old belief", T0);
+            var machineA = Sync.ResolveMachineId(syncRoot);
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(1), apply: true, CloseResolver.DefaultRetryCeiling);
+
+            Write(connA, "/project/x", "the new belief", T0.AddMinutes(2));
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(3), apply: true, CloseResolver.DefaultRetryCeiling);
+
+            var successorId = FactId(connB, "/project/x", "the new belief", liveOnly: true);
+            var oldId = FactId(connB, "/project/x", "the old belief", liveOnly: false);
+            Assert.NotNull(successorId);
+            Assert.Equal(successorId, SupersededByOf(connB, "/project/x", "the old belief"));
+            Assert.Equal(1, SupersessionRows(connB, oldId!.Value));
+
+            using var row = connB.CreateCommand();
+            row.CommandText = "SELECT new_fact_id, reason, created_at FROM supersession WHERE old_fact_id = $id;";
+            row.Parameters.AddWithValue("$id", oldId.Value);
+            using var reader = row.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.Equal(successorId!.Value, reader.GetInt64(0));
+            Assert.Equal("synced from another machine", reader.GetString(1));
+            Assert.Equal(T0.AddMinutes(2).ToUnixTimeSeconds(), reader.GetInt64(2));
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
+
+    private static long SupersessionRows(SqliteConnection connection, long factId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM supersession WHERE old_fact_id = $id;";
+        command.Parameters.AddWithValue("$id", factId);
+        return (long)command.ExecuteScalar()!;
+    }
+
     private static long? FactId(SqliteConnection connection, string path, string body, bool liveOnly)
     {
         using var command = connection.CreateCommand();
