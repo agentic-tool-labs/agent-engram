@@ -673,6 +673,19 @@ public static class FactStore
         ArgumentOutOfRangeException.ThrowIfLessThan(bytes, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(bytes, 32);
 
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(Normalize(statement)));
+
+        return Convert.ToHexStringLower(hash.AsSpan(0, bytes));
+    }
+
+    /// <summary>
+    /// The form <see cref="Fingerprint"/> hashes: lower case, letters and digits only, every other
+    /// run folded to one space. Anything else derived from a statement's address — a project
+    /// note's predicate (D98) — must read this form, or one path can carry two predicates.
+    /// </summary>
+    public static string Normalize(string statement)
+    {
         var builder = new System.Text.StringBuilder(statement.Length);
 
         foreach (var character in statement)
@@ -687,10 +700,7 @@ public static class FactStore
             }
         }
 
-        var hash = System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(builder.ToString().TrimEnd()));
-
-        return Convert.ToHexStringLower(hash.AsSpan(0, bytes));
+        return builder.ToString().TrimEnd();
     }
 
     /// <summary>

@@ -153,7 +153,11 @@ public sealed class EngramMcpTools
                 SessionId: session.Value,
                 Kind: TelemetryEventKind.Remember));
 
-            return $"[{FactCatalog.HandleFor(replacementId.Value)}] replaced capture [{supersedes}]: \"{statement}\"";
+            var restated = $"[{FactCatalog.HandleFor(replacementId.Value)}] replaced capture [{supersedes}]: \"{statement}\"";
+
+            // D98: a restatement keeps the original's address, so an explicit scope is not applied —
+            // and an unapplied argument must say so rather than read as obeyed.
+            return scope is null ? restated : restated + "\nscope ignored — a revision keeps the original's address";
         }
 
         long factId;

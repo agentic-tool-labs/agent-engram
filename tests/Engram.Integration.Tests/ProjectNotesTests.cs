@@ -118,6 +118,7 @@ public sealed class ProjectNotesTests : IDisposable
 
     [Theory]
     [InlineData("relative/dir")]
+    [InlineData(".")]
     [InlineData("/definitely/not/a/directory/engram-p4")]
     public void ScopeProject_WithARelativeOrMissingDir_KeepsASessionNote(string projectDir)
     {
@@ -147,7 +148,64 @@ public sealed class ProjectNotesTests : IDisposable
 
         var response = Remember(sandbox, "s1", "Something durable.", "project", repo);
 
-        AssertDegraded(sandbox, response, "not-indexed", $"{CodeIndexer.ResolveRoot(repo)} is not indexed by Engram — kept as a session note");
+        AssertDegraded(sandbox, response, "not-indexed", $"{repo} is not indexed by Engram — kept as a session note");
+    }
+
+    [Fact]
+    public void ScopeProject_FromASubdirectoryNeverIndexed_NamesTheDirectoryAsGiven()
+    {
+        using var sandbox = new SandboxHome();
+        var sub = Path.Combine(Checkout(), "src");
+
+        var response = Remember(sandbox, "s1", "Something durable.", "project", sub);
+
+        AssertDegraded(sandbox, response, "not-indexed", $"{sub} is not indexed by Engram — kept as a session note");
+    }
+
+    [Theory]
+    [InlineData("Don't edit the schema by hand.", "Don’t edit the schema by hand.")]
+    [InlineData("Do-not edit the schema by hand.", "do not edit the schema by hand")]
+    public void ScopeProject_TwoSpellingsOfOnePath_GetOnePredicate_AndTheSecondIsARepeat(string first, string second)
+    {
+        using var sandbox = new SandboxHome();
+        var repo = IndexedCheckout(sandbox);
+
+        var a = HandleOf(Remember(sandbox, "s1", first, "project", repo));
+        var b = HandleOf(Remember(sandbox, "s1", second, "project", repo));
+
+        Assert.Equal(a, b);
+        var note = Assert.Single(Facts(sandbox));
+        Assert.Equal("warns", note.Predicate);
+    }
+
+    [Fact]
+    public void Supersedes_WithAScope_SaysTheScopeWasIgnored()
+    {
+        using var sandbox = new SandboxHome();
+        var repo = IndexedCheckout(sandbox);
+        var capture = Capture(sandbox, "I prefer tabs over spaces.");
+
+        var response = EngramMcpTools.Remember(
+            sandbox.Home, new McpSessionId("s1"), Initialized, new LocalRuntime(sandbox.Home), "The user prefers tabs.",
+            supersedes: capture, scope: "project", project_dir: repo);
+
+        Assert.StartsWith("[f", response, StringComparison.Ordinal);
+        Assert.EndsWith("\nscope ignored — a revision keeps the original's address", response, StringComparison.Ordinal);
+        Assert.DoesNotContain(Facts(sandbox), fact => fact.Scope == "project");
+    }
+
+    [Fact]
+    public void Supersedes_WithoutAScope_CarriesNoNotice()
+    {
+        using var sandbox = new SandboxHome();
+        var repo = IndexedCheckout(sandbox);
+        var capture = Capture(sandbox, "I prefer tabs over spaces.");
+
+        var response = EngramMcpTools.Remember(
+            sandbox.Home, new McpSessionId("s1"), Initialized, new LocalRuntime(sandbox.Home), "The user prefers tabs.",
+            supersedes: capture, project_dir: repo);
+
+        Assert.Equal($"[{HandleOf(response)}] replaced capture [{capture}]: \"The user prefers tabs.\"", response);
     }
 
     [Fact]
@@ -164,7 +222,7 @@ public sealed class ProjectNotesTests : IDisposable
 
         var response = Remember(sandbox, "s1", "Something durable.", "project", repo);
 
-        AssertDegraded(sandbox, response, "not-indexed", $"{CodeIndexer.ResolveRoot(repo)} is not indexed by Engram — kept as a session note");
+        AssertDegraded(sandbox, response, "not-indexed", $"{repo} is not indexed by Engram — kept as a session note");
     }
 
     [Theory]
@@ -290,6 +348,13 @@ public sealed class ProjectNotesTests : IDisposable
         EngramMcpTools.Remember(
             sandbox.Home, new McpSessionId(session), Initialized, new LocalRuntime(sandbox.Home), statement,
             agent: agent, scope: scope, project_dir: projectDir);
+
+    private static string Capture(SandboxHome sandbox, string text)
+    {
+        using var connection = Open(sandbox);
+        var id = UserFacts.Capture(connection, UserFactTopic.AboutYou, text, "s1", DateTimeOffset.UtcNow)!.Value;
+        return FactCatalog.HandleFor(id);
+    }
 
     private static int CountGit(Action action)
     {

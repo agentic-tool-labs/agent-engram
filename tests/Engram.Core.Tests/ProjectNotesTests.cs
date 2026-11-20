@@ -29,6 +29,8 @@ public class ProjectNotesTests
     [InlineData("Do not open the database in file-touched", "warns")]
     [InlineData("Don't widen NoWarn", "warns")]
     [InlineData("dont widen NoWarn", "warns")]
+    [InlineData("Don’t widen NoWarn", "warns")]
+    [InlineData("Do-not widen NoWarn", "warns")]
     [InlineData("You must not push to main", "warns")]
     [InlineData("This is a trap", "warns")]
     [InlineData("GOTCHA: pooling hides the extension", "warns")]

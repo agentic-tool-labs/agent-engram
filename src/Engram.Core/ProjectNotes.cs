@@ -32,12 +32,20 @@ public static partial class ProjectNotes
         "/projects/" + project + "/notes/" + FactStore.Fingerprint(statement, FingerprintBytes);
 
     /// <summary>The closed predicate set, first match wins: <c>warns</c>, <c>decided</c>, else <c>holds</c>.</summary>
-    public static string PredicateFor(string statement) =>
-        WarnsCue().IsMatch(statement) ? "warns"
-        : DecidedCue().IsMatch(statement) ? "decided"
-        : "holds";
+    /// <remarks>
+    /// Matched on <see cref="FactStore.Normalize"/>'s form, the one the path is hashed from, so a
+    /// path always carries one predicate and the repeat rule holds: "don't" and "don’t" both read
+    /// "don t", and "Do-not" reads "do not".
+    /// </remarks>
+    public static string PredicateFor(string statement)
+    {
+        var normalized = FactStore.Normalize(statement);
+        return WarnsCue().IsMatch(normalized) ? "warns"
+            : DecidedCue().IsMatch(normalized) ? "decided"
+            : "holds";
+    }
 
-    [GeneratedRegex(@"\b(never|do not|don'?t|must not|trap|gotcha|breaks)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\b(never|do not|don ?t|must not|trap|gotcha|breaks)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex WarnsCue();
 
     [GeneratedRegex(@"\b(decided|chose|rejected)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
@@ -50,7 +58,7 @@ public static partial class ProjectNotes
     /// <remarks>
     /// <see cref="ProjectUnresolved.GitUnknown"/> is not produced yet: <see cref="CodeIndexer.ResolveIdentity"/>
     /// falls back to the root path when git cannot answer, which then finds no row and reads as
-    /// <see cref="ProjectUnresolved.NotIndexed"/>.
+    /// <see cref="ProjectUnresolved.NotIndexed"/>. It is enabled and tested after eng-34 (PR #16).
     /// </remarks>
     public static ProjectResolution Resolve(SqliteConnection connection, string? projectDir)
     {
@@ -103,7 +111,7 @@ public static partial class ProjectNotes
         ProjectUnresolved.BadDir => "project_dir is not an existing absolute directory — kept as a session note",
         ProjectUnresolved.NotCheckout => $"{projectDir} is not in a git checkout — kept as a session note",
         ProjectUnresolved.GitUnknown => $"could not ask git about {resolution.Root} — kept as a session note",
-        ProjectUnresolved.NotIndexed => $"{resolution.Root} is not indexed by Engram — kept as a session note",
+        ProjectUnresolved.NotIndexed => $"{projectDir} is not indexed by Engram — kept as a session note",
         _ => throw new ArgumentOutOfRangeException(nameof(resolution)),
     };
 

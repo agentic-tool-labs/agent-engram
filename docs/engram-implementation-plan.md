@@ -6207,7 +6207,12 @@ afterwards. With a resolved project it lands at `/projects/<p>/notes/<fp64>`, en
 scope `project`, `learned_via observed` (D19). Its predicate comes from a fixed cue match, first
 match wins: `warns` for `never`, `do not`, `don't`, `must not`, `trap`, `gotcha` or `breaks` as
 whole words in any case; `decided` for `decided`, `chose` or `rejected`; else `holds`. The
-predicate is display and FTS text, and the path carries uniqueness. The accepted scopes come from
+predicate is display and FTS text, and the path carries uniqueness. **The cues match
+`FactStore.Normalize`'s form, the same text the fingerprint hashes**, so one path always carries
+one predicate. Matched on raw text, "don't" (warns) and "don’t" (curly apostrophe: holds), or
+"Do-not" and "do not", shared a path under two predicates. The repeat check is path plus
+predicate, so the second write became a second live fact at the same address. `don't` is spelled
+`don ?t` in the normalized form. The accepted scopes come from
 `MemoryScopes.Writable` (session, project); `agent` joins at P5. Any other value is an error naming
 them, and nothing is written. The mod `remember` op is unchanged and always writes a session note.
 
@@ -6224,7 +6229,9 @@ own `project_dir`:
 
 Enrollment is not consulted. The project is an address, not indexing consent, and only a live
 registry row knows the slug. Minting one here would be a second minting path beside `EnsureRepo`.
-A linked worktree resolves to its main checkout's project through the shared origin identity.
+A linked worktree resolves to its main checkout's project through the shared origin identity. That
+is a stated limit: in a repo with no `origin`, the identity is the toplevel path, a worktree's
+toplevel is its own, and a note from there reads as `not-indexed`.
 `session.repo_path` stays unwritten, because nothing reads it. Nothing at session start changed:
 `MaintenanceLauncherTests` pins the script byte for byte.
 
@@ -6234,7 +6241,14 @@ carries the same reason as a closed code (`no-dir`, `bad-dir`, `not-checkout`, `
 `not-indexed`), so the adoption question can be split from the resolution one. `scope` is recorded
 only when a project note was actually written. `git-unknown` is reserved and not yet produced:
 before eng-34, `ResolveIdentity` falls back to the root path when git cannot answer, which then
-finds no row and reads as `not-indexed`.
+finds no row and reads as `not-indexed`. That outcome row is enabled and tested in a follow-up after
+eng-34 (PR #16) merges. Until then, the `not-indexed` notice names `project_dir` as the call gave
+it, not a root git may have failed to find, so a subdirectory is never reported as unindexed on the
+strength of a failed lookup.
+
+A `scope` passed with `supersedes` is not applied, because a restatement keeps the capture's
+address. The response says so in one line ("scope ignored — a revision keeps the original's
+address") rather than reading as obeyed.
 
 **Why the leaf is 64 bits.** `FactStore.Fingerprint` keeps 4 bytes. Under `/sessions/<id>/` a
 collision is harmless, because the session segment separates the paths. A shared namespace has no
@@ -6283,6 +6297,6 @@ counts in brackets:
 21. a notice on every remember [1]
 22. no `[project <p>]` echo [2]
 
-The relative-path half of `bad-dir` cannot be reddened on its own. A relative path that does not
-exist is also caught by `Directory.Exists`, so that half of the guard rests on the theory row
-alone.
+The relative-path half of `bad-dir` is held by `"."`, which exists relative to the process's
+working directory. It therefore passes `Directory.Exists` and reaches the `IsPathFullyQualified`
+guard on its own.
