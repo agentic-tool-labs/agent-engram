@@ -6976,7 +6976,7 @@ live copy of a belief forgotten in the second it was stated.
 arrived later in the same import, and never wrote the edge's `supersession` row. A pointer with no
 row is journalled with `reason = null`, and a later replay's `Link` then invents "replayed from the
 fact journal". When the backfill's update moves a pointer from NULL to an id, it now writes the
-same row `ApplyClose` writes, through one shared `InsertSyncedEdge`: reason "synced from another
+same row `ApplyClose` writes, through one shared `InsertSupersession`: reason "synced from another
 machine", `created_at` = the record's `valid_to`, `ON CONFLICT DO NOTHING`. Nothing is written when
 the update touches no row. E-b confirmed both gaps on ad6f965: a synced forget and a backfilled
 edge each had 0 rows.
@@ -6992,16 +6992,22 @@ nothing. A no-successor close may be a lost pointer rather than a forget, and st
 the source never had is what D99 forbids. Old binaries ignore the key, old chunks carry none, and
 both import as before.
 
+A machine can first see a fact line and its close in the same import. In that case
+`MergeSameBatchClosesIntoFactLines` folds the close into the line instead of applying it. The fold
+copies the close's `reason` into the line when there is one, and never adds one. Replay's own
+retraction branch (D99) then writes the row. Before this, that path left a forget with no row: the
+fold copied only `valid_to` and `superseded_by`. This was found during implementation and the
+Orchestrator ruled it in.
+
 **Known limits.**
 - A deferred close loses its reason. `sync_deferred_close` has no column for it, so a retraction
   that is deferred and applied on a later retry lands with no row. Adding the column is a migration
   (U-b2) and is not built.
-- `MergeSameBatchClosesIntoFactLines` folds a close into the fact line, writing `valid_to` and
-  `superseded_by` but not `reason`. That covers a forget whose fact line and close reach a machine
-  in one batch. Such a forget still lands with no row. The spec does not cover this path; it was
-  reported, not built.
 - `LookupExact`, `TryResolveSuccessorId` and the backfill's own subquery use the same key with no
-  liveness filter, so with an A/A′ pair present they may pick either row.
+  liveness filter, so with an A/A′ pair present they may pick either row. This was observed:
+  suppose the target already holds a closed duplicate of a synced fact, its pointer set, closed in
+  the second it began. The backfill's subquery reaches that duplicate, touches nothing, and leaves
+  the live copy it should have linked closed with no pointer and no row.
 
 **Falsified against a committed tree** (each patch confirmed by `git diff --quiet`, then restored):
 - Rule 6 broken, with pairing re-read per record during pass 1 so it sees this replay's inserts:
@@ -7014,6 +7020,10 @@ both import as before.
 - `reason` not emitted: the retraction test reddens.
 - `reason` ignored on apply: the retraction test reddens.
 - A reason invented when absent: the three no-usable-reason cases and row 3 redden.
+- The fold drops the reason: the same-batch forget test reddens.
+- The fold invents one: the same-batch no-reason test reddens.
+- The backfill inserts into whatever row its key lookup reaches, whether or not the update moved a
+  pointer: the pointer-already-set test reddens.
 
 **F-c tripwire.** `supersession.evidence` is not journalled and is not being journalled. Its only
 writer, `Remember`'s supersede branch, stores the same value as the superseding fact's
