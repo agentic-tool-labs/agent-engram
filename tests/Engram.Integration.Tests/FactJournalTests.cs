@@ -901,6 +901,374 @@ public sealed class FactJournalTests
         Assert.Equal(2, FactRowCountFor(rebuilt, "/project/dup2", "an ambiguous closed belief"));
     }
 
+    // ---- D99: a forgotten fact keeps its retraction, and only in a row this replay inserted ----
+
+    private const string Gone = "/project/forgotten";
+    private const string GoneBody = "a belief later forgotten";
+
+    private static JournalFact Record(
+        long id, string body, DateTimeOffset validFrom, DateTimeOffset? validTo, long? supersededBy, string? reason,
+        string path = Gone) =>
+        new(id, path, "note", "states", body, null, null, "project", "stated", false, null,
+            validFrom.ToUnixTimeSeconds(), validTo?.ToUnixTimeSeconds(), supersededBy, reason,
+            validFrom.ToUnixTimeSeconds());
+
+    private static JournalFact Retraction(long id = 1, string body = GoneBody) =>
+        Record(id, body, T0, T0.AddHours(1), supersededBy: null, reason: "no longer true");
+
+    private static void SeedRetractionRow(SqliteConnection connection, long oldFactId, DateTimeOffset at, string reason)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            INSERT INTO supersession (old_fact_id, new_fact_id, reason, created_at)
+            VALUES ($old, NULL, $reason, $createdAt);
+            """;
+        command.Parameters.AddWithValue("$old", oldFactId);
+        command.Parameters.AddWithValue("$reason", reason);
+        command.Parameters.AddWithValue("$createdAt", at.ToUnixTimeSeconds());
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>Every column of every fact and supersession row, so "untouched" means untouched (I1).</summary>
+    private static string Snapshot(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT 'f', id, subject_id, predicate, body, object_id, path, scope, learned_via, regenerable,
+                   evidence, session_id, valid_from, valid_to, superseded_by, created_at, details, analyzer_tier
+              FROM fact
+            UNION ALL
+            SELECT 's', old_fact_id, new_fact_id, reason, evidence, session_id, created_at,
+                   NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+              FROM supersession
+            ORDER BY 1, 2;
+            """;
+        using var reader = command.ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read())
+        {
+            var cells = new string[reader.FieldCount];
+            for (var i = 0; i < cells.Length; i++)
+            {
+                cells[i] = reader.IsDBNull(i) ? "∅" : Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture)!;
+            }
+
+            rows.Add(string.Join('|', cells));
+        }
+
+        return string.Join('\n', rows);
+    }
+
+    private sealed record SupersessionRow(long? NewFactId, string Reason, string? Evidence, long? SessionId, long CreatedAt);
+
+    private static IReadOnlyList<SupersessionRow> SupersessionRowsFor(SqliteConnection connection, long oldFactId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT new_fact_id, reason, evidence, session_id, created_at FROM supersession WHERE old_fact_id = $id;";
+        command.Parameters.AddWithValue("$id", oldFactId);
+        using var reader = command.ExecuteReader();
+        var rows = new List<SupersessionRow>();
+        while (reader.Read())
+        {
+            rows.Add(new SupersessionRow(
+                reader.IsDBNull(0) ? null : reader.GetInt64(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                reader.GetInt64(4)));
+        }
+
+        return rows;
+    }
+
+    private static long FactIdFor(SqliteConnection connection, string path, string body, DateTimeOffset validFrom)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT f.id FROM fact f JOIN entity e ON e.id = f.subject_id
+            WHERE e.path = $path AND f.body = $body AND f.valid_from = $validFrom;
+            """;
+        command.Parameters.AddWithValue("$path", path);
+        command.Parameters.AddWithValue("$body", body);
+        command.Parameters.AddWithValue("$validFrom", validFrom.ToUnixTimeSeconds());
+        return (long)command.ExecuteScalar()!;
+    }
+
+    /// <summary>
+    /// N1, from a real <c>Forget</c> through a real journal: the retraction comes back with the
+    /// forget's reason and time, and nothing else. Fails on the code before D99 — pass 2 only acted
+    /// on records with a superseder, so the fact came back closed with no account of why.
+    /// </summary>
+    [Fact]
+    public void Replay_OfAForgottenFact_RecreatesItsRetraction()
+    {
+        using var source = new SandboxHome(initialize: false);
+        using (var connection = EngramDatabase.OpenInitialized(source.Home))
+        {
+            var id = Write(connection, Gone, GoneBody, T0);
+            Assert.True(FactStore.Forget(connection, id, "no longer true", T0.AddHours(1)));
+            FactJournal.Write(connection, source.Home, T0.AddHours(2), BackupScope.Full);
+        }
+
+        var facts = Reread(source.Home);
+        var record = Assert.Single(facts);
+        Assert.Null(record.SupersededBy);
+        Assert.Equal("no longer true", record.SupersessionReason);
+
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var result = FactJournal.Replay(rebuilt, facts, apply: true);
+
+        Assert.Equal(new ReplayResult(1, 0, 0, 0), result);
+        var factId = FactIdFor(rebuilt, Gone, GoneBody, T0);
+        Assert.Equal(T0.AddHours(1).ToUnixTimeSeconds(), ValidToOf(rebuilt, factId));
+        Assert.Null(SupersededByOf(rebuilt, factId));
+        Assert.False(HasTokenRow(rebuilt, factId));
+        var row = Assert.Single(SupersessionRowsFor(rebuilt, factId));
+        Assert.Equal(new SupersessionRow(null, "no longer true", null, null, T0.AddHours(1).ToUnixTimeSeconds()), row);
+        Assert.Equal(1, SupersessionRowCount(rebuilt));
+    }
+
+    /// <summary>N2 / I4: a second replay is a fixed point — one retraction row, nothing counted twice.</summary>
+    [Fact]
+    public void Replay_OfARetractionTwice_LeavesExactlyOneRetractionRow()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var facts = new List<JournalFact> { Retraction() };
+
+        FactJournal.Replay(rebuilt, facts, apply: true);
+        var before = Snapshot(rebuilt);
+        var again = FactJournal.Replay(rebuilt, facts, apply: true);
+
+        Assert.Equal(new ReplayResult(0, 1, 0, 0), again);
+        Assert.Equal(1, SupersessionRowCount(rebuilt));
+        Assert.Equal(before, Snapshot(rebuilt));
+    }
+
+    /// <summary>N3: the target still believes it. Never closed (D32); counted as not recovered.</summary>
+    [Fact]
+    public void Replay_OfARetractionTheTargetStillBelieves_LeavesItLiveAndCountsAConflict()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var liveId = SeedRawFact(rebuilt, Gone, "states", GoneBody, T0);
+        var before = Snapshot(rebuilt);
+
+        var result = FactJournal.Replay(rebuilt, [Retraction()], apply: true);
+
+        Assert.Equal(new ReplayResult(0, 1, 0, 1), result);
+        Assert.Null(ValidToOf(rebuilt, liveId));
+        Assert.True(HasTokenRow(rebuilt, liveId));
+        Assert.Equal(before, Snapshot(rebuilt));
+    }
+
+    /// <summary>N4: already retracted, for its own reason. Not overwritten, nothing more counted.</summary>
+    [Fact]
+    public void Replay_OfARetractionTheTargetAlreadyRecorded_KeepsTheTargetsReason()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var closedId = SeedRawFact(rebuilt, Gone, "states", GoneBody, T0, validTo: T0.AddHours(1));
+        SeedRetractionRow(rebuilt, closedId, T0.AddHours(1), "the target's own reason");
+        var before = Snapshot(rebuilt);
+
+        var result = FactJournal.Replay(rebuilt, [Retraction()], apply: true);
+
+        Assert.Equal(new ReplayResult(0, 1, 0, 0), result);
+        Assert.Equal("the target's own reason", Assert.Single(SupersessionRowsFor(rebuilt, closedId)).Reason);
+        Assert.Equal(before, Snapshot(rebuilt));
+    }
+
+    /// <summary>
+    /// N5 / U1: closed with no account — the shape an older binary's replay left. No backfill: this
+    /// row is structurally identical to one the target closed without explanation, and only
+    /// provenance could tell them apart (D68). Visible as a conflict rather than silent. Proved to
+    /// fail by swapping the provenance test for the row-state predicate (backfill appears).
+    /// </summary>
+    [Fact]
+    public void Replay_OfARetractionIntoAClosedRowWithNoAccount_DoesNotBackfillAndCountsAConflict()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        SeedRawFact(rebuilt, Gone, "states", GoneBody, T0, validTo: T0.AddHours(1));
+        var before = Snapshot(rebuilt);
+
+        var result = FactJournal.Replay(rebuilt, [Retraction()], apply: true);
+
+        Assert.Equal(new ReplayResult(0, 1, 0, 1), result);
+        Assert.Equal(0, SupersessionRowCount(rebuilt));
+        Assert.Equal(before, Snapshot(rebuilt));
+    }
+
+    /// <summary>N6: the target says a replacement closed it. Its account stands (D68).</summary>
+    [Fact]
+    public void Replay_OfARetractionIntoARowTheTargetSaysWasReplaced_LeavesTheEdgeAndCountsAConflict()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var replacementId = SeedRawFact(rebuilt, Gone, "states", "what replaced it", T0.AddHours(1));
+        var closedId = SeedRawFact(
+            rebuilt, Gone, "states", GoneBody, T0, validTo: T0.AddHours(1), supersededBy: replacementId);
+        SeedSupersession(rebuilt, closedId, replacementId, T0.AddHours(1));
+        var before = Snapshot(rebuilt);
+
+        var result = FactJournal.Replay(rebuilt, [Retraction()], apply: true);
+
+        Assert.Equal(new ReplayResult(0, 1, 0, 1), result);
+        Assert.Equal(replacementId, Assert.Single(SupersessionRowsFor(rebuilt, closedId)).NewFactId);
+        Assert.Equal(before, Snapshot(rebuilt));
+    }
+
+    /// <summary>N7: several closed duplicates and none live — no row to address, so nothing to say.</summary>
+    [Fact]
+    public void Replay_OfARetractionMatchingAnAllClosedAmbiguousPair_WritesAndConflictsNothing()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        SeedRawFact(rebuilt, Gone, "states", GoneBody, T0, validTo: T0.AddHours(1));
+        SeedRawFact(rebuilt, Gone, "states", GoneBody, T0, validTo: T0.AddHours(2));
+        var before = Snapshot(rebuilt);
+
+        var result = FactJournal.Replay(rebuilt, [Retraction()], apply: true);
+
+        Assert.Equal(new ReplayResult(0, 1, 0, 0), result);
+        Assert.Equal(before, Snapshot(rebuilt));
+    }
+
+    /// <summary>
+    /// N8 / I2: a superseder that is not in the journal is a lost pointer, not a retraction — a NULL
+    /// row there would turn a replacement into a forget.
+    /// </summary>
+    [Fact]
+    public void Replay_OfAFactWhoseSupersederIsMissing_WritesNoRetraction()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var facts = new List<JournalFact>
+        {
+            Record(1, GoneBody, T0, T0.AddHours(1), supersededBy: 99, reason: "superseded by a newer statement"),
+        };
+
+        var result = FactJournal.Replay(rebuilt, facts, apply: true);
+
+        Assert.Equal(new ReplayResult(1, 0, 1, 0), result);
+        Assert.Equal(0, SupersessionRowCount(rebuilt));
+    }
+
+    /// <summary>N9 / I2: a resolvable superseder still gets Link's edge, and only that.</summary>
+    [Fact]
+    public void Replay_OfAResolvableSupersession_WritesTheEdgeNotARetraction()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var facts = new List<JournalFact>
+        {
+            Record(1, GoneBody, T0, T0.AddHours(1), supersededBy: 2, reason: "revised"),
+            Record(2, "what replaced it", T0.AddHours(1), null, null, null),
+        };
+
+        var result = FactJournal.Replay(rebuilt, facts, apply: true);
+
+        Assert.Equal(new ReplayResult(2, 0, 0, 0), result);
+        var oldId = FactIdFor(rebuilt, Gone, GoneBody, T0);
+        var newId = FactIdFor(rebuilt, Gone, "what replaced it", T0.AddHours(1));
+        Assert.Equal(newId, Assert.Single(SupersessionRowsFor(rebuilt, oldId)).NewFactId);
+        Assert.Equal(1, SupersessionRowCount(rebuilt));
+    }
+
+    /// <summary>
+    /// N10 / I3: closed with no reason means the source had no supersession row either. Replay
+    /// must not invent an account the source never had.
+    /// </summary>
+    [Fact]
+    public void Replay_OfAClosedFactWithNoReason_InventsNoRetraction()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var facts = new List<JournalFact> { Record(1, GoneBody, T0, T0.AddHours(1), null, null) };
+
+        var result = FactJournal.Replay(rebuilt, facts, apply: true);
+
+        Assert.Equal(new ReplayResult(1, 0, 0, 0), result);
+        Assert.NotNull(ValidToOf(rebuilt, FactIdFor(rebuilt, Gone, GoneBody, T0)));
+        Assert.Equal(0, SupersessionRowCount(rebuilt));
+    }
+
+    private static List<JournalFact> ForgottenThenRestated() =>
+    [
+        Retraction(1),
+        Record(2, GoneBody, T0.AddHours(2), null, null, null),
+    ];
+
+    /// <summary>N12: forgotten, then said again later. The closed one keeps its retraction; the restatement is live.</summary>
+    [Fact]
+    public void Replay_OfAForgottenThenRestatedFact_KeepsBoth()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+
+        var result = FactJournal.Replay(rebuilt, ForgottenThenRestated(), apply: true);
+
+        Assert.Equal(new ReplayResult(2, 0, 0, 0), result);
+        var oldId = FactIdFor(rebuilt, Gone, GoneBody, T0);
+        var restatedId = FactIdFor(rebuilt, Gone, GoneBody, T0.AddHours(2));
+        Assert.Null(Assert.Single(SupersessionRowsFor(rebuilt, oldId)).NewFactId);
+        Assert.Null(ValidToOf(rebuilt, restatedId));
+        Assert.Empty(SupersessionRowsFor(rebuilt, restatedId));
+    }
+
+    /// <summary>N13: the same journal against an older store that still believes the first statement.</summary>
+    [Fact]
+    public void Replay_OfAForgottenThenRestatedFact_IntoAStoreStillBelievingTheFirst_TouchesNothing()
+    {
+        using var target = new SandboxHome(initialize: false);
+        using var rebuilt = EngramDatabase.OpenInitialized(target.Home);
+        var liveId = SeedRawFact(rebuilt, Gone, "states", GoneBody, T0);
+        var before = Snapshot(rebuilt);
+
+        var result = FactJournal.Replay(rebuilt, ForgottenThenRestated(), apply: true);
+
+        Assert.Equal(new ReplayResult(0, 1, 0, 2), result);
+        Assert.Null(ValidToOf(rebuilt, liveId));
+        Assert.Equal(before, Snapshot(rebuilt));
+    }
+
+    /// <summary>
+    /// N14 / I5: the dry run keeps the pre-D99 counting exactly — retraction state is classified on
+    /// apply only, like D68's edges — and writes nothing, whatever the target holds.
+    /// </summary>
+    [Fact]
+    public void Replay_ADryRunOfRetractions_CountsWhatItAlwaysDidAndWritesNothing()
+    {
+        var facts = new List<JournalFact>
+        {
+            Retraction(1),
+            Retraction(2, "a second forgotten belief"),
+            Retraction(3, "a third forgotten belief"),
+        };
+
+        using var emptyHome = new SandboxHome(initialize: false);
+        using var empty = EngramDatabase.OpenInitialized(emptyHome.Home);
+        Assert.Equal(new ReplayResult(3, 0, 0, 0), FactJournal.Replay(empty, facts, apply: false));
+        Assert.Equal(0, FactRowCount(empty));
+        Assert.Equal(0, SupersessionRowCount(empty));
+
+        // Live (N3), closed with no account (N5), and one absent: the apply would count two conflicts.
+        using var heldHome = new SandboxHome(initialize: false);
+        using var held = EngramDatabase.OpenInitialized(heldHome.Home);
+        SeedRawFact(held, Gone, "states", GoneBody, T0);
+        SeedRawFact(held, Gone, "states", "a second forgotten belief", T0, validTo: T0.AddHours(1));
+        var before = Snapshot(held);
+
+        Assert.Equal(new ReplayResult(1, 2, 0, 0), FactJournal.Replay(held, facts, apply: false));
+        Assert.Equal(before, Snapshot(held));
+    }
+
     // §6.6, arm 1: a journal holding two live edges from one subject on one predicate replays with
     // both live and zero conflicts, and a second replay counts both AlreadyPresent with nothing
     // written.
