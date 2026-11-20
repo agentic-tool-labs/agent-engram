@@ -350,8 +350,13 @@ public class CompactDeletesTests
             Assert.DoesNotContain(entityPlan, line => line.StartsWith("SCAN fact", StringComparison.Ordinal));
 
             // With ix_fact_object_ref present the OR form also seeks, as a MULTI-INDEX OR, so the
-            // seeks above cannot tell it from the split; this line is what pins F2's two probes.
-            Assert.DoesNotContain(entityPlan, line => line.Contains("MULTI-INDEX OR", StringComparison.Ordinal));
+            // seeks above cannot tell it from the split; this is what pins F2's two probes: the
+            // subject and object seeks sit in different correlated subqueries. Not "no MULTI-INDEX
+            // OR" anywhere, since D97's range-form Subtree plans the entity path itself that way.
+            int Segment(string needle) =>
+                entityPlan.Take(entityPlan.FindIndex(line => line.Contains(needle, StringComparison.Ordinal)))
+                    .Count(line => line.StartsWith("CORRELATED", StringComparison.Ordinal));
+            Assert.NotEqual(Segment("ix_fact_thread (subject_id=?)"), Segment("ix_fact_object_ref (object_id=?)"));
         }
         finally
         {

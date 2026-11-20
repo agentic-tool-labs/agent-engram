@@ -6339,7 +6339,7 @@ in the dry run reddens N14; dropping the `superseded_by` condition reddens N8, N
 restatement in the same second share the identity key, so the live restatement matches the closed row
 and is never restored; `Sync.ApplyClose` with no superseder writes no `supersession` row; and
 `supersession.evidence` is never journalled.
-of scope here.
+
 ## D84 — Prior sessions are enumerated from `session`; a NULL-session note takes no label
 
 **Supersedes D81's choice of CTE form**, not its reasoning. `RecallRanker`'s `prior_sessions` is
@@ -6609,3 +6609,105 @@ the live store is unchanged, and a test holds it.
 pruning closed regenerable facts from it would remove exactly what that compact deletes. It still omits
 vectors. `Take` carries this as `keepClosedHistory`, which only `StoreCompactor` passes. `facts_closed` is
 absent from such a snapshot, so a restore names nothing as unrecoverable.
+## D97 — Retired registry paths are removed by compact, by hand or opt-in at session start
+
+**Problem.** D94 marks a superseded registry row retired and deletes nothing. What it left behind — on
+the real store 25 rows, 206,171 live and 22,510 closed regenerable facts, 110,324 entities, 25,705 file
+states, 122,684 vectors — stays until something removes it. The user asked for an automatic option as
+well as the manual verb (adr-3, 2026-11-19).
+
+**Rule 1: `engram compact --retired` is path mode applied to every retired row.** Dry run by default;
+`--apply` acts. It is the same `SelectTargets`, `EntitySql` (F4), F5 predicate, `FileStateSql` and
+`RegistrySql`, one implementation each. Every prefix's targets go into `temp.compact_target` before any
+entity, file-state or registry delete, because `EntitySql` looks through the target set. Manual apply is
+one `pre-compact` snapshot, one `BEGIN IMMEDIATE` transaction for the batch, one checkpoint and VACUUM,
+and it prints first that other sessions' writes will fail until it finishes. The report lists, per
+prefix and in total, facts pruned, protected, entities removed and kept for rename history, authored
+facts left in place (first 20 paths), file states, registry rows, vectors, and skipped rows with reasons.
+`repo_enrollment` is never touched.
+
+**Rule 2: a row is removed only after an apply-time re-check, split around the lock.** Before the
+transaction, because it shells out: the `disk_path` exists, git resolves it positively now, a
+non-detached row at the same checkout carries that identity, and that row's
+`last_scan_suppressed_reason` is NULL. Inside the transaction: the row is still detached and that winner
+still exists, so an `index` that un-retired it in between wins and nothing is deleted. A row that fails
+is reported "skipped: <reason>" and stays retired. Both modes use the same re-check.
+
+**Rule 3: `[indexing] auto_remove_retired = true` is a standing `--apply` the user typed.** Absent,
+`false` or unparseable means off; unparseable also lands in `Problems`, which doctor now reports for the
+`[indexing]` section. Nothing Engram ships or runs writes the key. Session start appends
+`compact --retired --apply --auto` to the chain after `index --freshen`, under the `maintenance` claim
+(D82); `--auto` makes the verb read the key and exit 0 silently when it is off, so the launcher reads
+nothing. `--auto` without `--apply`, with `--path`, or without `--retired` is a usage error (exit 2).
+
+**Rule 4: `--auto` removes one prefix per run, after 7 days, if it has at most 2,000 entities.** The
+oldest retirement first; a prefix over the cap is skipped for the next. One transaction, a passive
+checkpoint, no VACUUM. A run that removes nothing takes no snapshot and records no telemetry. A
+transaction that held the write lock longer than 2 s still commits, and its `finished` record carries
+`over_budget: true`. These bounds are what keep "Anything destructive is dry-run first" (D49): the flag
+is the user's, every row is shown by doctor and the dry run for 7 days first, and only regenerable rows
+go, behind a snapshot.
+
+**Why one prefix, measured.** E6, on a copy of the real store with all 25 prefixes in per-prefix
+transactions: 36.5 s of transactions, 574 ms to 3,832 ms each, and **6 of 6** concurrent `BEGIN
+IMMEDIATE` writers (busy_timeout 5000) failed `database is locked` at about 5.4 s. The lock was free for
+0.1 ms between transactions, and a writer sleeping in its busy handler never lands in that window. So
+per-prefix transactions bounded each transaction and not the run. A sleep between prefixes would have to
+beat SQLite's busy-handler schedule; a time budget bounds the run, not any writer's wait. **That copy was
+in rollback-journal mode, not WAL**: `VACUUM INTO` writes its output that way, and the real store is WAL
+(schema line 18). Re-run on a WAL copy, the same 25 back-to-back transactions failed 0 of 16 writes, but
+the longest waited 4,822 ms against a 5,000 ms busy_timeout — a near miss rather than a margin, so the
+rule stands on the WAL number. A measurement made on a copy has to check the copy's journal mode first.
+
+**Why entities, measured.** E7 fitted each removal's delete phase: vectors R² 0.965, entities 0.929,
+facts 0.770, file states 0.232. Fact count does not even order cost — 10,726 facts took 917 ms and 6,487
+took 1,737 ms. Entities over vectors because doctor can count them through `entity.path` without a fact
+scan, so the verb and doctor share `StoreCompactor.EntitiesUnder` and cannot disagree. The fit puts 2,000
+at about 0.56 s. The D92 `agent-tools-2` outlier holds 36,522 entities for 15,261 facts (2.4 per fact,
+against 0.19 in `wrangl-3`); the entity fit predicts about 6.2 s for it, close to the 7.31 s measured,
+but over-predicts `wrangl-3`, so it is partly explained and no more.
+
+**Rule 5: `Subtree` is an equality and two byte ranges, and path mode lets the path index serve it.**
+`[$p/, $p0)` and `[$p#, $p$)` mean what the `substr` form meant under BINARY collation, and an index on
+the column can serve them. The range form alone changed nothing measurable: with `regenerable = 1 AND`
+in front and no `sqlite_stat1`, the planner still took `ix_fact_regenerable` and walked every
+regenerable fact (smallest prefix 144–147 ms against 144–160 ms before, sqlite3 CLI, process floor
+about 22 ms). Path mode's selection and protected count therefore share one predicate with
+`+regenerable = 1`, the remedy D92 used for `PruneIneligible`: 21.6–22.8 ms, `agent-tools-3` 29.3
+against 141.7 ms. `EntitySql` had the same shape through `ix_entity_kind` and gets `+kind` on the same
+evidence: 78–104 ms against 23–27 ms. Closed mode keeps the plain form. A tier-2 test pins both plans.
+Equivalence was measured on the real-store copy: every compact mode's dry run (`--retired`, no path,
+one `--path`, and the root — old `//` against new `/`) printed byte-identical output under the old and
+new SQL. The `--retired` dry run went 13.5 s → 2.7 s; the root dry run read 1.67 → 2.03 s on one
+sample, since there the path index covers every row.
+
+**Rule 6: `compact --path /` is the whole code index.** Normalisation lives in one place,
+`StoreCompactor.NormalizePath`: trailing `/` stripped, empty becomes `/`, a path not starting with `/` (or
+empty) is a usage error, exit 2. The root binds as the empty string, which makes every boundary
+predicate read "every path starting with `/`" — a parameter form, not a second definition of "under".
+Before, `/` matched only `//…` paths and `//` silently meant everything; both now mean the root.
+
+**Telemetry.** New kind `retired-removal`: `started`, one `removed` per prefix with `repo` = the removed
+`repo_path`, then `finished` or `failed`; every record carries `trigger: auto|manual`, never a count. A
+dry run emits nothing. It is in `TelemetryEventKind.All`.
+
+**Doctor.** Key off: Warn with the residue count, `-> engram compact --retired`, and the key named as an
+option. Key on: Ok "removed automatically after <date>" while inside grace; Warn "too large to remove
+automatically" over the cap whatever the grace, since `--auto` will never take it and an Ok would be false
+for seven days; Warn "automatic removal has not run" strictly more than a day past grace.
+A row whose checkout is absent here is Ok "kept: checkout not on this machine", never Warn. Doctor does
+not read telemetry, so `over_budget` is telemetry-only.
+
+**The envelope, measured (E8).** On a WAL copy with a server on its own port taking an `engram_remember`
+every 100 ms over MCP, twelve automatic runs removed one prefix each, oldest first, then the thirteenth
+removed nothing: 13 of the 25 prefixes are over the cap (2,278 to 19,719 entities) and are the manual
+verb's. Every transaction took 388–607 ms; 536 writes, none failed, the slowest 673 ms. On a rollback
+copy the same runs failed nothing either, but one write per run waited 3.0–4.8 s on the snapshot's
+`VACUUM INTO`, which blocks writers there and not under WAL.
+
+**Sync scope.** The dry run notes a configured `[sync]` `repo:` scope that resolves today and would
+resolve to nothing once the eligible prefixes are gone, by asking `SyncScope.ResolveRepo` — the resolver
+`sync export` uses — over the registry before and after, so the note and the export cannot disagree.
+
+**The in-lock re-check repeats the suppression test**, not only "still retired, winner still there": a
+truncated scan landing between the git check and `BEGIN IMMEDIATE` keeps the row.

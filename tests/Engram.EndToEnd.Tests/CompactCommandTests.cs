@@ -44,8 +44,49 @@ public class CompactCommandTests
 
         var (exitCode, _, stderr) = EngramProcess.Run(home.Root, "compact", "--path", "src/Auth.cs");
 
-        Assert.Equal(1, exitCode);
-        Assert.Contains("rooted memory path", stderr, StringComparison.Ordinal);
+        Assert.Equal(2, exitCode);
+        Assert.Contains("a path starts with /", stderr, StringComparison.Ordinal);
+    }
+
+    /// <summary>D97: the job session start appends must exist and be a silent no-op with the key off.</summary>
+    [Fact]
+    public void Compact_RetiredApplyAuto_WithTheKeyOff_IsSilent()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+
+        var (exitCode, stdout, stderr) = EngramProcess.Run(home.Root, "compact", "--retired", "--apply", "--auto");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(string.Empty, stdout);
+        Assert.Equal(string.Empty, stderr);
+    }
+
+    [Fact]
+    public void Compact_AutoWithoutApply_ExitsTwo()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+
+        var (exitCode, _, stderr) = EngramProcess.Run(home.Root, "compact", "--retired", "--auto");
+
+        Assert.Equal(2, exitCode);
+        Assert.Contains("--auto needs --apply", stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compact_RetiredDryRun_OnAFreshStore_FindsNothing()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+
+        var (exitCode, stdout, _) = EngramProcess.Run(home.Root, "compact", "--retired");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Dry run only — nothing to remove.", stdout, StringComparison.Ordinal);
     }
 
     [Fact]
