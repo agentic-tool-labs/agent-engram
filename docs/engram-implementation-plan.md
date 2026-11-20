@@ -6619,7 +6619,8 @@ loaded runs as high as ~1000, so read the loaded numbers as a stress range, not 
 Alone, every test passed 10/10 idle and 10/10 loaded. Only the shared-host runs reproduced anything,
 which is the first finding: **these tests fail because of their neighbours, not because of the hook.**
 
-**`FileTouched_CompletesInUnder100Milliseconds` is relative now.** It asserts median(hook) −
+**`FileTouched_CompletesInUnder100Milliseconds` is relative now, and is renamed
+`FileTouched_AddsUnder50MillisecondsOverANoOp` for what it asserts.** It asserts median(hook) −
 median(no-op) < 50 ms over twenty interleaved pairs, alternating which arm goes first. Idle the hook
 median is ~10 ms. The five QA failures had medians of 110–300 ms, but their *fastest* runs were
 already 36–117 ms, four to twelve times the idle floor. What failed was the machine. D4 says the
@@ -6636,6 +6637,17 @@ allowance has 0.3 ms of headroom idle: the marginal cost is 0.54–0.90 ms, medi
 A real violation shifts every sample of every attempt, so it still fails all three. Raising the ratio
 was rejected: the planted open is 22% of the idle floor, so a 20% allowance would leave it two points
 to fail by, and the QA failures already reach 18.6%.
+
+**The allowance is also capped: max(1.0 ms, min(10% of floor, 1.25 ms)).** Planting the open showed
+that the ten percent had stopped guarding anything. Through the .NET test host the floor is
+**13.3–24.1 ms**, against ~9 ms from a Python spawner on the same binary, so the allowance came out at
+1.33–2.41 ms. The plant costs 1.53–2.83 ms, so it escaped whenever the floor rose past about 20 ms: it
+passed 9 of 13 committed runs. That was not new. The original single attempt passed the plant on 1 of
+5 logged first attempts, and best-of-three only gave it three chances. Clean costs 0.45–1.45 ms per
+attempt, and best-of-three takes the lowest. With the cap, the plant fails all three attempts in 5 of
+5 runs, at 2.21–5.78 ms against 1.25. The price is the scaling's original reason: a runner whose
+fastest-of-100 noise stays above 1.25 ms in all three attempts fails this. A macOS runner with a
+32.49 ms floor was once measured keeping 2.68 ms.
 
 **Every disposable home is removed by one implementation, `TestHome.RemoveTree`.**
 `InstallerTestHome` had its own single-shot recursive delete. That copy failed with "Directory not
@@ -6654,4 +6666,21 @@ message now reports the time since exit, `ThreadPool.ThreadCount` and
 `ThreadPool.PendingWorkItemCount`, which is what the next occurrence needs to settle it. Raising the
 bound hides nothing the 5 s bound caught. The leak it was named for, a detached chain holding the
 hook's pipe, lives about 0.2 s, far inside either bound, and `MaintenanceLauncherTests` is what
-guards that leak. A pipe held open forever still fails here.
+guards that leak. A pipe held open forever still fails here, at 30.0 s. The harness's own test,
+`AnExitedProcessWhosePipeIsStillHeld…`, used a `sleep 30` stub and a 15 s limit, which a 30 s bound
+can no longer tell apart from the holder exiting. It now uses a `sleep 120` stub, asserts the
+timeout comes in under 60 s, and checks the new message. That costs the suite 30 s.
+
+**The thirty-process session-start test no longer counts records; a deterministic test guards the
+budget instead.** The count asserted 100% delivery, which D56 rules out: a record that waits out its
+500 ms retry budget is dropped by design. Measured with thirty-process rounds, idle and under 18×
+`yes`: the clean binary lost 0 of 600 both times, yet the test once saw 28 of 30 during an
+integration QA run. The count was also a weak guard for the budget it stood in for. Planting
+`TimeSpan.Zero` on session start's append lost only 9 of 600 idle and 11 of 600 loaded, so a
+`lost ≤ 2` tripwire would have caught it in 3 of 8 test-length runs. The thirty-process test keeps
+only its every-line-parses assertion, which detects a torn record and does not depend on load.
+`SessionStart_WaitsOutABriefCollision_RatherThanDroppingItsRecord` holds `telemetry.jsonl` with
+`FileShare.None` for 200 ms while a session start runs, releases it, and asserts the session-start
+record landed. Inside the budget the retry gets the file. With the budget at zero the first attempt
+collides and the record is lost: red 5 of 5 under the plant, green 5 of 5 clean. It needs no product
+seam.
