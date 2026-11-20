@@ -19,6 +19,11 @@ public readonly record struct FactIdentity(string Subject, string Predicate, str
 /// never rewrites a row the target already has (D8), which is exactly why this exists as its own
 /// record kind rather than a second "fact" line.
 /// </summary>
+/// <param name="Reason">
+/// The origin's retraction reason — its NULL-new <c>supersession</c> row — for a close naming no
+/// successor. Null when the origin had no such row, and on every record written before it existed;
+/// a null is never replaced by an invented reason (D99).
+/// </param>
 public sealed record SyncCloseRecord(
     string Subject,
     string Predicate,
@@ -26,7 +31,8 @@ public sealed record SyncCloseRecord(
     long ValidFrom,
     long ValidTo,
     string? SupersededByBody,
-    long? SupersededByValidFrom);
+    long? SupersededByValidFrom,
+    string? Reason = null);
 
 /// <summary>One local row — live or closed — in the <c>(subject, predicate)</c> slot a close record names.</summary>
 public readonly record struct LocalFactRow(string Body, long ValidFrom, bool IsLive);
@@ -985,15 +991,16 @@ public static class Sync
     // fact lookups shared by export and import
     // ------------------------------------------------------------------
 
-    private readonly record struct ExactRow(bool IsLive, long ValidTo, long? SupersededById);
+    private readonly record struct ExactRow(bool IsLive, long ValidTo, long? SupersededById, string? RetractionReason);
 
     private static ExactRow? LookupExact(SqliteConnection connection, FactIdentity identity)
     {
         using var command = connection.CreateCommand();
         command.CommandText =
             """
-            SELECT f.valid_to IS NULL, f.valid_to, f.superseded_by FROM fact f
+            SELECT f.valid_to IS NULL, f.valid_to, f.superseded_by, s.reason FROM fact f
             JOIN entity e ON e.id = f.subject_id
+            LEFT JOIN supersession s ON s.old_fact_id = f.id AND s.new_fact_id IS NULL
             WHERE e.path = $subject AND f.predicate = $predicate AND f.body = $body AND f.valid_from = $validFrom;
             """;
         AddIdentityParameters(command, identity);
@@ -1006,7 +1013,8 @@ public static class Sync
         return new ExactRow(
             !reader.IsDBNull(0) && reader.GetInt64(0) != 0,
             reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-            reader.IsDBNull(2) ? null : reader.GetInt64(2));
+            reader.IsDBNull(2) ? null : reader.GetInt64(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3));
     }
 
     private static List<LocalFactRow> LookupSlotRows(SqliteConnection connection, SqliteTransaction? transaction, string subject, string predicate)
@@ -1049,9 +1057,11 @@ public static class Sync
             }
         }
 
+        // A reason only for a close naming no successor, and only the origin's own retraction row.
         return new SyncCloseRecord(
             identity.Subject, identity.Predicate, identity.Body, identity.ValidFrom,
-            row.ValidTo, supersededByBody, supersededByValidFrom);
+            row.ValidTo, supersededByBody, supersededByValidFrom,
+            supersededByBody is null ? row.RetractionReason : null);
     }
 
     /// <summary>
@@ -1122,12 +1132,13 @@ public static class Sync
         // a later replay's Link invents one. Nothing when the update touched no row.
         if (update.ExecuteScalar() is long factId)
         {
-            InsertSyncedEdge(connection, transaction, factId, successorId.Value, record.ValidTo);
+            InsertSupersession(connection, transaction, factId, successorId.Value, "synced from another machine", record.ValidTo);
         }
     }
 
-    /// <summary>The <c>supersession</c> row for an edge a sync close linked.</summary>
-    private static void InsertSyncedEdge(SqliteConnection connection, SqliteTransaction transaction, long oldId, long newId, long createdAt)
+    /// <summary>The <c>supersession</c> row for a fact a sync close closed or linked: an edge, or a retraction when <paramref name="newId"/> is null.</summary>
+    private static void InsertSupersession(
+        SqliteConnection connection, SqliteTransaction transaction, long oldId, long? newId, string reason, long createdAt)
     {
         using var supersession = connection.CreateCommand();
         supersession.Transaction = transaction;
@@ -1138,8 +1149,8 @@ public static class Sync
             ON CONFLICT(old_fact_id) DO NOTHING;
             """;
         supersession.Parameters.AddWithValue("$old", oldId);
-        supersession.Parameters.AddWithValue("$new", newId);
-        supersession.Parameters.AddWithValue("$reason", "synced from another machine");
+        supersession.Parameters.AddWithValue("$new", (object?)newId ?? DBNull.Value);
+        supersession.Parameters.AddWithValue("$reason", reason);
         supersession.Parameters.AddWithValue("$createdAt", createdAt);
         supersession.ExecuteNonQuery();
     }
@@ -1181,7 +1192,13 @@ public static class Sync
 
             if (supersededById is { } target)
             {
-                InsertSyncedEdge(connection, transaction, factId, target, record.ValidTo);
+                InsertSupersession(connection, transaction, factId, target, "synced from another machine", record.ValidTo);
+            }
+            else if (record.SupersededByBody is null && record.Reason is { } reason)
+            {
+                // The origin's forget, with the origin's own account. A no-successor close without
+                // a reason gets no row: it may be a lost pointer rather than a forget (D99).
+                InsertSupersession(connection, transaction, factId, null, reason, record.ValidTo);
             }
         }
     }
@@ -1587,6 +1604,13 @@ public static class Sync
             ? new JsonObject { ["body"] = record.SupersededByBody, ["valid_from"] = record.SupersededByValidFrom }
             : null;
 
+        // Absent rather than null when there is none, so a chunk with no retraction reads exactly
+        // as one written before the key existed.
+        if (record.Reason is not null)
+        {
+            obj["reason"] = record.Reason;
+        }
+
         return obj;
     }
 
@@ -1611,7 +1635,12 @@ public static class Sync
             supersededByValidFrom = NumberOf(sbObject, "valid_from");
         }
 
-        return new SyncCloseRecord(subject, predicate, body, validFrom.Value, validTo.Value, supersededByBody, supersededByValidFrom);
+        // A null or non-string reason is treated as absent; TextOf would throw on a non-string.
+        string? reason = record.TryGetPropertyValue("reason", out var r) && r is JsonValue rv && rv.TryGetValue<string>(out var rs)
+            ? rs
+            : null;
+
+        return new SyncCloseRecord(subject, predicate, body, validFrom.Value, validTo.Value, supersededByBody, supersededByValidFrom, reason);
     }
 
     private static string? TextOf(JsonObject record, string key) =>

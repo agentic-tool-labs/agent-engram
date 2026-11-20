@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Engram.Cli;
 using Engram.Core;
 using Microsoft.Data.Sqlite;
@@ -378,34 +379,164 @@ public sealed class SyncTests
     }
 
     /// <summary>
-    /// E-b, retraction case: a forget on A reaches B as a close with no successor. Records what
-    /// B holds today — closed, no pointer — and how many <c>supersession</c> rows it has.
+    /// Runs the forget round trip: A states a fact, B imports it live, A closes it with
+    /// <paramref name="closeOnA"/> and exports, <paramref name="editCloseChunk"/> may rewrite the
+    /// close record in the chunk, then B imports. Returns B's closed row id and the close line as
+    /// exported (before any edit).
+    /// </summary>
+    private static (long ClosedId, JsonObject CloseLine) ForgetRoundTrip(
+        SandboxHome a, SqliteConnection connB, string syncRoot,
+        Action<SqliteConnection, long> closeOnA, Action<JsonObject>? editCloseChunk = null)
+    {
+        using (var connA = EngramDatabase.OpenInitialized(a.Home))
+        {
+            var id = Write(connA, "/project/x", "a passing belief", T0);
+            var machineA = Sync.ResolveMachineId(syncRoot);
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(1), apply: true, CloseResolver.DefaultRetryCeiling);
+
+            closeOnA(connA, id);
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+        }
+
+        var (chunk, lines, index) = FindCloseLine(syncRoot);
+        var closeLine = (JsonObject)JsonNode.Parse(lines[index])!;
+        if (editCloseChunk is not null)
+        {
+            var edited = (JsonObject)closeLine.DeepClone();
+            editCloseChunk(edited);
+            lines[index] = edited.ToJsonString();
+            File.WriteAllLines(chunk, lines);
+        }
+
+        Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(3), apply: true, CloseResolver.DefaultRetryCeiling);
+
+        var closedId = FactId(connB, "/project/x", "a passing belief", liveOnly: false);
+        Assert.NotNull(closedId);
+        Assert.Null(FactId(connB, "/project/x", "a passing belief", liveOnly: true));
+        Assert.Null(SupersededByOf(connB, "/project/x", "a passing belief"));
+        return (closedId!.Value, closeLine);
+    }
+
+    private static (string Chunk, string[] Lines, int Index) FindCloseLine(string syncRoot)
+    {
+        foreach (var chunk in Directory.GetFiles(syncRoot, "*.jsonl", SearchOption.AllDirectories))
+        {
+            var lines = File.ReadAllLines(chunk);
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (JsonNode.Parse(lines[i]) is JsonObject o && (string?)o["t"] == "close")
+                {
+                    return (chunk, lines, i);
+                }
+            }
+        }
+
+        throw new InvalidOperationException("no close record was exported");
+    }
+
+    private static readonly Action<SqliteConnection, long> ForgetIt =
+        (connection, id) => Assert.True(FactStore.Forget(connection, id, "no longer true", T0.AddMinutes(2)));
+
+    /// <summary>
+    /// E-b retraction case, then F-b part 2: a forget on A reaches B as a close with no successor
+    /// and carries A's reason, so B writes the same NULL-new row A has, stamped at the close. On
+    /// ad6f965 this wrote 0 rows.
     /// </summary>
     [Fact]
-    public void ForgettingOnA_ThenSyncing_ClosesBsCopy_AndCountsItsSupersessionRows()
+    public void ForgettingOnA_ThenSyncing_WritesTheOriginsRetractionOnB()
     {
         var syncRoot = NewSyncRoot();
         try
         {
             using var a = new SandboxHome(initialize: false);
             using var b = new SandboxHome(initialize: false);
-            using var connA = EngramDatabase.OpenInitialized(a.Home);
             using var connB = EngramDatabase.OpenInitialized(b.Home);
+            var (closedId, closeLine) = ForgetRoundTrip(a, connB, syncRoot, ForgetIt);
 
-            var id = Write(connA, "/project/x", "a passing belief", T0);
-            var machineA = Sync.ResolveMachineId(syncRoot);
-            Sync.Export(connA, syncRoot, machineA, apply: true);
-            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(1), apply: true, CloseResolver.DefaultRetryCeiling);
+            Assert.Equal("no longer true", (string?)closeLine["reason"]);
+            Assert.Equal(1, SupersessionRows(connB, closedId));
+            using var row = connB.CreateCommand();
+            row.CommandText = "SELECT new_fact_id, reason, created_at FROM supersession WHERE old_fact_id = $id;";
+            row.Parameters.AddWithValue("$id", closedId);
+            using var reader = row.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.True(reader.IsDBNull(0));
+            Assert.Equal("no longer true", reader.GetString(1));
+            Assert.Equal(T0.AddMinutes(2).ToUnixTimeSeconds(), reader.GetInt64(2));
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
 
-            Assert.True(FactStore.Forget(connA, id, "no longer true", T0.AddMinutes(2)));
-            Sync.Export(connA, syncRoot, machineA, apply: true);
-            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(3), apply: true, CloseResolver.DefaultRetryCeiling);
+    /// <summary>
+    /// F-b row 2 and the null / non-string rows: a close record with no usable <c>reason</c> — a
+    /// chunk from an older binary, or a hand-edited value — closes B's copy and writes no row. Never
+    /// an invented reason (D99).
+    /// </summary>
+    [Theory]
+    [InlineData("absent")]
+    [InlineData("null")]
+    [InlineData("number")]
+    public void ACloseWithNoUsableReason_ClosesBsCopy_AndWritesNoRow(string shape)
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            Action<JsonObject> edit = shape switch
+            {
+                "absent" => o => o.Remove("reason"),
+                "null" => o => o["reason"] = null,
+                _ => o => o["reason"] = 42,
+            };
 
-            var closedId = FactId(connB, "/project/x", "a passing belief", liveOnly: false);
-            Assert.NotNull(closedId);
-            Assert.Null(FactId(connB, "/project/x", "a passing belief", liveOnly: true));
-            Assert.Null(SupersededByOf(connB, "/project/x", "a passing belief"));
-            Assert.Equal(0, SupersessionRows(connB, closedId!.Value));
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+            var (closedId, _) = ForgetRoundTrip(a, connB, syncRoot, ForgetIt, edit);
+
+            Assert.Equal(0, SupersessionRows(connB, closedId));
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// F-b row 3: a close on A with no successor and no retraction row there — a lost pointer, not
+    /// a forget — emits no <c>reason</c>, and B writes no row.
+    /// </summary>
+    [Fact]
+    public void ACloseTheOriginNeverExplained_EmitsNoReason_AndWritesNoRow()
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            Action<SqliteConnection, long> closeWithNoAccount = (connection, id) =>
+            {
+                using var close = connection.CreateCommand();
+                close.CommandText = "UPDATE fact SET valid_to = $at WHERE id = $id;";
+                close.Parameters.AddWithValue("$at", T0.AddMinutes(2).ToUnixTimeSeconds());
+                close.Parameters.AddWithValue("$id", id);
+                Assert.Equal(1, close.ExecuteNonQuery());
+            };
+
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+            var (closedId, closeLine) = ForgetRoundTrip(a, connB, syncRoot, closeWithNoAccount);
+
+            Assert.False(closeLine.ContainsKey("reason"));
+            Assert.Equal(0, SupersessionRows(connB, closedId));
         }
         finally
         {
