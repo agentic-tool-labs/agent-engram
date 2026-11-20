@@ -6388,3 +6388,9 @@ timed separately; it makes the same read.
 18. session-start ignores `agent_id` [1, tier 3]
 19. no `role_fact_count` [1, tier 3]
 20. subagent-start drops the role [1, tier 3]
+
+Against 8360e6c (review F1):
+21. SQL `/agents/` exclusion disabled [2]
+22. `From` exclusion disabled [2]. The first attempt deleted the filter, left an unused variable,
+    and failed to compile under warnings-as-errors. It proved nothing and was redone as a
+    compiling break.
