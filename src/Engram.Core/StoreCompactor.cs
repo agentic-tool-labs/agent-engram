@@ -51,15 +51,30 @@ public sealed record CompactReport(
 /// </remarks>
 public static class StoreCompactor
 {
+    /// <summary>The first schema whose foreign-key columns compact deletes through are indexed (D92).</summary>
+    public const int IndexedDeletesSchemaVersion = 20;
+
+    /// <param name="onSnapshotCopy">
+    /// The connection is a snapshot copy being slimmed (D96): take no <c>pre-compact</c> snapshot,
+    /// run no <c>VACUUM</c>, both of which the caller owns, and skip the vector sweep, because the
+    /// caller has already dropped the vector index. Refuses, having done nothing, when
+    /// the connection's file is the live store.
+    /// </param>
     public static CompactReport Compact(
         SqliteConnection connection,
         EngramHome home,
         string? path,
         bool apply,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        bool onSnapshotCopy = false)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(home);
+
+        if (onSnapshotCopy)
+        {
+            BackupStore.RefuseLiveStore(connection.DataSource, home);
+        }
 
         var prefix = path is null || path.Length <= 1 ? path : path.TrimEnd('/');
         var notes = new List<string>();
@@ -81,10 +96,11 @@ public static class StoreCompactor
             // Orphaned vectors — rows whose fact is already gone — are swept alongside the
             // targets (D36 makes stray vector rows compact's problem). Counting touches the
             // vec0 module, which is loaded per connection and may simply not be installed;
-            // that costs the sweep and nothing else.
+            // that costs the sweep and nothing else. A snapshot copy skips it: the take drops the
+            // vector index before compacting, so there is nothing to sweep (D96).
             var vectors = 0;
             var vectorsCountable = false;
-            if (VectorIndex.Exists(connection))
+            if (!onSnapshotCopy && VectorIndex.Exists(connection))
             {
                 try
                 {
@@ -138,8 +154,14 @@ public static class StoreCompactor
                 return report;
             }
 
-            var snapshot = BackupStore.Take(connection, home, now, BackupScope.Authored, label: "pre-compact");
-            BackupStore.PruneAfterWrite(home, snapshot);
+            BackupSnapshot? snapshot = null;
+            if (!onSnapshotCopy)
+            {
+                // Keeps closed history: this snapshot exists to undo the compact that follows, and
+                // pruning that history from it would remove exactly what the compact deletes (D96).
+                snapshot = BackupStore.Take(connection, home, now, BackupScope.Authored, label: "pre-compact", keepClosedHistory: true);
+                BackupStore.PruneAfterWrite(home, snapshot);
+            }
 
             using (var transaction = EngramDatabase.BeginWrite(connection))
             {
@@ -181,6 +203,11 @@ public static class StoreCompactor
                 }
 
                 transaction.Commit();
+            }
+
+            if (snapshot is null)
+            {
+                return report with { Applied = true };
             }
 
             Execute(connection, null, "PRAGMA wal_checkpoint(TRUNCATE);");

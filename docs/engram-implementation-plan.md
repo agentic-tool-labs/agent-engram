@@ -6158,6 +6158,7 @@ which the backup journal filter is to reuse (the backup-slim stream cherry-picks
 from snapshot to commit for 15,261 facts, against 3.33 s for 248,389 facts in `wrangl-3`. The real-store
 plan checks ran on Python's SQLite 3.54.1, not the bundled one, and tier 2 reproduced each switch on the
 bundled build. Snapshots and VACUUM are 88% of the wall time. Making them cheaper is a separate change.
+
 ## D87 — Re-filing is close-and-reassert; `reorganize` moves the ledger out and closes misfiled captures
 
 The store held 5,960 live `user` facts and 5,624 of them were another tool's ledger: `/ah2/…`, predicate
@@ -6567,3 +6568,44 @@ guarantee rests on the oracle comparison alone.
 
 `RecallTypesTests`' pre-D85 identity check now removes the tool arm from `excluded`. It compares rows
 only, because that arm has a plan of its own, and `RecallRankerPlanTests` pins that plan.
+## D96 — Scheduled snapshots also leave out closed code history, through `StoreCompactor`
+
+Spec: `backup-derived-state.md` §4.2 (phase 2b, eng-40); adr-2, accepted 2026-11-19. Builds on D93 and
+needs D92's indexes.
+
+**One definition of disposable.** On the `.partial` copy, after the vector drop, `Slim` runs
+`StoreCompactor.Compact(path: null, apply: true, onSnapshotCopy: true)`. The option skips compact's own
+`pre-compact` snapshot, its `VACUUM` and its vector sweep — the take owns the first two and has
+already dropped the table the third would sweep — and refuses before doing
+anything when the connection's file is `home.DatabasePath` — the same guard `Slim` has (D93). A delete
+written for backups would be a second definition of "regenerable and unneeded", and the first one to be
+tuned would leave the other behind. Path-null compact deletes no entity, `file_state` or
+`repo_registry` row, so no `entity_alias` cascade is reachable; the test seeds an alias on an entity
+whose only fact is closed history and asserts it survives. `backup_omitted` gains `facts_closed`, and
+restore prints `not recoverable: <n> closed code facts` only when it is above zero.
+
+**Below v20 the step is skipped, with a note in the take's output.** Unindexed, the foreign-key deletes
+cost about 73 ms a row on the real store (D92), hours per take. The vector drop and the stamp still run,
+and `facts_closed` is absent rather than zero. `backup take` opens with `Open`, not `OpenInitialized`,
+so a store this binary has not yet migrated takes the skip path until something else migrates it.
+
+**Measured** on a v20 copy of the 2.45 GB store (621,904 live facts, 268,583 closed regenerable, none
+protected). The snapshot went from **836,517,888 B** (vectors dropped and vacuumed, no 2b) to
+**668,307,456 B**: 168 MB, above the 50 MB bar in the spec. `BackupFingerprint` was equal across the source, the snapshot and the restored store, and the live, alias and entity
+counts were unchanged.
+
+**Drop first, then compact — the order was measured, and reversed.** The first build compacted before
+the drop, as the spec then said. `backup take` took **22.38 s** against **9.82 s** for the D93 binary
+on the v19 copy, and timed step by step in emulation 6.0 s of the difference was compact deleting the
+104,995 `fact_vec` rows of the pruned facts — rows the drop that follows removes anyway — with 1.41 s
+for the fact delete. It also made `backup_omitted.vectors` count only what the drop removed (261,794 of
+366,789). Ruled (spec §4.2, Q1): drop first, and skip the sweep in snapshot-copy mode rather than probing
+for a table that is gone. Re-measured: **16.76 s and 12.99 s** in two takes at load average ~13, same
+668,307,456 B, `vectors` 366,789. A copy marked `authored+vectors` keeps its table, so the vectors of
+facts compacted out of it stay behind as orphans; a later live compact sweeps them (D36). The sweep on
+the live store is unchanged, and a test holds it.
+
+**`pre-compact` keeps closed history** (Q2). It is the snapshot that undoes the compact after it, so
+pruning closed regenerable facts from it would remove exactly what that compact deletes. It still omits
+vectors. `Take` carries this as `keepClosedHistory`, which only `StoreCompactor` passes. `facts_closed` is
+absent from such a snapshot, so a restore names nothing as unrecoverable.

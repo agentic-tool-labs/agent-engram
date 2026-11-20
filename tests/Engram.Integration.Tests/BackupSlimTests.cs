@@ -133,6 +133,14 @@ public class BackupSlimTests
         }
     }
 
+    private static long IdOf(SqliteConnection connection, string body)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id FROM fact WHERE body = $b;";
+        command.Parameters.AddWithValue("$b", body);
+        return (long)command.ExecuteScalar()!;
+    }
+
     private static void Embed(SqliteConnection connection, params long[] ids)
     {
         VectorIndex.EnsureCreated(connection, new EmbeddingSpace("test-embedder", 4));
@@ -185,7 +193,7 @@ public class BackupSlimTests
 
         var snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Authored);
 
-        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredScope, 0), Markers(snapshot.Path));
+        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredScope, 0, FactsClosed: 1), Markers(snapshot.Path));
     }
 
     [Fact]
@@ -206,7 +214,9 @@ public class BackupSlimTests
         Assert.SkipUnless(VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
         using var sandbox = new VectorSandbox();
         var seeded = Seed(sandbox.Connection);
-        Embed(sandbox.Connection, seeded.Coffee, seeded.ReferencedByRelation);
+
+        // Bar v1 is closed code history 2b prunes; its vector still counts as omitted (D96, Q1).
+        Embed(sandbox.Connection, seeded.Coffee, seeded.ReferencedByRelation, IdOf(sandbox.Connection, "class Bar v1"));
         var source = AuthoredDigest.Read(sandbox.Connection);
         var fingerprint = BackupFingerprint.Read(sandbox.Connection);
 
@@ -215,7 +225,7 @@ public class BackupSlimTests
 
         Assert.Null(slim.Warning);
         Assert.False(HasTable(slim.Path, VectorIndex.TableName));
-        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredScope, 2), Markers(slim.Path));
+        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredScope, 3, FactsClosed: 1), Markers(slim.Path));
         using (var copy = EngramDatabase.Open(slim.Path))
         {
             Assert.Null(EngramDatabase.ReadMeta(copy, VectorIndex.ModelKey));
@@ -228,7 +238,7 @@ public class BackupSlimTests
 
         // The neighbour that must not match: a full snapshot keeps the index.
         Assert.True(HasTable(full.Path, VectorIndex.TableName));
-        Assert.Equal(2, VectorIndex.Count(sandbox.Connection));
+        Assert.Equal(3, VectorIndex.Count(sandbox.Connection));
     }
 
     // --- I2: the live store is never mutated by a take ----------------------------------------
@@ -264,7 +274,7 @@ public class BackupSlimTests
             Seed(connection);
         }
 
-        Assert.Throws<InvalidOperationException>(() => BackupStore.Slim(sandbox.Home.DatabasePath, sandbox.Home));
+        Assert.Throws<InvalidOperationException>(() => BackupStore.Slim(sandbox.Home.DatabasePath, sandbox.Home, T0));
 
         using var reopened = EngramDatabase.Open(sandbox.Home);
         Assert.Null(EngramDatabase.ReadMeta(reopened, BackupMarkers.ScopeKey));
@@ -475,7 +485,222 @@ public class BackupSlimTests
 
         Assert.Contains("sqlite-vec", snapshot.Warning, StringComparison.Ordinal);
         Assert.True(HasTable(snapshot.Path, VectorIndex.TableName));
-        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredWithVectorsScope, 0), Markers(snapshot.Path));
+        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredWithVectorsScope, 0, FactsClosed: 1), Markers(snapshot.Path));
+    }
+
+    // --- Phase 2b: closed code history out of the snapshot -----------------------------------
+
+    private static List<string> ClosedRegenerable(string path)
+    {
+        try
+        {
+            using var connection = EngramDatabase.Open(path);
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT body FROM fact WHERE regenerable = 1 AND valid_to IS NOT NULL ORDER BY body;";
+            using var reader = command.ExecuteReader();
+            var bodies = new List<string>();
+            while (reader.Read())
+            {
+                bodies.Add(reader.GetString(0));
+            }
+
+            return bodies;
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(path);
+        }
+    }
+
+    /// <summary>
+    /// Beyond <see cref="Seed"/>: a closed code fact a review names (F5-protected), and a code entity
+    /// whose only fact is closed history and which carries an alias.
+    /// </summary>
+    private static void SeedClosedHistory(SqliteConnection connection)
+    {
+        var reviewed = Remember(connection, "/code/acme/src/e.cs#Grault", "declares", "class Grault v1", T0, regenerable: true);
+        Remember(connection, "/code/acme/src/e.cs#Grault", "declares", "class Grault v2", T0.AddHours(1), regenerable: true);
+        var gone = Remember(connection, "/code/acme/src/d.cs#Gone", "declares", "class Gone", T0, regenerable: true);
+        Sql(connection,
+            $"""
+            UPDATE fact SET valid_to = {T0.AddHours(1).ToUnixTimeSeconds()} WHERE id = {gone};
+            INSERT INTO fact_review (fact_id, review_after, set_at) VALUES ({reviewed}, 902, 402);
+            INSERT INTO entity_alias (entity_id, alias, kind, created_at)
+                SELECT id, '/code/acme/src/old-d.cs#Gone', 'path', 801 FROM entity WHERE path = '/code/acme/src/d.cs#Gone';
+            """);
+    }
+
+    /// <summary>
+    /// §4.2 and §9 I1, I3, I8 with the 2b negative cases: unprotected closed code history goes; a
+    /// closed fact with an authored edge or a review stays; no entity or alias goes; every live
+    /// fact, the registry and file state survive a restore; restore names what is not recoverable.
+    /// </summary>
+    [Fact]
+    public void AuthoredTake_LeavesOutUnprotectedClosedCodeHistory_AndRestoreSaysSo()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        IReadOnlyDictionary<string, IReadOnlyList<string>> source;
+        BackupSnapshot slim;
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Seed(connection);
+            SeedClosedHistory(connection);
+            source = AuthoredDigest.Read(connection);
+            var fingerprint = BackupFingerprint.Read(connection);
+
+            slim = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Authored);
+
+            Assert.Null(slim.Warning);
+            using (var copy = EngramDatabase.Open(slim.Path))
+            {
+                Assert.Equal(fingerprint, BackupFingerprint.Read(copy));
+            }
+
+            EngramDatabase.ReleasePooledConnections(slim.Path);
+
+            // The live store keeps its history: only the copy was compacted.
+            Assert.Equal(4, ClosedRegenerable(sandbox.Home.DatabasePath).Count);
+        }
+
+        Assert.Equal(["class Baz as indexed", "class Grault v1"], ClosedRegenerable(slim.Path));
+        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredScope, 0, FactsClosed: 2), Markers(slim.Path));
+        Assert.Contains(source["aliases"], a => a.Contains("old-d.cs#Gone", StringComparison.Ordinal));
+        AuthoredDigest.Equal(source, DigestOf(slim.Path));
+
+        SqliteConnection.ClearAllPools();
+        var restore = Cli(sandbox.Home, "restore", slim.Name, "--apply");
+
+        Assert.Equal(0, restore.Exit);
+        Assert.Contains(
+            "  not recoverable: 2 closed code facts (superseded index history; 'compact' discards the same)",
+            restore.Stdout,
+            StringComparison.Ordinal);
+        AuthoredDigest.Equal(source, DigestOf(sandbox.Home.DatabasePath));
+    }
+
+    /// <summary>§9 I2 for the compactor's snapshot-copy option: pointed at the live store it refuses, having done nothing.</summary>
+    [Fact]
+    public void CompactOnASnapshotCopy_RefusesTheLiveStore_HavingDoneNothing()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Seed(connection);
+
+        Assert.Throws<InvalidOperationException>(
+            () => StoreCompactor.Compact(connection, sandbox.Home, path: null, apply: true, T0, onSnapshotCopy: true));
+
+        Assert.Equal(["class Bar v1", "class Baz as indexed"], ClosedRegenerable(sandbox.Home.DatabasePath));
+        Assert.Empty(BackupStore.List(sandbox.Home));
+    }
+
+    /// <summary>D96 Q1 negative: a compact of the live store still sweeps the vectors of what it prunes.</summary>
+    [Fact]
+    public void LiveCompact_StillSweepsTheVectorsOfWhatItPrunes()
+    {
+        Assert.SkipUnless(VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
+        using var sandbox = new VectorSandbox();
+        var seeded = Seed(sandbox.Connection);
+        Embed(sandbox.Connection, seeded.Coffee, IdOf(sandbox.Connection, "class Bar v1"));
+
+        var report = StoreCompactor.Compact(sandbox.Connection, sandbox.Home, path: null, apply: true, T0);
+
+        Assert.Equal(1, report.VectorsRemoved);
+        Assert.Equal(1, VectorIndex.Count(sandbox.Connection));
+    }
+
+    /// <summary>D96 Q1: on a snapshot copy compact leaves vector rows alone — the take has already dropped the table.</summary>
+    [Fact]
+    public void CompactOnASnapshotCopy_DoesNotSweepVectors()
+    {
+        Assert.SkipUnless(VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
+        using var sandbox = new VectorSandbox();
+        Seed(sandbox.Connection);
+        Embed(sandbox.Connection, IdOf(sandbox.Connection, "class Bar v1"));
+        var copyPath = Path.Combine(sandbox.Home.Root, "copy.db");
+        Sql(sandbox.Connection, $"VACUUM INTO '{copyPath}';");
+
+        try
+        {
+            using var copy = EngramDatabase.Open(copyPath, sandbox.Home.LibDir);
+            var report = StoreCompactor.Compact(copy, sandbox.Home, path: null, apply: true, T0, onSnapshotCopy: true);
+
+            Assert.Equal(1, report.ClosedPruned);
+            Assert.Equal(0, report.VectorsRemoved);
+            Assert.Equal(1, VectorIndex.Count(copy));
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(copyPath);
+        }
+    }
+
+    /// <summary>D96 Q2: a pre-compact snapshot keeps the closed code fact a scheduled snapshot omits.</summary>
+    [Fact]
+    public void PreCompactSnapshot_KeepsClosedCodeHistory_AScheduledSnapshotOmits()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Seed(connection);
+
+        var scheduled = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Authored);
+        Assert.DoesNotContain("class Bar v1", ClosedRegenerable(scheduled.Path));
+
+        var compact = StoreCompactor.Compact(connection, sandbox.Home, path: null, apply: true, T0.AddMinutes(1));
+        var preCompact = Path.Combine(sandbox.Home.BackupDir, compact.SnapshotName!);
+
+        Assert.Equal(1, compact.ClosedPruned);
+        Assert.Contains("class Bar v1", ClosedRegenerable(preCompact));
+        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredScope, 0), Markers(preCompact));
+    }
+
+    /// <summary>§9 negative case: a store still at v19 skips 2b with a note; Phase 1 still applies.</summary>
+    [Fact]
+    public void AuthoredTake_OfAVersion19Store_KeepsClosedHistory_AndSaysWhy()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using (var connection = EngramDatabase.OpenInitialized(sandbox.Home))
+        {
+            Seed(connection);
+            Sql(connection,
+                """
+                DROP INDEX ix_fact_superseded_by;
+                DROP INDEX ix_fact_object_ref;
+                UPDATE schema_meta SET value = '19' WHERE key = 'schema_version';
+                """);
+        }
+
+        BackupSnapshot slim;
+        using (var old = EngramDatabase.Open(sandbox.Home))
+        {
+            slim = BackupStore.Take(old, sandbox.Home, T0, BackupScope.Authored);
+        }
+
+        Assert.Contains("closed code history was kept", slim.Warning, StringComparison.Ordinal);
+        Assert.Equal(["class Bar v1", "class Baz as indexed"], ClosedRegenerable(slim.Path));
+        Assert.Equal(new BackupMarkers(BackupMarkers.AuthoredScope, 0), Markers(slim.Path));
+        using (var copy = EngramDatabase.Open(slim.Path))
+        {
+            Assert.DoesNotContain("facts_closed", EngramDatabase.ReadMeta(copy, BackupMarkers.OmittedKey), StringComparison.Ordinal);
+        }
+
+        EngramDatabase.ReleasePooledConnections(slim.Path);
+        Assert.DoesNotContain("not recoverable", Cli(sandbox.Home, "restore", slim.Name).Stdout, StringComparison.Ordinal);
+    }
+
+    /// <summary>§9 I4 for 2b: a compaction that fails on the copy keeps a full snapshot, history included.</summary>
+    [Fact]
+    public void ACompactionThatFailsOnTheCopy_KeepsAFullSnapshot()
+    {
+        using var sandbox = new SandboxHome(initialize: false);
+        using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
+        Seed(connection);
+        Sql(connection, "CREATE TRIGGER planted_block BEFORE DELETE ON fact BEGIN SELECT RAISE(ABORT, 'planted'); END;");
+
+        var snapshot = BackupStore.Take(connection, sandbox.Home, T0, BackupScope.Authored);
+
+        Assert.Contains("kept full", snapshot.Warning, StringComparison.Ordinal);
+        Assert.False(Markers(snapshot.Path).IsMarked);
+        Assert.Equal(["class Bar v1", "class Baz as indexed"], ClosedRegenerable(snapshot.Path));
     }
 
     // --- callers: which scope each one asks for ----------------------------------------------
