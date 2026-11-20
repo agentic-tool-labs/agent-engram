@@ -97,7 +97,8 @@ public enum BackupScope
 /// The markers a slimmed snapshot carries in <c>schema_meta</c>. A snapshot with none reads as
 /// <c>full</c>, which is what every snapshot written before slimming existed is.
 /// </summary>
-public sealed record BackupMarkers(string Scope, long VectorsOmitted)
+/// <param name="FactsClosed">Closed regenerable facts compact pruned from the copy (Phase 2b); zero when it did not run.</param>
+public sealed record BackupMarkers(string Scope, long VectorsOmitted, long FactsClosed = 0)
 {
     public const string ScopeKey = "backup_scope";
     public const string OmittedKey = "backup_omitted";
@@ -121,14 +122,15 @@ public sealed record BackupMarkers(string Scope, long VectorsOmitted)
         }
 
         long vectors = 0;
+        long factsClosed = 0;
         if (EngramDatabase.ReadMeta(connection, OmittedKey) is { } omitted
-            && System.Text.Json.Nodes.JsonNode.Parse(omitted) is System.Text.Json.Nodes.JsonObject counts
-            && counts["vectors"] is { } node)
+            && System.Text.Json.Nodes.JsonNode.Parse(omitted) is System.Text.Json.Nodes.JsonObject counts)
         {
-            vectors = node.GetValue<long>();
+            vectors = counts["vectors"]?.GetValue<long>() ?? 0;
+            factsClosed = counts["facts_closed"]?.GetValue<long>() ?? 0;
         }
 
-        return new BackupMarkers(scope, vectors);
+        return new BackupMarkers(scope, vectors, factsClosed);
     }
 }
 
@@ -422,7 +424,7 @@ public static class BackupStore
             {
                 try
                 {
-                    warning = Slim(partial, home);
+                    warning = Slim(partial, home, now);
                 }
                 catch (Exception exception)
                 {
@@ -465,7 +467,7 @@ public static class BackupStore
     /// </summary>
     internal static readonly AsyncLocal<Action?> SlimFault = new();
 
-    private static void RefuseLiveStore(string path, EngramHome home)
+    internal static void RefuseLiveStore(string path, EngramHome home)
     {
         if (string.Equals(Path.GetFullPath(path), Path.GetFullPath(home.DatabasePath), StringComparison.Ordinal))
         {
@@ -535,7 +537,7 @@ public static class BackupStore
     /// by two spellings is not caught, and no caller passes anything but a fresh name under
     /// <c>backups/</c>.
     /// </remarks>
-    internal static string? Slim(string path, EngramHome home)
+    internal static string? Slim(string path, EngramHome home, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(home);
@@ -547,6 +549,20 @@ public static class BackupStore
         {
             using var copy = EngramDatabase.Open(path, home.LibDir);
             SlimFault.Value?.Invoke();
+
+            // Phase 2b: closed code history, through the one definition of disposable (D8, D96).
+            // Before v20 the compactor's foreign-key deletes are unindexed — about 73 ms a row on a
+            // large store — so an older copy keeps its history rather than stalling the take.
+            long? factsClosed = null;
+            if (EngramDatabase.ReadSchemaVersion(copy) >= StoreCompactor.IndexedDeletesSchemaVersion)
+            {
+                factsClosed = StoreCompactor.Compact(copy, home, path: null, apply: true, now, onSnapshotCopy: true).ClosedPruned;
+            }
+            else
+            {
+                warning = "closed code history was kept, because this store predates schema version "
+                    + StoreCompactor.IndexedDeletesSchemaVersion + " and pruning it there is unindexed";
+            }
 
             var scope = BackupMarkers.AuthoredScope;
             long vectors = 0;
@@ -562,18 +578,21 @@ public static class BackupStore
                 else
                 {
                     scope = BackupMarkers.AuthoredWithVectorsScope;
-                    warning = "sqlite-vec could not be loaded, so this snapshot keeps its vector index";
+                    var kept = "sqlite-vec could not be loaded, so this snapshot keeps its vector index";
+                    warning = warning is null ? kept : warning + "; " + kept;
                 }
+            }
+
+            var omitted = new System.Text.Json.Nodes.JsonObject { ["vectors"] = vectors };
+            if (factsClosed is { } closed)
+            {
+                omitted["facts_closed"] = closed;
             }
 
             using (var transaction = EngramDatabase.BeginWrite(copy))
             {
                 EngramDatabase.WriteMeta(copy, transaction, BackupMarkers.ScopeKey, scope);
-                EngramDatabase.WriteMeta(
-                    copy,
-                    transaction,
-                    BackupMarkers.OmittedKey,
-                    new System.Text.Json.Nodes.JsonObject { ["vectors"] = vectors }.ToJsonString());
+                EngramDatabase.WriteMeta(copy, transaction, BackupMarkers.OmittedKey, omitted.ToJsonString());
                 transaction.Commit();
             }
 

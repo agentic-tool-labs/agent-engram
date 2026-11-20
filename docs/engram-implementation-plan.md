@@ -6175,3 +6175,33 @@ which the backup journal filter is to reuse (the backup-slim stream cherry-picks
 from snapshot to commit for 15,261 facts, against 3.33 s for 248,389 facts in `wrangl-3`. The real-store
 plan checks ran on Python's SQLite 3.54.1, not the bundled one, and tier 2 reproduced each switch on the
 bundled build. Snapshots and VACUUM are 88% of the wall time. Making them cheaper is a separate change.
+
+## D96 — Scheduled snapshots also leave out closed code history, through `StoreCompactor`
+
+Spec: `backup-derived-state.md` §4.2 (phase 2b, eng-40); adr-2, accepted 2026-11-19. Builds on D93 and
+needs D92's indexes.
+
+**One definition of disposable.** On the `.partial` copy, before the vector drop, `Slim` runs
+`StoreCompactor.Compact(path: null, apply: true, onSnapshotCopy: true)`. The option skips compact's own
+`pre-compact` snapshot and its `VACUUM`, both of which the take already owns, and refuses before doing
+anything when the connection's file is `home.DatabasePath` — the same guard `Slim` has (D93). A delete
+written for backups would be a second definition of "regenerable and unneeded", and the first one to be
+tuned would leave the other behind. Path-null compact deletes no entity, `file_state` or
+`repo_registry` row, so no `entity_alias` cascade is reachable; the test seeds an alias on an entity
+whose only fact is closed history and asserts it survives. `backup_omitted` gains `facts_closed`, and
+restore prints `not recoverable: <n> closed code facts` only when it is above zero.
+
+**Below v20 the step is skipped, with a note in the take's output.** Unindexed, the foreign-key deletes
+cost about 73 ms a row on the real store (D92), hours per take. The vector drop and the stamp still run,
+and `facts_closed` is absent rather than zero. `backup take` opens with `Open`, not `OpenInitialized`,
+so a store this binary has not yet migrated takes the skip path until something else migrates it.
+
+**Measured** on a v20 copy of the 2.45 GB store (621,904 live facts, 268,583 closed regenerable, none
+protected). The snapshot went from **836,517,888 B** (vectors dropped and vacuumed, no 2b) to
+**668,307,456 B**: 168 MB, above the 50 MB bar in the spec. `BackupFingerprint` was equal across the source, the snapshot and the restored store, and the live, alias and entity
+counts were unchanged. The binary's `backup take` took **22.38 s**, against **9.82 s** for the D93
+binary on the v19 copy. Timed step by step in emulation, 6.0 s of that difference is compact deleting
+the 104,995 `fact_vec` rows of the pruned facts — rows the drop that follows removes anyway — and 1.41 s
+is the fact delete. The spec places compact before the drop. That ordering is reported upward, not
+changed here. The same ordering means `backup_omitted.vectors` counts only what the drop removed
+(261,794 of the copy's 366,789).

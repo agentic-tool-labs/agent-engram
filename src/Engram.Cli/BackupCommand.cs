@@ -286,10 +286,14 @@ public static class BackupCommand
         if (BackupStore.ReadMarkers(chosen, home) is { IsMarked: true } markers)
         {
             var unembedded = BackupStore.CountUnembedded(chosen, home);
-            if (unembedded > 0)
+            if (unembedded > 0 || markers.FactsClosed > 0)
             {
                 stdout.WriteLine();
                 stdout.WriteLine("This snapshot leaves out state Engram rebuilds:");
+            }
+
+            if (unembedded > 0)
+            {
 
                 // What happens next depends on this home, not the snapshot: with embedding off there
                 // is no server-side backlog to promise.
@@ -306,6 +310,13 @@ public static class BackupCommand
                     stdout.WriteLine("                 (several hours for a large store: 'engram embed --status' shows progress;");
                     stdout.WriteLine("                  until it finishes, recall's vector lane covers only what is embedded)");
                 }
+            }
+
+            if (markers.FactsClosed > 0)
+            {
+                stdout.WriteLine(
+                    $"  not recoverable: {markers.FactsClosed} closed code {(markers.FactsClosed == 1 ? "fact" : "facts")} "
+                        + "(superseded index history; 'compact' discards the same)");
             }
 
             stdout.WriteLine(apply
