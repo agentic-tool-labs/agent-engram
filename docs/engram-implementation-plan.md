@@ -6609,3 +6609,49 @@ the live store is unchanged, and a test holds it.
 pruning closed regenerable facts from it would remove exactly what that compact deletes. It still omits
 vectors. `Take` carries this as `keepClosedHistory`, which only `StoreCompactor` passes. `facts_closed` is
 absent from such a snapshot, so a restore names nothing as unrecoverable.
+
+## D101 — Five end-to-end tests that failed under load: what each now guards, and why
+
+Spec: `e2e-flakes.md` (eng-29). Measured on one 18-core M-series machine, 18× `yes` as load. Each
+test was run 10× alone idle, 10× alone loaded, and 12× loaded in one test host with the seven other
+classes that once failed together. Other sessions kept the "idle" load average at 3–6 and drove the
+loaded runs as high as ~1000, so read the loaded numbers as a stress range, not a calibrated level.
+Alone, every test passed 10/10 idle and 10/10 loaded. Only the shared-host runs reproduced anything,
+which is the first finding: **these tests fail because of their neighbours, not because of the hook.**
+
+**`FileTouched_CompletesInUnder100Milliseconds` is relative now.** It asserts median(hook) −
+median(no-op) < 50 ms over twenty interleaved pairs, alternating which arm goes first. Idle the hook
+median is ~10 ms. The five QA failures had medians of 110–300 ms, but their *fastest* runs were
+already 36–117 ms, four to twelve times the idle floor. What failed was the machine. D4 says the
+guard is the margin; this test was the one place still asserting an absolute number. It stays rather
+than being folded into the budget test because the two guard different things. The budget test
+catches a deterministic cost of about a millisecond, so it can see an opened database. This one
+catches a per-call wait of tens of milliseconds, such as a sleep or a lock wait.
+
+**`FileTouched_CostsNothingMeasurableOverStartingTheBinary` takes the best of up to three
+measurements.** The estimator and the max(1.0 ms, 10% of floor) allowance are unchanged. The
+allowance has 0.3 ms of headroom idle: the marginal cost is 0.54–0.90 ms, median 0.70, about 8% of an
+8.6 ms floor. Under load the marginal grows faster than the floor. The five observed failures ran at
+10.7%, 10.9%, 16.3%, 17.2% and 18.6% of theirs (2 of the 12 shared-host runs, plus three QA runs).
+A real violation shifts every sample of every attempt, so it still fails all three. Raising the ratio
+was rejected: the planted open is 22% of the idle floor, so a 20% allowance would leave it two points
+to fail by, and the QA failures already reach 18.6%.
+
+**Every disposable home is removed by one implementation, `TestHome.RemoveTree`.**
+`InstallerTestHome` had its own single-shot recursive delete. That copy failed with "Directory not
+empty" because session start's maintenance chain was still writing into `.engram` while it ran. The
+chain runs at reduced priority (D82) and outlives the hook by 0.19–0.22 s idle and by 0.6–24 s under
+load. It failed in 3 of 12 shared-host runs and never alone. `TestHome` already retried, and
+documented why.
+
+**`EngramProcess`'s post-exit pipe join is 30 s, and its message names no cause.** It fired once in
+QA, for seven tests in the same second. Several of them run commands that spawn nothing, so no
+inherited pipe explains it: the readers were not scheduled. The suspect is thread-pool starvation in
+the test host. The fifty-process test parks fifty pool threads in synchronous waits while the pipe
+readers need pool threads of their own. It is **not confirmed**: 24 shared-host runs never
+reproduced it, and an A/B with the pool minimum raised to 200 changed nothing measurable. So the
+message now reports the time since exit, `ThreadPool.ThreadCount` and
+`ThreadPool.PendingWorkItemCount`, which is what the next occurrence needs to settle it. Raising the
+bound hides nothing the 5 s bound caught. The leak it was named for, a detached chain holding the
+hook's pipe, lives about 0.2 s, far inside either bound, and `MaintenanceLauncherTests` is what
+guards that leak. A pipe held open forever still fails here.
