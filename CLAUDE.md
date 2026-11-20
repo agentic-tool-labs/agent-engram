@@ -730,9 +730,10 @@ because a shared namespace turns a 32-bit collision into a lost write. `Fingerpr
 **Role memory is keyed on the role the caller names, never on an id the server would have to
 infer.** `scope:"agent"` takes `agent` = the hook payload's `agent_type` and writes under
 `/agents/<role-slug>/`, three per role per MCP session. The subagent primer (and an `--agent` main
-session's) delivers the newest five after the precedence line. A role with no facts leaves the
-primer byte-identical and a payload with no role makes no extra read, so "newest" is the highest
-fact id: the one ordering both summary paths can apply (D100).
+session's) delivers the newest five after the precedence line. A role with no facts still gets
+its one key line, or it could never learn its key, while a payload with no role stays
+byte-identical and makes no extra read. "Newest" is the highest fact id: the one ordering both
+summary paths can apply (D100).
 
 **Falsify against a committed tree, and assert the patch landed.** A harness that restores arms with
 `git checkout --` restores to HEAD, so an uncommitted change under test is reverted by its own

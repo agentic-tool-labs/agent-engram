@@ -22,14 +22,28 @@ public class RoleBlockTests
     }
 
     [Fact]
-    public void WhenNoRoleFactFits_TheWholeBlockIsOmitted()
+    public void WhenNoRoleFactFits_OnlyTheKeyLineIsAdded()
     {
         var huge = new string('x', 2000);
 
         var primer = PrimerBuilder.BuildForSubagent(WithRole(huge), MemoryPrecedence.EngramFirst, out var delivered);
 
         Assert.Equal(0, delivered);
-        Assert.Equal(PrimerBuilder.BuildForSubagent(PrimerSummary.From([]), MemoryPrecedence.EngramFirst), primer);
+        const string key = "Your role memory key: wrangl:architect.";
+        var plain = PrimerBuilder.BuildForSubagent(PrimerSummary.From([]), MemoryPrecedence.EngramFirst).Split('\n');
+        var lines = primer.Split('\n');
+        Assert.Equal(plain.Length + 1, lines.Length);
+        Assert.Equal(plain, lines.Where(line => line != key));
+    }
+
+    [Fact]
+    public void ARoleWithNoFacts_GetsTheKeyLineButNoHeader()
+    {
+        var primer = PrimerBuilder.BuildForSubagent(WithRole(), MemoryPrecedence.EngramFirst, out var delivered);
+
+        Assert.Equal(0, delivered);
+        Assert.Contains("Your role memory key: wrangl:architect.", primer, StringComparison.Ordinal);
+        Assert.DoesNotContain("Role memory for", primer, StringComparison.Ordinal);
     }
 
     [Fact]

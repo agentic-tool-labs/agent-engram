@@ -6356,9 +6356,25 @@ facts.
 - `role_fact_count` is set whenever the payload named a role, counting what was actually delivered.
   `fact_count` stays null (D46).
 
-**Open, reported up.** Because an empty role emits no block, a role that has never written does not
-see its key in the primer. Its first lesson needs the model to pass its `agent_type` unprompted. The
-spec's byte-identity invariant forces this; it is built as specified and flagged for a ruling.
+**The key line is emitted whenever the payload names a role, facts or not (review F2 ruling).**
+As first specced, an empty role emitted nothing, so a role that had never written was never told
+its key and role memory could never start: a write rule with no trigger loses (D51). So the
+invariant is amended:
+- An empty role's primer is the previous primer plus exactly the line
+  `Your role memory key: <agent_type>.`, with no header.
+- If facts exist but none fits the budget, the result is the same.
+- A payload without a role is still byte-identical.
+- The key line is the one part of the block budgeted first, and it is omitted only if it cannot fit
+  at all.
+- `agent`'s description now asks for that key, never an instance name. A write under an
+  instance-style key still lands; it is not refused, it is just no longer invited.
+- The ceiling moved from 6,963 to 7,012.
+
+The cost of the line is `TokenEstimator`'s `ceil(chars / 3.6)` over 23 characters plus the key.
+That comes to 11 tokens for `wrangl:architect` and 9 for `explorer`, about 8–12 for ordinary keys,
+on every `subagent-start` whose payload names a role. On the instance D46 describes (336
+subagent-starts against 54 sessions) that is roughly 3,000–4,000 primer tokens across those 336
+spawns, about 10 per spawn and none per main session without `--agent`.
 
 **Measured (E8).** Published binary, file-timed, 50 alternated runs per arm, with five role facts in
 the store: `subagent-start` p50 was 13.30 ms without a role and 13.40 ms with one. That is +0.09 ms,

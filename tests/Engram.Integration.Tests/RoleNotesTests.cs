@@ -143,7 +143,7 @@ public sealed class RoleNotesTests
         var summary = PrimerSummary.Read(connection, Now, Role);
 
         Assert.Empty(summary.RoleFacts!);
-        Assert.Equal(
+        AssertPlusKeyLineOnly(
             PrimerBuilder.BuildForSubagent(PrimerSummary.Read(connection, Now), MemoryPrecedence.EngramFirst),
             PrimerBuilder.BuildForSubagent(summary, MemoryPrecedence.EngramFirst));
     }
@@ -168,19 +168,53 @@ public sealed class RoleNotesTests
     }
 
     [Fact]
-    public void ARoleWithNoFacts_LeavesThePrimerByteIdentical()
+    public void ARoleWithNoFacts_AddsExactlyTheKeyLine()
     {
         using var sandbox = new SandboxHome();
         Remember(sandbox, "s1", "A reviewer lesson.", "agent", "wrangl:reviewer");
 
         using var connection = Open(sandbox);
 
-        Assert.Equal(
+        AssertPlusKeyLineOnly(
             PrimerBuilder.BuildForSubagent(PrimerSummary.Read(connection, Now), MemoryPrecedence.EngramFirst),
             PrimerBuilder.BuildForSubagent(PrimerSummary.Read(connection, Now, Role), MemoryPrecedence.EngramFirst));
-        Assert.Equal(
+        AssertPlusKeyLineOnly(
             PrimerBuilder.Build(PrimerSummary.Read(connection, Now), MemoryPrecedence.EngramFirst),
             PrimerBuilder.Build(PrimerSummary.Read(connection, Now, Role), MemoryPrecedence.EngramFirst));
+    }
+
+    [Fact]
+    public void WithoutARole_ThePrimerHasNoKeyLine()
+    {
+        using var sandbox = new SandboxHome();
+        Remember(sandbox, "s1", "A role lesson.", "agent", Role);
+
+        using var connection = Open(sandbox);
+
+        Assert.DoesNotContain("role memory key", PrimerBuilder.BuildForSubagent(PrimerSummary.Read(connection, Now), MemoryPrecedence.EngramFirst), StringComparison.Ordinal);
+        Assert.DoesNotContain("role memory key", PrimerBuilder.Build(PrimerSummary.Read(connection, Now, role: ""), MemoryPrecedence.EngramFirst), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnInstanceStyleKey_StillLands()
+    {
+        using var sandbox = new SandboxHome();
+
+        var response = Remember(sandbox, "s1", "A lesson under an instance name.", "agent", "engram-architect-2");
+
+        Assert.DoesNotContain('\n', response);
+        Assert.StartsWith("/agents/engram-architect-2/", Assert.Single(Notes(sandbox)).Path, StringComparison.Ordinal);
+    }
+
+    private static void AssertPlusKeyLineOnly(string plain, string withRole)
+    {
+        var plainLines = plain.Split('\n');
+        var roleLines = withRole.Split('\n');
+        var keyLine = $"Your role memory key: {Role}.";
+
+        Assert.Equal(plainLines.Length + 1, roleLines.Length);
+        Assert.Single(roleLines, line => line == keyLine);
+        Assert.Equal(plainLines, roleLines.Where(line => line != keyLine));
     }
 
     [Fact]

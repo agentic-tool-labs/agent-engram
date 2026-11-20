@@ -169,17 +169,25 @@ public static class PrimerBuilder
     /// </summary>
     private static int AppendRoleBlock(List<string> lines, ref int tokens, PrimerSummary summary)
     {
-        if (summary.Role is not { } role || summary.RoleFacts is not { Count: > 0 } facts)
+        if (summary.Role is not { } role)
+        {
+            return 0;
+        }
+
+        // The key line goes out whenever the payload names a role, facts or not: a role that has
+        // never written must still learn its key, or role memory can never start (D100, F2 ruling).
+        var key = $"Your role memory key: {role}.";
+        var keyTokens = TokenEstimator.Estimate(key);
+        if (tokens + keyTokens > MaxTokens)
         {
             return 0;
         }
 
         var header = $"Role memory for {role}:";
-        var key = $"Your role memory key: {role}.";
-        var used = tokens + TokenEstimator.Estimate(header) + TokenEstimator.Estimate(key);
+        var used = tokens + TokenEstimator.Estimate(header) + keyTokens;
 
         var fitting = new List<string>();
-        foreach (var fact in facts.Take(RoleNotes.MaxDelivered))
+        foreach (var fact in (summary.RoleFacts ?? []).Take(RoleNotes.MaxDelivered))
         {
             var line = $"- {fact}";
             var lineTokens = TokenEstimator.Estimate(line);
@@ -194,6 +202,8 @@ public static class PrimerBuilder
 
         if (fitting.Count == 0)
         {
+            lines.Add(key);
+            tokens += keyTokens;
             return 0;
         }
 

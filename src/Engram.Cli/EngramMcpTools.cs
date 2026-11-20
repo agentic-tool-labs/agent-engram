@@ -86,7 +86,7 @@ public sealed class EngramMcpTools
         [Description("Depth the statement cannot carry — a full config, a long rationale, verbatim output. Most memories need none: if the statement holds it, stop there.")] string? details = null,
         [Description("What or who the fact is about, if not obvious from the statement.")] string? subject = null,
         [Description("Where this was learned — a file path, PR, or command output.")] string? evidence = null,
-        [Description("Your own name, if you are a subagent recording this fact rather than the main agent.")] string? agent = null,
+        [Description("Your role memory key as the primer gave it, if you are a subagent; never an instance name, which splits your role's memory per spawn.")] string? agent = null,
         [Description(
             "The bracketed id of a raw user-statement capture this restates, e.g. \"f42\". Closes that "
                 + "capture so the rewritten version replaces it instead of duplicating it.")] string? supersedes = null,

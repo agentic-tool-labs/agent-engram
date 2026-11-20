@@ -75,7 +75,7 @@ Engram's durable memory, and where anything worth keeping goes even when another
   param: evidence
   Where this was learned — a file path, PR, or command output.
   param: agent
-  Your own name, if you are a subagent recording this fact rather than the main agent.
+  Your role memory key as the primer gave it, if you are a subagent; never an instance name, which splits your role's memory per spawn.
   param: supersedes
   The bracketed id of a raw user-statement capture this restates, e.g. "f42". Closes that capture so the rewritten version replaces it instead of duplicating it.
   param: sync

@@ -26,6 +26,19 @@ public class HookRoleBlockTests
     }
 
     [Fact]
+    public void SubagentStart_WithARoleThatHasNoFacts_AddsOnlyTheKeyLine()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+        using var home = new TestHome();
+
+        var plain = Primer(home.Root, """{"session_id":"s1","agent_id":"a1"}""", "subagent-start", "SubagentStart").Split('\n');
+        var withRole = Primer(home.Root, """{"session_id":"s1","agent_id":"a1","agent_type":"planner"}""", "subagent-start", "SubagentStart").Split('\n');
+
+        Assert.Equal(plain.Length + 1, withRole.Length);
+        Assert.Equal(plain, withRole.Where(line => line != "Your role memory key: planner."));
+    }
+
+    [Fact]
     public void SubagentStart_WithoutAnAgentType_HasNoBlock()
     {
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
@@ -35,6 +48,7 @@ public class HookRoleBlockTests
         var context = Primer(home.Root, """{"session_id":"s1","agent_id":"a1"}""", "subagent-start", "SubagentStart");
 
         Assert.DoesNotContain("Role memory for", context, StringComparison.Ordinal);
+        Assert.DoesNotContain("role memory key", context, StringComparison.Ordinal);
         Assert.Equal(JsonValueKind.Null, Record(home.Root, "subagent-start").GetProperty("role_fact_count").ValueKind);
     }
 
