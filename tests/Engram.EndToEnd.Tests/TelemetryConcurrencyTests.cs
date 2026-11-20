@@ -6,7 +6,7 @@ namespace Engram.EndToEnd.Tests;
 public class TelemetryConcurrencyTests
 {
     [Fact(Timeout = 300_000)]
-    public async Task SessionStart_ThirtyConcurrentProcesses_AllThirtyTelemetryRecordsLand_AcrossFiveRounds()
+    public async Task SessionStart_ThirtyConcurrentProcesses_WriteNoTornRecords()
     {
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
 
