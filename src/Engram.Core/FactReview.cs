@@ -75,7 +75,10 @@ public static class FactReview
     /// <summary>
     /// Live facts whose review date has passed. Shares the "join against live fact" shape with
     /// <see cref="ListLive"/> rather than a second query, since the only difference is the
-    /// <c>review_after &lt;= $now</c> filter and the count.
+    /// <c>review_after &lt;= $now</c> filter and the count. <c>CROSS JOIN</c> pins the loop
+    /// order: driven from the small <c>fact_review</c> table with a <c>fact</c> primary-key probe
+    /// per row, instead of the planner's choice of scanning every live fact through
+    /// <c>ix_fact_scope</c> — 16 ms against 0.01 ms on a 621,904-live-fact snapshot, same count.
     /// </summary>
     public static int CountDue(SqliteConnection connection, long nowUnixSeconds)
     {
@@ -86,7 +89,7 @@ public static class FactReview
             """
             SELECT COUNT(*)
               FROM fact_review r
-              JOIN fact f ON f.id = r.fact_id
+              CROSS JOIN fact f ON f.id = r.fact_id
              WHERE f.valid_to IS NULL AND r.review_after <= $now;
             """;
         command.Parameters.AddWithValue("$now", nowUnixSeconds);

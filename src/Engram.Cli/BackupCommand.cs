@@ -105,44 +105,76 @@ public static class BackupCommand
             stdout.WriteLine("Taking a snapshot: " + decision.Reason + ".");
         }
 
+        return TakeNow(home, settings, connection, BackupScope.Authored, stdout, stderr) is null ? 1 : 0;
+    }
+
+    /// <summary>
+    /// What <c>backup take</c> does once it holds the lock and has decided to take: the snapshot,
+    /// the journals beside it, and the prune. Null when the snapshot itself could not be written.
+    /// The caller holds <see cref="BackupStore.TryLock"/>. Shared so a verb that snapshots before
+    /// rewriting (<c>reorganize</c>, D87) leaves a journal as current as the snapshot.
+    /// </summary>
+    internal static BackupSnapshot? TakeNow(
+        EngramHome home,
+        BackupSettings settings,
+        Microsoft.Data.Sqlite.SqliteConnection connection,
+        BackupScope scope,
+        TextWriter stdout,
+        TextWriter stderr,
+        string? label = null)
+    {
         BackupSnapshot snapshot;
         try
         {
-            snapshot = BackupStore.Take(connection, home, DateTimeOffset.UtcNow);
+            snapshot = BackupStore.Take(connection, home, DateTimeOffset.UtcNow, scope, label);
         }
         catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException)
         {
             stderr.WriteLine("error: could not write a snapshot — " + exception.Message);
-            return 1;
+            return null;
         }
 
         stdout.WriteLine($"Wrote {snapshot.Name} ({Size(snapshot.Bytes)}).");
+        if (snapshot.Warning is not null)
+        {
+            stderr.WriteLine("warning: " + snapshot.Warning + ".");
+        }
 
         if (settings.Journal)
         {
             try
             {
-                var facts = FactJournal.Write(connection, home, DateTimeOffset.UtcNow);
-                stdout.WriteLine($"Journalled {facts} {(facts == 1 ? "fact" : "facts")} to {FactJournal.FileName}.");
+                // From the snapshot just written, not the live store: the journal then says exactly
+                // what the file beside it holds, and a write landing between the two cannot split them.
+                using (var written = EngramDatabase.Open(snapshot.Path, home.LibDir))
+                {
+                    var facts = FactJournal.Write(written, home, DateTimeOffset.UtcNow, scope);
+                    stdout.WriteLine($"Journalled {facts} {(facts == 1 ? "fact" : "facts")} to {FactJournal.FileName}.");
 
-                var relations = RelationJournal.Write(connection, home, DateTimeOffset.UtcNow);
-                stdout.WriteLine(
-                    $"Journalled {relations} {(relations == 1 ? "relation" : "relations")} to {RelationJournal.FileName}.");
+                    var relations = RelationJournal.Write(written, home, DateTimeOffset.UtcNow, scope);
+                    stdout.WriteLine(
+                        $"Journalled {relations} {(relations == 1 ? "relation" : "relations")} to {RelationJournal.FileName}.");
 
-                var syncRequests = SyncRequestJournal.Write(connection, home, DateTimeOffset.UtcNow);
-                stdout.WriteLine(
-                    $"Journalled {syncRequests} sync {(syncRequests == 1 ? "request" : "requests")} to "
-                        + $"{SyncRequestJournal.FileName}.");
+                    var syncRequests = SyncRequestJournal.Write(written, home, DateTimeOffset.UtcNow, scope);
+                    stdout.WriteLine(
+                        $"Journalled {syncRequests} sync {(syncRequests == 1 ? "request" : "requests")} to "
+                            + $"{SyncRequestJournal.FileName}.");
 
-                var reviews = ReviewJournal.Write(connection, home, DateTimeOffset.UtcNow);
-                stdout.WriteLine(
-                    $"Journalled {reviews} review {(reviews == 1 ? "marker" : "markers")} to {ReviewJournal.FileName}.");
+                    var reviews = ReviewJournal.Write(written, home, DateTimeOffset.UtcNow, scope);
+                    stdout.WriteLine(
+                        $"Journalled {reviews} review {(reviews == 1 ? "marker" : "markers")} to {ReviewJournal.FileName}.");
+                }
             }
             catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException)
             {
                 // The snapshot is already on disk and is the tier that matters most. Failing the
                 // whole command now would report a backup that did not happen when one did.
                 stderr.WriteLine("warning: snapshot written, but the fact journal failed — " + exception.Message);
+            }
+            finally
+            {
+                // The prune below may delete an older snapshot; this one must not stay held open either.
+                EngramDatabase.ReleasePooledConnections(snapshot.Path);
             }
         }
 
@@ -153,7 +185,7 @@ public static class BackupCommand
             stdout.WriteLine($"Pruned {plan.Delete.Count} older {Snapshots(plan.Delete.Count)}, kept {plan.Keep.Count}.");
         }
 
-        return 0;
+        return snapshot;
     }
 
     private static int ListSnapshots(EngramHome home, TextWriter stdout)
@@ -165,7 +197,7 @@ public static class BackupCommand
             return 0;
         }
 
-        stdout.WriteLine("  taken (UTC)          schema      size  name");
+        stdout.WriteLine("  taken (UTC)          schema      size  scope             name");
         foreach (var snapshot in snapshots)
         {
             stdout.WriteLine(
@@ -174,6 +206,7 @@ public static class BackupCommand
                     + ("v" + snapshot.SchemaVersion.ToString(CultureInfo.InvariantCulture)).PadRight(8)
                     + Size(snapshot.Bytes).PadLeft(8)
                     + "  "
+                    + (BackupStore.ReadMarkers(snapshot, home)?.Scope ?? "unreadable").PadRight(18)
                     + snapshot.Name);
         }
 
@@ -250,6 +283,36 @@ public static class BackupCommand
             ? "  keeping the current store as a new snapshot first"
             : "  the current store would be snapshotted first, not discarded");
 
+        if (BackupStore.ReadMarkers(chosen, home) is { IsMarked: true } markers)
+        {
+            var unembedded = BackupStore.CountUnembedded(chosen, home);
+            if (unembedded > 0)
+            {
+                stdout.WriteLine();
+                stdout.WriteLine("This snapshot leaves out state Engram rebuilds:");
+
+                // What happens next depends on this home, not the snapshot: with embedding off there
+                // is no server-side backlog to promise.
+                if (EmbeddingSettings.Read(ConfigFile.Load(home.ConfigPath)).Provider == EmbeddingProvider.None)
+                {
+                    stdout.WriteLine(
+                        $"  vector index   {unembedded} {(unembedded == 1 ? "fact has" : "facts have")} no vector; embedding is off in this home, "
+                            + "so recall uses the lexical and overlap lanes only");
+                }
+                else
+                {
+                    stdout.WriteLine(
+                        $"  vector index   {unembedded} {(unembedded == 1 ? "fact" : "facts")} to embed; the server embeds them after 'engram start'");
+                    stdout.WriteLine("                 (several hours for a large store: 'engram embed --status' shows progress;");
+                    stdout.WriteLine("                  until it finishes, recall's vector lane covers only what is embedded)");
+                }
+            }
+
+            stdout.WriteLine(apply
+                ? $"  clearing the snapshot's '{markers.Scope}' scope marker from the restored store"
+                : $"  the snapshot's '{markers.Scope}' scope marker would be cleared from the restored store");
+        }
+
         if (!apply)
         {
             stdout.WriteLine();
@@ -283,6 +346,15 @@ public static class BackupCommand
         var apply = args.Contains("--apply");
         var named = args.FirstOrDefault(a => !a.StartsWith('-'));
         var path = named ?? FactJournal.PathIn(home);
+
+        if (File.Exists(path) && FactJournal.ReadScope(File.ReadLines(path)) is { } scope)
+        {
+            stdout.WriteLine("Journal scope: " + scope + ".");
+            if (scope == BackupMarkers.AuthoredScope)
+            {
+                stdout.WriteLine("  code facts are not in this journal; restore a snapshot or run 'engram index' to regenerate them");
+            }
+        }
 
         return ReplayInto(
             home,

@@ -81,13 +81,18 @@ public static class FactJournal
         return Path.Combine(home.BackupDir, FileName);
     }
 
-    /// <summary>Writes every fact in the store, live or closed, to the journal.</summary>
+    /// <summary>Writes the store's facts, live or closed, to the journal.</summary>
     /// <remarks>
-    /// Closed facts are included deliberately. A journal of only what is currently believed cannot
+    /// <para>Closed facts are included deliberately. A journal of only what is currently believed cannot
     /// reconstruct why it is believed — the supersession chain is the record of a mind changing,
-    /// and D8 protects it as authored truth exactly like the facts themselves.
+    /// and D8 protects it as authored truth exactly like the facts themselves.</para>
+    ///
+    /// <para><see cref="BackupScope.Authored"/> leaves out regenerable facts unless authored truth
+    /// depends on one — the same predicate <c>compact</c> protects with, so a fact the journal keeps
+    /// is exactly one compact would keep, and every relation, review and sync line it is written
+    /// beside resolves to a fact line in it.</para>
     /// </remarks>
-    public static int Write(SqliteConnection connection, EngramHome home, DateTimeOffset now)
+    public static int Write(SqliteConnection connection, EngramHome home, DateTimeOffset now, BackupScope scope)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(home);
@@ -102,7 +107,7 @@ public static class FactJournal
             using (var stream = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
             using (var writer = new StreamWriter(stream))
             {
-                written = WriteTo(connection, writer, pathPrefix: null, now);
+                written = WriteTo(connection, writer, pathPrefix: null, now, scope);
             }
 
             File.Move(partial, final, overwrite: true);
@@ -127,7 +132,16 @@ public static class FactJournal
         SqliteConnection connection,
         TextWriter writer,
         string? pathPrefix,
-        DateTimeOffset now)
+        DateTimeOffset now) =>
+        WriteTo(connection, writer, pathPrefix, now, scope: null);
+
+    /// <param name="scope">Null for <c>export</c>, whose header carries no scope and whose facts are all of them.</param>
+    private static int WriteTo(
+        SqliteConnection connection,
+        TextWriter writer,
+        string? pathPrefix,
+        DateTimeOffset now,
+        BackupScope? scope)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(writer);
@@ -144,10 +158,15 @@ public static class FactJournal
             header["path"] = pathPrefix;
         }
 
+        if (scope is { } named)
+        {
+            header["scope"] = BackupMarkers.NameOf(named);
+        }
+
         writer.WriteLine(header.ToJsonString());
 
         var written = 0;
-        foreach (var fact in Read(connection))
+        foreach (var fact in Read(connection, authoredOnly: scope == BackupScope.Authored))
         {
             if (pathPrefix is not null && !InSubtree(fact.Subject, pathPrefix))
             {
@@ -172,22 +191,29 @@ public static class FactJournal
         && (subject.Length == prefix.Length || subject[prefix.Length] is '/' or '#');
 
     /// <summary>Every fact in the store, oldest first, with its subject and object resolved.</summary>
-    public static IEnumerable<JournalFact> Read(SqliteConnection connection)
+    public static IEnumerable<JournalFact> Read(SqliteConnection connection) => Read(connection, authoredOnly: false);
+
+    /// <param name="authoredOnly">
+    /// Regenerable facts only where authored truth depends on them. The table is left unaliased
+    /// because <see cref="StoreCompactor.AuthoredDependencySql"/> names the outer row <c>fact</c>.
+    /// </param>
+    internal static IEnumerable<JournalFact> Read(SqliteConnection connection, bool authoredOnly)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
         using var command = connection.CreateCommand();
         command.CommandText =
             """
-            SELECT f.id, se.path, se.kind, f.predicate, f.body, oe.path, oe.kind, f.scope,
-                   f.learned_via, f.regenerable, f.evidence, f.valid_from, f.valid_to,
-                   f.superseded_by, s.reason, f.created_at, f.details
-            FROM fact f
-            JOIN entity se ON se.id = f.subject_id
-            LEFT JOIN entity oe ON oe.id = f.object_id
-            LEFT JOIN supersession s ON s.old_fact_id = f.id
-            ORDER BY f.id;
-            """;
+            SELECT fact.id, se.path, se.kind, fact.predicate, fact.body, oe.path, oe.kind, fact.scope,
+                   fact.learned_via, fact.regenerable, fact.evidence, fact.valid_from, fact.valid_to,
+                   fact.superseded_by, s.reason, fact.created_at, fact.details
+            FROM fact
+            JOIN entity se ON se.id = fact.subject_id
+            LEFT JOIN entity oe ON oe.id = fact.object_id
+            LEFT JOIN supersession s ON s.old_fact_id = fact.id
+            """
+            + (authoredOnly ? $"\nWHERE fact.regenerable = 0 OR {StoreCompactor.AuthoredDependencySql}" : string.Empty)
+            + "\nORDER BY fact.id;";
 
         using var reader = command.ExecuteReader();
         while (reader.Read())
@@ -210,6 +236,32 @@ public static class FactJournal
                 reader.IsDBNull(14) ? null : reader.GetString(14),
                 reader.GetInt64(15),
                 reader.IsDBNull(16) ? null : reader.GetString(16));
+        }
+    }
+
+    /// <summary>
+    /// The header's <c>scope</c>: <c>full</c> when the header has none, which is what every journal
+    /// written before scopes existed is. Null when the first line is not a readable header.
+    /// </summary>
+    public static string? ReadScope(IEnumerable<string> lines)
+    {
+        ArgumentNullException.ThrowIfNull(lines);
+
+        var first = lines.FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
+        if (first is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonNode.Parse(first) is JsonObject header && header.ContainsKey("format")
+                ? header["scope"]?.GetValue<string>() ?? BackupMarkers.FullScope
+                : null;
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException or FormatException)
+        {
+            return null;
         }
     }
 

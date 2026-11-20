@@ -138,7 +138,7 @@ public static class StoreCompactor
                 return report;
             }
 
-            var snapshot = BackupStore.Take(connection, home, now, label: "pre-compact");
+            var snapshot = BackupStore.Take(connection, home, now, BackupScope.Authored, label: "pre-compact");
             BackupStore.PruneAfterWrite(home, snapshot);
 
             using (var transaction = EngramDatabase.BeginWrite(connection))
