@@ -6161,7 +6161,11 @@ transactions: 36.5 s of transactions, 574 ms to 3,832 ms each, and **6 of 6** co
 IMMEDIATE` writers (busy_timeout 5000) failed `database is locked` at about 5.4 s. The lock was free for
 0.1 ms between transactions, and a writer sleeping in its busy handler never lands in that window. So
 per-prefix transactions bounded each transaction and not the run. A sleep between prefixes would have to
-beat SQLite's busy-handler schedule; a time budget bounds the run, not any writer's wait.
+beat SQLite's busy-handler schedule; a time budget bounds the run, not any writer's wait. **That copy was
+in rollback-journal mode, not WAL**: `VACUUM INTO` writes its output that way, and the real store is WAL
+(schema line 18). Re-run on a WAL copy, the same 25 back-to-back transactions failed 0 of 16 writes, but
+the longest waited 4,822 ms against a 5,000 ms busy_timeout — a near miss rather than a margin, so the
+rule stands on the WAL number. A measurement made on a copy has to check the copy's journal mode first.
 
 **Why entities, measured.** E7 fitted each removal's delete phase: vectors R² 0.965, entities 0.929,
 facts 0.770, file states 0.232. Fact count does not even order cost — 10,726 facts took 917 ms and 6,487
@@ -6201,5 +6205,11 @@ automatically" past grace over the cap; Warn "automatic removal has not run" mor
 A row whose checkout is absent here is Ok "kept: checkout not on this machine", never Warn. Doctor does
 not read telemetry, so `over_budget` is telemetry-only.
 
-**Open.** E8, the envelope check with real `engram_remember` writes against each automatic run. The
-`[sync]` repo-scope listing §5 of the spec mentions is not built.
+**The envelope, measured (E8).** On a WAL copy with a server on its own port taking an `engram_remember`
+every 100 ms over MCP, twelve automatic runs removed one prefix each, oldest first, then the thirteenth
+removed nothing: 13 of the 25 prefixes are over the cap (2,278 to 19,719 entities) and are the manual
+verb's. Every transaction took 388–607 ms; 536 writes, none failed, the slowest 673 ms. On a rollback
+copy the same runs failed nothing either, but one write per run waited 3.0–4.8 s on the snapshot's
+`VACUUM INTO`, which blocks writers there and not under WAL.
+
+**Open.** The `[sync]` repo-scope listing §5 of the spec mentions is not built.
