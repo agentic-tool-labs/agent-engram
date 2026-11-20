@@ -7028,6 +7028,7 @@ Orchestrator ruled it in.
 - The fold invents one: the same-batch no-reason test reddens.
 - The backfill inserts into whatever row its key lookup reaches, whether or not the update moved a
   pointer: the pointer-already-set test reddens.
+- Ambiguity counted over unclaimed rows again: the order-independence test reddens.
 
 **F-c tripwire.** `supersession.evidence` is not journalled and is not being journalled. Its only
 writer, `Remember`'s supersede branch, stores the same value as the superseding fact's
