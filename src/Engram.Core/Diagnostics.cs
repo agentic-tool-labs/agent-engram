@@ -134,13 +134,7 @@ public static class Diagnostics
         Try(checks, "tree-sitter", list => list.Add(CheckTreeSitter(environment, home)));
         Try(checks, "indexing config", list => CheckIndexingConfig(IndexingSettings.Read(config), list));
         Try(checks, "indexing/enrollment", list => list.AddRange(CheckEnrolledRepos(home, connection, DateTimeOffset.UtcNow, config)));
-        Try(checks, "indexing", list =>
-        {
-            if (CheckRetiredPaths(connection) is { } retired)
-            {
-                list.Add(retired);
-            }
-        });
+        Try(checks, "indexing", list => list.AddRange(CheckRetiredPaths(connection, IndexingSettings.Read(config), DateTimeOffset.UtcNow)));
 
         if (repoRoot is not null)
         {
@@ -1052,6 +1046,13 @@ public static class Diagnostics
 
     private static void CheckIndexingConfig(IndexingSettings settings, List<Diagnosis> checks)
     {
+        // A misread value reads as its default; saying so is the only way someone learns the
+        // switch they set is off (D97: an unparseable auto_remove_retired never turns removal on).
+        foreach (var problem in settings.Problems)
+        {
+            checks.Add(new Diagnosis("indexing", DiagnosisState.Warn, problem, "fix the value in config.toml"));
+        }
+
         foreach (var stale in settings.Ignored)
         {
             checks.Add(new Diagnosis(
@@ -1234,42 +1235,120 @@ public static class Diagnostics
     /// there are none; Warn, never Broken, because nothing is wrong until someone wants the space
     /// back (D37).
     /// </summary>
-    internal static Diagnosis? CheckRetiredPaths(SqliteConnection? connection)
+    /// <remarks>
+    /// With <c>[indexing] auto_remove_retired</c> on (D97) the rows say what automatic removal
+    /// will do: Ok while every path is inside its grace period, Warn for a path too large for it
+    /// (<see cref="StoreCompactor.EntitiesUnder"/> over <see cref="StoreCompactor.AutoRemoveCap"/>,
+    /// the verb's own count) or one more than a day overdue. A path whose checkout is absent here is counted apart, as
+    /// Ok: nothing can or should remove it on this machine. No git call — presence is
+    /// <see cref="Directory.Exists(string)"/>.
+    /// </remarks>
+    internal static IReadOnlyList<Diagnosis> CheckRetiredPaths(
+        SqliteConnection? connection, IndexingSettings? settings = null, DateTimeOffset? now = null)
     {
         if (connection is null)
         {
-            return null;
+            return [];
         }
 
         using var command = connection.CreateCommand();
         command.CommandText =
             """
-            SELECT COUNT(DISTINCT r.repo_path), COUNT(f.path)
+            SELECT r.disk_path, r.detached_at, COUNT(f.path), r.repo_path
             FROM repo_registry r JOIN file_state f ON f.repo_path = r.repo_path
-            WHERE r.detached_at IS NOT NULL;
+            WHERE r.detached_at IS NOT NULL
+            GROUP BY r.repo_path;
             """;
 
-        long paths;
-        long files;
+        var present = new List<(long DetachedAt, long Files, string RepoPath)>();
+        var absent = 0;
         try
         {
             using var reader = command.ExecuteReader();
-            reader.Read();
-            paths = reader.GetInt64(0);
-            files = reader.GetInt64(1);
+            while (reader.Read())
+            {
+                if (reader.IsDBNull(0) || !Directory.Exists(reader.GetString(0)))
+                {
+                    absent++;
+                }
+                else
+                {
+                    present.Add((reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3)));
+                }
+            }
         }
         catch (SqliteException e) when (IsSchemaAbsence(e))
         {
-            return null;
+            return [];
         }
 
-        return paths == 0
-            ? null
-            : new Diagnosis(
+        var rows = new List<Diagnosis>();
+        const string Fix = "engram compact --retired";
+        if (present.Count > 0 && !(settings?.AutoRemoveRetired ?? false))
+        {
+            rows.Add(new Diagnosis(
                 "indexing",
                 DiagnosisState.Warn,
-                $"{paths} superseded registry path(s) still hold indexed files ({files} file states); "
-                    + "they are excluded from code lookup and will be removable in a later version");
+                $"{present.Count} superseded registry path(s) still hold indexed files ({present.Sum(p => p.Files)} file states); "
+                    + "run `engram compact --retired` to see what removing them would free, or set "
+                    + $"`[indexing] {IndexingSettings.AutoRemoveRetiredKey} = true` to remove them automatically after "
+                    + $"{StoreCompactor.AutoRemoveGraceDays} days",
+                Fix));
+        }
+        else if (present.Count > 0)
+        {
+            var at = (now ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds();
+            var grace = StoreCompactor.AutoRemoveGraceDays * 86_400L;
+            // The verb's own size test, on the same count, so the two cannot disagree (D97, A2).
+            bool Large((long DetachedAt, long Files, string RepoPath) p) =>
+                StoreCompactor.EntitiesUnder(connection, p.RepoPath) > StoreCompactor.AutoRemoveCap;
+
+            var pastGrace = present.Where(p => p.DetachedAt <= at - grace).ToList();
+            var large = pastGrace.Where(Large).ToList();
+            var tooLarge = large.Count;
+            var overdue = pastGrace.Count(p => !large.Contains(p) && p.DetachedAt <= at - grace - 86_400L);
+            var pending = present
+                .Where(p => !large.Contains(p))
+                .Where(p => !(p.DetachedAt <= at - grace - 86_400L))
+                .ToList();
+
+            if (tooLarge > 0)
+            {
+                rows.Add(new Diagnosis(
+                    "indexing",
+                    DiagnosisState.Warn,
+                    $"{tooLarge} superseded registry path(s) too large to remove automatically",
+                    Fix));
+            }
+
+            if (overdue > 0)
+            {
+                rows.Add(new Diagnosis(
+                    "indexing",
+                    DiagnosisState.Warn,
+                    $"{overdue} superseded registry path(s) past the grace period: automatic removal has not run; it runs at session start",
+                    Fix));
+            }
+
+            if (pending.Count > 0)
+            {
+                var earliest = DateTimeOffset.FromUnixTimeSeconds(pending.Min(p => p.DetachedAt) + grace);
+                rows.Add(new Diagnosis(
+                    "indexing",
+                    DiagnosisState.Ok,
+                    $"{pending.Count} superseded path(s), removed automatically after {earliest:yyyy-MM-dd}"));
+            }
+        }
+
+        if (absent > 0)
+        {
+            rows.Add(new Diagnosis(
+                "indexing",
+                DiagnosisState.Ok,
+                $"{absent} superseded registry path(s) kept: checkout not on this machine"));
+        }
+
+        return rows;
     }
 
     /// <summary>

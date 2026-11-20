@@ -163,6 +163,18 @@ public static class TelemetryEventKind
     public const string ModCall = "mod-call";
 
     /// <summary>
+    /// A <c>compact --retired --apply</c> run that had at least one eligible prefix (D97):
+    /// <c>started</c>, one <c>removed</c> per prefix with <c>repo</c> = the removed
+    /// <c>repo_path</c>, then <c>finished</c> or <c>failed</c>. Every record carries
+    /// <c>trigger</c> (<c>auto</c> or <c>manual</c>) and no counts (D55).
+    /// </summary>
+    /// <remarks>
+    /// Its own kind, never <see cref="Index"/>, which answers whether indexing runs (D56). A dry
+    /// run emits nothing (D69).
+    /// </remarks>
+    public const string RetiredRemoval = "retired-removal";
+
+    /// <summary>
     /// Every kind Engram emits.
     /// </summary>
     /// <remarks>
@@ -175,7 +187,7 @@ public static class TelemetryEventKind
         Recall, Remember, Digest, Browse, Expand, Revise, Timeline, Judge,
         SessionStart, ServerStart, ServerStop, SessionOpen, SubagentStart, PreCompact, PostCompact,
         FileTouched, UserPrompt, MemoryGuard, LookupNudge, ToolObserved, Index, Embedding, Enrollment,
-        Sync, Navigate, Report, ModCall,
+        Sync, Navigate, Report, ModCall, RetiredRemoval,
     ];
 }
 
@@ -335,7 +347,21 @@ public sealed record TelemetryRecord(
     /// server's share of the latency and not the caller's. Only a <see cref="TelemetryEventKind.ModCall"/>
     /// recall sets this; the other operations are not on a latency budget anyone reads.
     /// </summary>
-    [property: JsonPropertyName("duration_ms")] double? DurationMs = null);
+    [property: JsonPropertyName("duration_ms")] double? DurationMs = null,
+
+    /// <summary>
+    /// What started a <see cref="TelemetryEventKind.RetiredRemoval"/> run: <c>auto</c> (session
+    /// start, <c>[indexing] auto_remove_retired</c>) or <c>manual</c>. Only that kind sets it.
+    /// </summary>
+    [property: JsonPropertyName("trigger")] string? Trigger = null,
+
+    /// <summary>
+    /// True on a <see cref="TelemetryEventKind.RetiredRemoval"/> <c>finished</c> record whose
+    /// automatic transaction held the write lock longer than
+    /// <see cref="StoreCompactor.AutoOverBudget"/>; absent otherwise. A bool, not a duration
+    /// (D55). Only that kind sets it.
+    /// </summary>
+    [property: JsonPropertyName("over_budget")] bool? OverBudget = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

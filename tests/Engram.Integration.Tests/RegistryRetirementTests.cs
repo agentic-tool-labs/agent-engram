@@ -489,22 +489,22 @@ public class RegistryRetirementTests
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         FullIndex(connection, sandbox, repo, apply: true);
 
-        Assert.Null(Diagnostics.CheckRetiredPaths(connection));
+        Assert.Empty(Diagnostics.CheckRetiredPaths(connection));
 
         RunGit(repo, "remote", "set-url", "origin", OriginB);
         FullIndex(connection, sandbox, repo, apply: true);
         var files = Count(connection,
             "SELECT COUNT(*) FROM file_state f JOIN repo_registry r ON r.repo_path = f.repo_path WHERE r.detached_at IS NOT NULL;");
 
-        var diagnosis = Diagnostics.CheckRetiredPaths(connection);
+        var diagnosis = Assert.Single(Diagnostics.CheckRetiredPaths(connection));
 
-        Assert.NotNull(diagnosis);
         Assert.Equal(DiagnosisState.Warn, diagnosis.State);
-        Assert.Equal(
+        Assert.StartsWith(
             $"1 superseded registry path(s) still hold indexed files ({files} file states); "
-                + "they are excluded from code lookup and will be removable in a later version",
-            diagnosis.Detail);
-        Assert.Null(diagnosis.Fix);
+                + "run `engram compact --retired` to see what removing them would free",
+            diagnosis.Detail,
+            StringComparison.Ordinal);
+        Assert.Equal("engram compact --retired", diagnosis.Fix);
         Assert.True(files > 0);
     }
 
@@ -514,7 +514,7 @@ public class RegistryRetirementTests
         using var connection = new SqliteConnection("Data Source=:memory:");
         connection.Open();
 
-        Assert.Null(Diagnostics.CheckRetiredPaths(connection));
+        Assert.Empty(Diagnostics.CheckRetiredPaths(connection));
     }
 
     // ---- helpers ---------------------------------------------------------------------------
