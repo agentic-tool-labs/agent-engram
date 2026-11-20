@@ -31,10 +31,12 @@ public sealed record JournalFact(
 /// supersession edge adds nothing, because every record reaching that branch was already counted here (D68).
 /// </param>
 /// <param name="Conflicted">
-/// Records nothing was recovered for. Two shapes: a fact left out because the target already believes
-/// something else about that subject and predicate, and a fact whose body was already present but whose
-/// supersession edge the target disagreed with (D68) — the second also counts
-/// <paramref name="AlreadyPresent"/>, since both statements are true of it.
+/// Records nothing was recovered for. Three shapes: a fact left out because the target already believes
+/// something else about that subject and predicate; a fact whose body was already present but whose
+/// supersession edge the target disagreed with (D68); and a retraction whose body was already present but
+/// whose target row is live, closed by a replacement, or closed with no supersession row at all (D99). The
+/// last two also count <paramref name="AlreadyPresent"/>, since both statements are true of them. Counted
+/// on apply only, so a dry run's figure can be lower.
 /// </param>
 public sealed record ReplayResult(int Written, int AlreadyPresent, int Unresolved, int Conflicted);
 
@@ -349,6 +351,13 @@ public static class FactJournal
     /// journal replayed into a store that had been initialised (and so carries the seeded corpus)
     /// recovered nothing at all.</para>
     ///
+    /// <para><b>A forgotten fact keeps its retraction.</b> A journal record closed with no
+    /// superseder and a reason is what <c>Forget</c> leaves, and replay writes its NULL-new
+    /// <c>supersession</c> row — but only into a row this replay inserted, the same provenance rule
+    /// as an edge (D68). A matching row the target already held is never written to: one that
+    /// already carries a retraction counts nothing more, and any other state counts
+    /// <c>Conflicted</c> beside <c>AlreadyPresent</c> (D99).</para>
+    ///
     /// <para><c>session_id</c> is deliberately dropped. Sessions are local to a store, so carrying
     /// the number across would point a recovered fact at an unrelated session or a missing one.
     /// The provenance that survives is the part that means something anywhere: the subject, the
@@ -427,6 +436,16 @@ public static class FactJournal
                 if (match.AddressUsable)
                 {
                     idMapBuilder[fact.Id] = match.Id;
+
+                    // The body was here; whether its retraction was is a separate statement. Only a
+                    // closed row already carrying a NULL-new supersession row says so. Live, closed by
+                    // a replacement, or closed with no account all count Conflicted, and none is
+                    // written to: replay cannot tell a row it did not insert from one the target
+                    // closed on its own (D68, D99).
+                    if (IsRetraction(fact) && !RetractionRecorded(connection, transaction, match.Id))
+                    {
+                        conflicted++;
+                    }
                 }
                 else if (fact.SupersededBy is not null)
                 {
@@ -448,9 +467,17 @@ public static class FactJournal
                 continue;
             }
 
-            idMapBuilder[fact.Id] = Insert(connection, transaction, fact);
+            var newId = Insert(connection, transaction, fact);
+            idMapBuilder[fact.Id] = newId;
             inserted.Add(fact.Id);
             written++;
+
+            // Here, straight after Insert, is what makes provenance the test: this row is one this
+            // replay just wrote. No increment — the record was already counted Written (D68, D99).
+            if (IsRetraction(fact))
+            {
+                Retract(connection, transaction, newId, fact);
+            }
         }
 
         foreach (var fact in facts)
@@ -601,6 +628,54 @@ public static class FactJournal
         // address a supersession points at. Several closed duplicates give no basis for preferring
         // one.
         return new ExistingMatch(id, AddressUsable: !ambiguous || live);
+    }
+
+    /// <summary>
+    /// The shape <see cref="FactStore.Forget(SqliteConnection, SqliteTransaction, long, string, DateTimeOffset, long?)"/>
+    /// leaves in the journal: closed, no superseder, a reason (D99).
+    /// </summary>
+    /// <remarks>
+    /// The reason is the part that separates a retraction from a closed fact with no
+    /// <c>supersession</c> row at all — a pointer an earlier replay lost, or a close nothing
+    /// explained. Inventing a retraction for those would state an account the source never had.
+    /// </remarks>
+    private static bool IsRetraction(JournalFact fact) =>
+        fact.ValidTo is not null && fact.SupersededBy is null && fact.SupersessionReason is not null;
+
+    private static bool RetractionRecorded(SqliteConnection connection, SqliteTransaction transaction, long factId)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT 1 FROM fact f JOIN supersession s ON s.old_fact_id = f.id
+            WHERE f.id = $id AND f.valid_to IS NOT NULL AND s.new_fact_id IS NULL;
+            """;
+        command.Parameters.AddWithValue("$id", factId);
+        return command.ExecuteScalar() is not null;
+    }
+
+    /// <summary>
+    /// Writes a journalled retraction's <c>supersession</c> row into a row this replay inserted.
+    /// <c>fact</c> is not touched: <see cref="Insert"/> already wrote it closed and unindexed.
+    /// </summary>
+    private static void Retract(SqliteConnection connection, SqliteTransaction transaction, long factId, JournalFact fact)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        // A forget stamps the fact's valid_to and the row's created_at with the same instant, so
+        // valid_to is the row's time. ON CONFLICT is defensive, as in Link: a row inserted moments
+        // ago cannot already have one.
+        command.CommandText =
+            """
+            INSERT INTO supersession (old_fact_id, new_fact_id, reason, created_at)
+            VALUES ($old, NULL, $reason, $createdAt)
+            ON CONFLICT(old_fact_id) DO NOTHING;
+            """;
+        command.Parameters.AddWithValue("$old", factId);
+        command.Parameters.AddWithValue("$reason", fact.SupersessionReason!);
+        command.Parameters.AddWithValue("$createdAt", fact.ValidTo!.Value);
+        command.ExecuteNonQuery();
     }
 
     private static long? CurrentSupersededBy(SqliteConnection connection, SqliteTransaction transaction, long factId)

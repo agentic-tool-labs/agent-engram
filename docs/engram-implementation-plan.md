@@ -6098,4 +6098,55 @@ reproduces the journalled subset exactly and writes no regenerable fact, since n
 
 **Found, not changed.** Replay rebuilds a supersession row only through `superseded_by`, so a forget
 row (`new_fact_id` NULL) is not reproduced by any replay, full or authored. Replay semantics were out
-of scope here.
+of scope here. D99 fixes it.
+
+## D99 — Replay recreates a forgotten fact's retraction, only in a row it inserted
+
+`FactStore.Forget` is the only writer of a `supersession` row with `new_fact_id` NULL, and the journal
+already carries everything that row holds: `FactJournal.Read` LEFT JOINs `supersession`, so a forgotten
+fact is written closed, with `superseded_by` null and the forget's `reason`, and a forget stamps
+`valid_to` and the row's `created_at` with one instant. Replay dropped it — pass 2 acts only on a
+`superseded_by` — so a recovered store held the fact closed with no record of why or when, which reads
+as a supersession whose replacement was lost, and `ix_supersession_retracted` missed it. No journal
+format change: the record was always complete, only the reader ignored it.
+
+**A record is a retraction iff `valid_to` is set, `superseded_by` is null, and `reason` is set.** That
+is exactly the shape `Forget` leaves. The reason is what excludes a closed fact with no `supersession`
+row at all — a pointer an earlier replay lost, or a close nothing explained — and inventing a
+retraction for one of those would state an account the source never had. A `superseded_by` that does
+not resolve stays `Unresolved`: a NULL row there would turn a replacement into a forget.
+
+**Written only into a row this replay inserted, by D68's provenance rule, and for D68's reason.** A
+replay-inserted closed row and a pre-existing forgotten row are structurally identical, so the test is
+the `inserted` set straight after `Insert`, never a row-state predicate; `fact` is not touched (it is
+already closed, and `Insert` never indexed it), and the record adds no increment — it was counted
+`Written`. A retraction whose body the target already held is decided on the row `Existing()` returns:
+
+| Matched target row | Written | Extra count |
+|---|---|---|
+| Live | nothing; never closed (D32) | `Conflicted` |
+| Closed, has a NULL-new `supersession` row (any reason) | nothing | none — already recovered |
+| Closed, superseded by a replacement | nothing; its account stands | `Conflicted` |
+| Closed, no `supersession` row | nothing; no backfill | `Conflicted` |
+| Several closed duplicates, none live | nothing | none — no row to address |
+
+**No backfill, by user decision U1's default.** A store already replayed by an older binary holds its
+forgotten facts closed with no row, and stays that way: replay cannot tell such a row from one the
+target closed with no account, which is D68's whole premise. Counting it `Conflicted` beside
+`AlreadyPresent` makes it visible rather than silent. Allowing it would be an exception to D68.
+
+**The dry run counts exactly what it did before.** Retraction state, like D68's edges, is classified
+on apply only, so a dry run's `Conflicted` can be lower than the apply's; closing that gap for both
+would change existing dry-run output and is out of scope. Every caller of `FactJournal.Replay` gets
+the rule — `backup replay`, `import`, legacy import (whose retractions have always carried a reason),
+and sync.
+
+Guarded in `FactJournalTests` (N1–N14) and `ExportImportTests` (N15). Falsified against a committed
+tree: the pre-D99 `FactJournal.cs` reddens eight (N1–N3, N5, N6, N12, N13, N15); backfilling on the
+row-state predicate while keeping the counts reddens N5 on its row count; dropping the reason condition
+reddens N10 alone; applying the rule to an unresolved `superseded_by` reddens N8 alone; counting every
+matched retraction a conflict reddens N2 and N4; classifying an ambiguous match reddens N7; classifying
+in the dry run reddens N14; dropping the `superseded_by` condition reddens N8, N9 and three existing replay tests. Not fixed here, filed separately: a forget and a
+restatement in the same second share the identity key, so the live restatement matches the closed row
+and is never restored; `Sync.ApplyClose` with no superseder writes no `supersession` row; and
+`supersession.evidence` is never journalled.
