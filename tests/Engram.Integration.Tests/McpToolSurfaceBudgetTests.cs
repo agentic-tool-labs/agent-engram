@@ -35,7 +35,12 @@ public class McpToolSurfaceBudgetTests
     // (a constant, not a discriminator — D37 says a banner is read as noise) and into this
     // static description instead, which is sent once per turn rather than once per matching
     // result. Net cost per session goes down; this ceiling only measures the one-time cost.
-    private const int MaxDefinitionChars = 6550;
+    //
+    // Re-baselined 6,550 -> 6,591 (D85, Orchestrator ruling) when engram_recall gained `types`:
+    // a model cannot use the filter without the six names, and learning them from an error costs
+    // a failed call per session. Only 14 characters of headroom existed and the names alone are
+    // 36, so the parameter is the shortest wording that names them and the default.
+    private const int MaxDefinitionChars = 6591;
 
     // 10 -> 11 when engram_navigate joined for code navigation (docs/code-navigation-spec.md
     // §3.4): defined_at/imports read entity and fact tables directly rather than going through

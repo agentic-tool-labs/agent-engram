@@ -21,6 +21,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Backup artifacts written by an older build, so old-format restore and replay is tested against real output. -->
+    <None Include="Fixtures/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../../src/Engram.Core/Engram.Core.csproj" />
     <ProjectReference Include="../../src/Engram.Cli/Engram.Cli.csproj" />
     <!-- Builds the sidecar so its tests can drive the real binary, without linking

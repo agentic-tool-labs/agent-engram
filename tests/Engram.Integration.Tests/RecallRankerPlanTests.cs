@@ -9,10 +9,10 @@ namespace Engram.Integration.Tests;
 /// text was written ("pin reality, not a hope") — not the properties hoped for.
 /// </summary>
 /// <remarks>
-/// The prior-session fact scan formerly accepted here is removed by the entity-path range
-/// and entity-first join. Entity paths stay authoritative, and every prior session is still
-/// enumerated even when it contributes no candidates. The two live-fact indexes avoid
-/// fetching closed history rows for each session entity.
+/// Prior sessions are enumerated from <c>session</c> with a stop-at-first probe over
+/// <c>ix_fact_session</c> (D84, superseding D81's entity-first two-partition form). Entity paths
+/// stay authoritative, and every prior session is still enumerated even when it contributes no
+/// candidates.
 /// </remarks>
 public class RecallRankerPlanTests
 {
@@ -30,11 +30,15 @@ public class RecallRankerPlanTests
     /// instead, and reported narratively rather than pinned to a test that cannot see that store.
     /// </summary>
     [Theory]
-    [InlineData(true, false)]
-    [InlineData(false, false)]
-    [InlineData(true, true)]
-    [InlineData(false, true)]
-    public void TheRankingStatement_SeeksFactsAndTokensByIndex(bool overlapAvailable, bool vectorAvailable)
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, true)]
+    [InlineData(false, false, true)]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, true)]
+    public void TheRankingStatement_SeeksFactsAndTokensByIndex(bool overlapAvailable, bool vectorAvailable, bool filtered)
     {
         Assert.SkipUnless(!vectorAvailable || VectorExtensionFile.Path is not null, VectorExtensionFile.SkipReason);
         using var sandbox = new SandboxHome(initialize: false);
@@ -53,15 +57,26 @@ public class RecallRankerPlanTests
                 T0);
         }
 
-        var lines = CapturePlan(connection, overlapAvailable, vectorAvailable);
-        Assert.Contains(lines, line => line.Contains("SEARCH f USING INDEX ux_fact_live (subject_id=?)", StringComparison.Ordinal));
-        Assert.Contains(lines, line => line.Contains("SEARCH f USING INDEX ux_fact_edge_live (subject_id=?)", StringComparison.Ordinal));
+        var lines = CapturePlan(connection, overlapAvailable, vectorAvailable, filtered);
+        Assert.Contains(lines, line => line.Contains("SEARCH f USING INDEX ix_fact_session (session_id=?)", StringComparison.Ordinal));
         var unexpectedFactScans = UnexplainedFactScans(lines);
 
         Assert.True(
             unexpectedFactScans.Count == 0,
             $"overlapAvailable={overlapAvailable}: unexpected SCAN of fact — "
                 + $"{string.Join(" | ", unexpectedFactScans)}\nfull plan:\n{string.Join("\n", lines)}");
+
+        // D90's CTEs. `excluded` seeks the directive subtree by path range and, on a default call,
+        // the default-excluded scopes by the partial scope index; the current-session arm seeks by
+        // session beside prior_sessions' probe; `scored` is built once for its two readers.
+        Assert.Contains("SEARCH e USING COVERING INDEX sqlite_autoindex_entity_1 (path>? AND path<?)", lines);
+        if (!filtered)
+        {
+            // A filter may seek ix_fact_scope for its own predicate, so only the default pins it.
+            Assert.Contains("SEARCH f USING INDEX ix_fact_scope (scope=?)", lines);
+        }
+        Assert.Equal(overlapAvailable ? 2 : 1, lines.Count(line => line.Contains("SEARCH f USING INDEX ix_fact_session (session_id=?)", StringComparison.Ordinal)));
+        Assert.Contains("MATERIALIZE scored", lines);
 
         var tokenAccess = lines.Where(line => line.Contains("fact_token", StringComparison.Ordinal)).ToList();
         Assert.True(
@@ -89,9 +104,13 @@ public class RecallRankerPlanTests
         .Where(line => line.Contains(" f ", StringComparison.Ordinal) || line.Contains(" f2", StringComparison.Ordinal) || line.EndsWith(" f", StringComparison.Ordinal))
         .ToList();
 
-    private static List<string> CapturePlan(SqliteConnection connection, bool overlapAvailable, bool vectorAvailable)
+    private static List<string> CapturePlan(SqliteConnection connection, bool overlapAvailable, bool vectorAvailable, bool filtered)
     {
-        var text = RecallRanker.StatementFor(overlapAvailable, vectorAvailable, "fact_vec");
+        var text = RecallRanker.StatementFor(overlapAvailable, vectorAvailable, "fact_vec", filtered);
+        if (filtered)
+        {
+            Assert.Contains("json_each($types)", text, StringComparison.Ordinal);
+        }
 
         using var command = connection.CreateCommand();
         command.CommandText = "EXPLAIN QUERY PLAN\n" + text;
@@ -101,6 +120,11 @@ public class RecallRankerPlanTests
         command.Parameters.AddWithValue("$currentSessionId", DBNull.Value);
         command.Parameters.AddWithValue("$now", T0.ToUnixTimeSeconds());
         command.Parameters.AddWithValue("$limit", 501);
+        if (filtered)
+        {
+            command.Parameters.AddWithValue("$types", "[\"user\"]");
+        }
+
         if (vectorAvailable)
         {
             command.Parameters.AddWithValue("$embedding", new float[] { 1f, 0f, 0f, 0f }.SelectMany(value => BitConverter.GetBytes(value)).ToArray());

@@ -1,0 +1,2 @@
+{"format":"engram-sync-requests","format_version":1,"schema_version":19,"written_at":"2026-11-19T20:23:44.5894990\u002B00:00"}
+{"fact_subject":"/knowledge/fixture/release","fact_predicate":"states","fact_body":"the fixture ships on Mondays","fact_valid_from":2000,"requested_at":3000}

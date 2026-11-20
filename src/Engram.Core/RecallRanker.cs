@@ -22,7 +22,8 @@ public sealed record RankOutcome(
     int CorroboratedTotal,
     FactTokenIndexState OverlapState,
     VectorLaneState VectorState,
-    string VectorReason);
+    string VectorReason,
+    IReadOnlyList<string>? Types = null);
 
 /// <summary>
 /// The one class that produces the ranking statement SQLite executes for recall (spec §2.1).
@@ -94,9 +95,9 @@ public static class RecallRanker
     /// stays as is unless recorded evidence (D44's method) shows a hidden candidate actually
     /// mattering. <c>explain</c> is the caller that needs
     /// a larger value, because its <c>--limit</c> can exceed the budget bound and D30 makes it a
-    /// promise about the ranker rather than a view of the first 501 rows. Coverage is unaffected
-    /// either way: it reads the window columns computed over the unbounded matched set, not the
-    /// materialized one.
+    /// promise about the ranker rather than a view of the first 501 rows. It also sets how many
+    /// eligible overlap hits the statement joins and scores (D90). Coverage is unaffected either way:
+    /// the statement's <c>totals</c> CTE counts the whole matched set, never the materialized prefix.
     /// </param>
     public static RankOutcome Rank(
         SqliteConnection connection,
@@ -107,7 +108,8 @@ public static class RecallRanker
         DateTimeOffset now,
         VectorLaneQuery vectorQuery,
         int minCandidates = 0,
-        IReadOnlySet<long>? pinnedFactIds = null)
+        IReadOnlySet<long>? pinnedFactIds = null,
+        IReadOnlyList<string>? types = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(query);
@@ -127,13 +129,9 @@ public static class RecallRanker
         var overlapAvailable = overlapState == FactTokenIndexState.Ready;
         var vectorAvailable = vectorQuery.State == VectorLaneState.Queried;
 
-        var text = overlapAvailable && vectorAvailable
-            ? StatementFor(true, true, VectorIndex.TableName)
-            : overlapAvailable
-                ? StatementFor(true, false, VectorIndex.TableName)
-                : vectorAvailable
-                    ? StatementFor(false, true, VectorIndex.TableName)
-                    : StatementFor(false, false, VectorIndex.TableName);
+        // types is a normalized registry list (MemoryScopes.TryNormalize) or null for the default.
+        var filtered = types is not null;
+        var text = StatementFor(overlapAvailable, vectorAvailable, VectorIndex.TableName, filtered);
 
         var agentNames = FactStore.ReadEntityNames(connection, SessionFacts.AgentKind);
 
@@ -148,6 +146,11 @@ public static class RecallRanker
         if (vectorAvailable)
         {
             command.Parameters.AddWithValue("$embedding", ToBlob(vectorQuery.Embedding!));
+        }
+
+        if (filtered)
+        {
+            MemoryScopes.BindFilter(command, types!);
         }
 
         var candidates = new List<RecallCandidate>();
@@ -191,7 +194,8 @@ public static class RecallRanker
             corroboratedTotal,
             overlapState,
             vectorQuery.State,
-            vectorQuery.Reason);
+            vectorQuery.Reason,
+            types);
     }
 
     /// <summary>Builds the RECALL digest text, mirroring what the object ranker's Pack used to do.</summary>
@@ -203,8 +207,9 @@ public static class RecallRanker
         long? currentSessionId,
         DateTimeOffset now,
         VectorLaneQuery vectorQuery,
-        IReadOnlySet<long>? pinnedFactIds = null) =>
-        PackWithOutcome(connection, query, budgetTokens, seedK, currentSessionId, now, vectorQuery, pinnedFactIds).Result;
+        IReadOnlySet<long>? pinnedFactIds = null,
+        IReadOnlyList<string>? types = null) =>
+        PackWithOutcome(connection, query, budgetTokens, seedK, currentSessionId, now, vectorQuery, pinnedFactIds, types).Result;
 
     /// <summary>
     /// <see cref="Pack"/> plus the structured values the digest was written from, from the same run.
@@ -222,10 +227,11 @@ public static class RecallRanker
         long? currentSessionId,
         DateTimeOffset now,
         VectorLaneQuery vectorQuery,
-        IReadOnlySet<long>? pinnedFactIds = null)
+        IReadOnlySet<long>? pinnedFactIds = null,
+        IReadOnlyList<string>? types = null)
     {
         var outcome = Rank(
-            connection, query, budgetTokens, seedK, currentSessionId, now, vectorQuery, pinnedFactIds: pinnedFactIds);
+            connection, query, budgetTokens, seedK, currentSessionId, now, vectorQuery, pinnedFactIds: pinnedFactIds, types: types);
 
         var includedLines = new List<string>();
         var packed = new List<RecallCandidate>();
@@ -258,10 +264,11 @@ public static class RecallRanker
         var factCount = sessionFactCount + longTermFactCount + priorSessionFactCount;
         var notes = AvailabilityNotes(outcome);
         var noteSuffix = notes.Count == 0 ? string.Empty : " · " + string.Join(" · ", notes);
+        var typesSuffix = outcome.Types is null ? string.Empty : " · types: " + string.Join(",", outcome.Types);
         var lines = new List<string>
         {
             $"RECALL \"{query}\" · {factCount} facts · {outcome.TokensUsed}/{budgetTokens} tokens · "
-                + $"coverage: {RecallEngine.ToText(outcome.Coverage)}{noteSuffix}",
+                + $"coverage: {RecallEngine.ToText(outcome.Coverage)}{typesSuffix}{noteSuffix}",
         };
         lines.AddRange(includedLines);
 
@@ -287,6 +294,22 @@ public static class RecallRanker
             gaps,
             packed);
     }
+
+    /// <summary>
+    /// Packed line count by memory type, for the <c>recall</c> telemetry record's
+    /// <c>packed_by_scope</c>: session notes split by origin into <c>current-session</c> and
+    /// <c>prior-session</c>, every other line keyed by its <c>fact.scope</c>. A count of lines, not a
+    /// second <c>fact_count</c> (D43, D46).
+    /// </summary>
+    public static IReadOnlyDictionary<string, int> PackedByScope(IEnumerable<RecallCandidate> packed) =>
+        packed
+            .GroupBy(candidate => candidate.Origin switch
+            {
+                FactOrigin.CurrentSession => "current-session",
+                FactOrigin.PriorSession => "prior-session",
+                _ => candidate.Source!.Scope,
+            }, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
 
     /// <summary>
     /// The D44 consequence of an unavailable lane (spec §2.0.1): a note keyed to lane <i>state</i>,
@@ -356,10 +379,7 @@ public static class RecallRanker
                 ToSessionFact(factId, body, path, subjectName, ageDays, detailsChars, agentNames)),
             FactOrigin.PriorSession => RecallEngine.MeasurePriorSessionFactLine(
                 ToSessionFact(factId, body, path, subjectName, ageDays, detailsChars, agentNames),
-                "p" + (labelIndex ?? throw new InvalidOperationException(
-                    $"fact {handle} ranked as a prior-session candidate with no prior_sessions label — "
-                    + "the origin CASE and the prior_sessions CTE's predicates have drifted apart."))
-                        .ToString(CultureInfo.InvariantCulture)),
+                PriorSessionLabel(labelIndex, reader.IsDBNull(reader.GetOrdinal("session_id")), handle)),
             _ => throw new InvalidOperationException($"no formatter for fact origin {origin}"),
         };
 
@@ -398,6 +418,15 @@ public static class RecallRanker
         return age.TotalDays > 0 ? (int)age.TotalDays : 0;
     }
 
+    // A NULL-session note has no session to number, so it renders p? (D84). A missing label on a
+    // note that does have a session is still drift between the origin CASE and the CTE.
+    private static string PriorSessionLabel(int? labelIndex, bool sessionIsNull, string handle) =>
+        labelIndex is { } index ? "p" + index.ToString(CultureInfo.InvariantCulture)
+        : sessionIsNull ? "p?"
+        : throw new InvalidOperationException(
+            $"fact {handle} ranked as a prior-session candidate with no prior_sessions label — "
+            + "the origin CASE and the prior_sessions CTE's predicates have drifted apart.");
+
     private static int? NullableInt(SqliteDataReader reader, string column)
     {
         var ordinal = reader.GetOrdinal(column);
@@ -427,19 +456,25 @@ public static class RecallRanker
     /// SQLite executes, for all four lane-availability variants, without a second implementation of
     /// how the variant is chosen.
     /// </summary>
-    internal static string StatementFor(bool overlapAvailable, bool vectorAvailable, string vecTable) =>
+    internal static string StatementFor(bool overlapAvailable, bool vectorAvailable, string vecTable, bool filtered = false) =>
         StatementCache.GetOrAdd(
             overlapAvailable.ToString(CultureInfo.InvariantCulture) + "|"
-                + vectorAvailable.ToString(CultureInfo.InvariantCulture) + "|" + vecTable,
-            _ => BuildStatementText(overlapAvailable, vectorAvailable, vecTable));
+                + vectorAvailable.ToString(CultureInfo.InvariantCulture) + "|"
+                + filtered.ToString(CultureInfo.InvariantCulture) + "|" + vecTable,
+            _ => BuildStatementText(overlapAvailable, vectorAvailable, vecTable, filtered));
 
     /// <summary>
     /// Assembles one of the four statement variants (spec §2.3). Built from shared fragments rather
     /// than four hand-written copies, so the overlap/vector lane terms cannot go out of sync between
     /// variants that include a lane and variants that omit it.
     /// </summary>
-    private static string BuildStatementText(bool overlapAvailable, bool vectorAvailable, string vecTable)
+    private static string BuildStatementText(bool overlapAvailable, bool vectorAvailable, string vecTable, bool filtered)
     {
+        // A `types` filter binds $types (a JSON array of registry names) and is applied in `lex`
+        // before its LIMIT — or BM25's top seed_k come from a corpus dominated by code — and in
+        // `scored`, so coverage describes what was asked (D44, D85). Without one, `excluded` carries the
+        // registry's default exclusions; `lex` is untouched, so the default lane costs what it did.
+        const string typesFilter = MemoryScopes.FilterSql;
         var sessionPrefix = SessionFacts.Root + "/"; // "/sessions/" — kept in sync with the C# constant
         var directivePrefix = DirectiveFacts.Root + "/"; // "/directives/" — kept in sync with the C# constant
         var rrfK = RecallEngine.RrfK.ToString(CultureInfo.InvariantCulture);
@@ -447,6 +482,33 @@ public static class RecallRanker
         var sb = new StringBuilder();
         sb.Append("WITH\nterms(term) AS (\n  SELECT value FROM json_each($terms)\n),\n\n");
 
+        // The one definition of what recall never returns on this call (D90): directives always — the
+        // primer delivers them (D-1) and they answer class-addressed questions through engram_browse
+        // (D-5) — and, without a `types` filter, the registry's default exclusions. Overlap eligibility
+        // and `scored` both test membership here, so they cannot disagree about a row.
+        sb.Append(
+            $"""
+            excluded(fact_id) AS (
+              SELECT f.id
+              FROM entity e
+              JOIN fact f ON f.subject_id = e.id
+              WHERE e.path >= '{directivePrefix}' AND e.path < '{DirectiveFacts.Root}0' AND f.valid_to IS NULL
+
+            """);
+        if (!filtered)
+        {
+            sb.Append($"  UNION\n  SELECT f.id FROM fact f WHERE {MemoryScopes.ExcludedByDefaultSql} AND f.valid_to IS NULL\n");
+        }
+
+        sb.Append("),\n\n");
+
+        // Only `eligibleCount` overlap hits are ever counted, and only `overlap_prefix` is joined and
+        // scored: the first $limit eligible hits in rank order. Every overlap hit is still ranked, so
+        // a materialized row's overlap rank, and therefore its fused score, is exactly what it was when
+        // every hit was materialized. An unmaterialized fact is an eligible overlap-only hit ranked
+        // below $limit eligible hits, each fused strictly higher (ranks are unique), so it could never
+        // be among the $limit rows `bounded` keeps (D90).
+        var eligibleCount = "0";
         if (overlapAvailable)
         {
             sb.Append(
@@ -466,10 +528,60 @@ public static class RecallRanker
                 ),
 
                 """);
+
+            if (filtered)
+            {
+                // A filter's eligibility needs each hit's scope, so this pays a fact lookup per hit;
+                // a raw-rank bound would not be smaller, since nearly every hit can be ineligible.
+                // MATERIALIZED: the prefix and the count both read it, and inlined it pays twice.
+                sb.Append(
+                    $"""
+                    overlap_eligible(fact_id, rank) AS MATERIALIZED (
+                      SELECT o.fact_id, o.rank
+                      FROM overlap_ranked o
+                      JOIN fact f ON f.id = o.fact_id
+                      WHERE {typesFilter} AND o.fact_id NOT IN (SELECT fact_id FROM excluded)
+                    ),
+                    overlap_prefix(fact_id) AS (
+                      SELECT fact_id FROM overlap_eligible ORDER BY rank LIMIT $limit
+                    ),
+
+                    """);
+                eligibleCount = "(SELECT COUNT(*) FROM overlap_eligible)";
+            }
+            else
+            {
+                // The first $limit eligible hits lie within raw rank $limit + (excluded hits), so no
+                // second ranking is needed; the excluded hits inside that bound are dropped by `scored`.
+                sb.Append(
+                    """
+                    overlap_excluded(n) AS (
+                      SELECT COUNT(*) FROM overlap_hits WHERE fact_id IN (SELECT fact_id FROM excluded)
+                    ),
+                    overlap_prefix(fact_id) AS (
+                      SELECT fact_id FROM overlap_ranked WHERE rank <= $limit + (SELECT n FROM overlap_excluded)
+                    ),
+
+                    """);
+                eligibleCount = "((SELECT COUNT(*) FROM overlap_hits) - (SELECT n FROM overlap_excluded))";
+            }
+
+            // A current-session note sorts first whatever its overlap rank, so the prefix cannot
+            // stand in for it. Bounded by the session's size, not by $limit; empty for a NULL session.
+            sb.Append(
+                """
+                current_arm(fact_id) AS (
+                  SELECT f.id
+                  FROM fact f INDEXED BY ix_fact_session
+                  JOIN overlap_hits h ON h.fact_id = f.id
+                  WHERE f.session_id = $currentSessionId AND f.valid_to IS NULL
+                ),
+
+                """);
         }
 
         sb.Append(
-            """
+            $"""
             -- ORDER BY bm25(), not rank: measured slower here despite the documentation (constraints
             -- file, Part 2 — USE TEMP B-TREE FOR ORDER BY disappearing under `rank` is not evidence
             -- of speed).
@@ -477,7 +589,7 @@ public static class RecallRanker
               SELECT f.id, ROW_NUMBER() OVER (ORDER BY bm25(fact_fts))
               FROM fact f
               JOIN fact_fts ON fact_fts.rowid = f.id
-              WHERE fact_fts MATCH $match AND f.valid_to IS NULL
+              WHERE fact_fts MATCH $match AND f.valid_to IS NULL{(filtered ? " AND " + typesFilter : string.Empty)}
               ORDER BY bm25(fact_fts)
               LIMIT $seedK
             ),
@@ -499,40 +611,38 @@ public static class RecallRanker
                 """);
         }
 
-        var liveSessionRows = new List<string>(2);
-        foreach (var (index, objectTest) in new[] { ("ux_fact_live", "IS NULL"), ("ux_fact_edge_live", "IS NOT NULL") })
-        {
-            // The two existing live partitions avoid fetching closed history rows. Both are
-            // needed: prior-session enumeration has never excluded object-bearing facts.
-            liveSessionRows.Add(
-                $"""
-                SELECT f.session_id
-                FROM entity e CROSS JOIN fact f INDEXED BY {index} ON f.subject_id = e.id
-                WHERE f.valid_to IS NULL AND f.object_id {objectTest}
-                  AND e.path >= '{sessionPrefix}' AND e.path < '{SessionFacts.Root}0'
-                  AND f.session_id IS NOT $currentSessionId
-                """);
-        }
-
         sb.Append(
             $"""
             -- Ranges over every prior-session fact, never over `candidates` (ruling 6) — a session
-            -- contributing no candidates must not shift a later session's label.
+            -- contributing no candidates must not shift a later session's label. Driven from
+            -- `session` with a stop-at-first probe, not by visiting every live session note. The
+            -- probe has no object_id test, so object-bearing notes still count. A NULL session_id
+            -- has no `session` row and so takes no label (D84).
+            -- Ceiling (D84): the probe walks a session's closed and non-note facts before its first
+            -- live note, so bulk-closing session notes degrades it (25.6 ms adversarial vs 4.9 ms
+            -- on the real store). Upgrade path: a partial index fact(session_id) WHERE valid_to IS
+            -- NULL, a schema migration deliberately left out of D84.
             prior_sessions(session_id, label_index) AS (
-              SELECT DISTINCT session_id, DENSE_RANK() OVER (ORDER BY session_id)
-              FROM (
-                {string.Join("\nUNION ALL\n", liveSessionRows)}
-              )
+              SELECT s.id, DENSE_RANK() OVER (ORDER BY s.id)
+              FROM session s
+              WHERE s.id IS NOT $currentSessionId
+                AND EXISTS (
+                  SELECT 1
+                  FROM fact f INDEXED BY ix_fact_session JOIN entity e ON e.id = f.subject_id
+                  WHERE f.session_id = s.id AND f.valid_to IS NULL
+                    AND e.path >= '{sessionPrefix}' AND e.path < '{SessionFacts.Root}0'
+                )
             ),
 
             candidates AS (
 
             """);
 
-        var unions = new List<string>(3);
+        var unions = new List<string>(4);
         if (overlapAvailable)
         {
-            unions.Add("  SELECT fact_id FROM overlap_ranked");
+            unions.Add("  SELECT fact_id FROM overlap_prefix");
+            unions.Add("  SELECT fact_id FROM current_arm");
         }
 
         unions.Add("  SELECT fact_id FROM lex");
@@ -568,13 +678,15 @@ public static class RecallRanker
         // by a separate branch: a lane that did not run cannot contribute a term here at all.
         sb.Append(
             $"""
-            scored AS (
+            -- MATERIALIZED: `totals` and `bounded` both read it, and an inlined copy per reader let
+            -- the planner drive each from a scan of every live fact instead of from `candidates`.
+            scored AS MATERIALIZED (
               SELECT
                 f.id                                   AS fact_id,
                 'f' || CAST(f.id AS TEXT)              AS handle,
                 CASE
                   WHEN substr(e.path, 1, {sessionPrefix.Length}) <> '{sessionPrefix}' THEN 1  -- long term
-                  WHEN f.session_id IS $currentSessionId THEN 0                                -- current session
+                  WHEN f.session_id = $currentSessionId THEN 0                                 -- current session (D90: never for a NULL session)
                   ELSE 2                                                                       -- prior session
                 END                                    AS origin,
                 {overlapRankColumn}                    AS overlap_rank,
@@ -603,21 +715,28 @@ public static class RecallRanker
         }
 
         sb.Append("  LEFT JOIN prior_sessions ps ON ps.session_id = f.session_id\n");
-        // A directive is delivered unconditionally by the primer (D-1) and answers a
-        // class-addressed question through engram_browse, not a content-addressed one through
-        // recall (D-5) — excluded here, where the candidate set drawn from every lane is
-        // materialized, rather than at any one lane's own query, so it can never surface
-        // regardless of which lane matched it, and never inflates matched/corroborated counts.
-        sb.Append($"  WHERE f.valid_to IS NULL\n    AND substr(e.path, 1, {directivePrefix.Length}) <> '{directivePrefix}'\n),\n\n");
-
+        // Exclusion is tested here, where the candidate set drawn from every lane is materialized,
+        // rather than at any one lane's own query, so an excluded fact can never surface regardless
+        // of which lane matched it, and never inflates matched/corroborated counts.
         sb.Append(
-            """
+            $"  WHERE f.valid_to IS NULL\n    AND f.id NOT IN (SELECT fact_id FROM excluded){(filtered ? "\n    AND " + typesFilter : string.Empty)}\n),\n\n");
+
+        // D44's totals over the whole matched set, from small sets. A corroborated fact is in two
+        // lanes, so in lex or vec, and every one of those is materialized with its full overlap rank;
+        // every other candidate is an overlap hit, counted by eligibleCount without being joined. So
+        // both numbers are what windows over every candidate gave — given a fact_token holding live
+        // facts only (D59): a stale token row is counted here although `scored` never returns it.
+        sb.Append(
+            $"""
+            totals(matched_total, corroborated_total) AS (
+              SELECT {eligibleCount} + (SELECT COUNT(*) FROM scored WHERE overlap_rank IS NULL),
+                     (SELECT COALESCE(SUM(is_corroborated), 0) FROM scored)
+            ),
+
             bounded AS (
-              SELECT *,
-                     COUNT(*)             OVER () AS matched_total,
-                     SUM(is_corroborated) OVER () AS corroborated_total
-              FROM scored
-              ORDER BY CASE WHEN origin = 0 THEN 0 ELSE 1 END, fused DESC, handle
+              SELECT s.*, t.matched_total, t.corroborated_total
+              FROM scored s CROSS JOIN totals t
+              ORDER BY CASE WHEN s.origin = 0 THEN 0 ELSE 1 END, s.fused DESC, s.handle
               LIMIT $limit
             )
 

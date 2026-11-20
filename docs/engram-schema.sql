@@ -199,6 +199,15 @@ CREATE INDEX ix_fact_regenerable ON fact(regenerable) WHERE regenerable = 1;
 -- read (fact-object-index-migration.md §1).
 CREATE INDEX ix_fact_object ON fact(object_id, predicate) WHERE valid_to IS NULL AND object_id IS NOT NULL;
 
+-- Foreign-key child lookups (v20). Deleting a fact or an entity makes SQLite check every
+-- child column that references it, and with no index on that column the check scans fact
+-- once per deleted row: compact measured 73 ms a fact and 97 s for 732 entities on an
+-- 890,829-fact store. ix_fact_object cannot serve the entity check because it is live-only;
+-- it stays as it is, since recall plans against it. Partial on IS NOT NULL because the
+-- check runs `col = ?`, which implies it (compact-quadratic-deletes.md F1, F3).
+CREATE INDEX ix_fact_superseded_by ON fact(superseded_by) WHERE superseded_by IS NOT NULL;
+CREATE INDEX ix_fact_object_ref    ON fact(object_id) WHERE object_id IS NOT NULL;
+
 
 -- ---------------------------------------------------------------------------
 -- Supersession: why a belief changed.
@@ -495,7 +504,7 @@ CREATE TABLE fact_review (
 
 
 CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT);
-INSERT INTO schema_meta(key, value) VALUES ('schema_version', '19');
+INSERT INTO schema_meta(key, value) VALUES ('schema_version', '20');
 
 -- The backlog caches only a verified empty revision. Plain SQLite triggers cover all
 -- fact writers without making authored writes depend on the optional vec0 extension.

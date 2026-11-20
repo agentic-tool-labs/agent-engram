@@ -397,7 +397,7 @@ public class ReportCommandTests
         using (var connection = EngramDatabase.Open(sandbox.Home))
         {
             Seed(connection, new FactWrite("me", "user", "likes", "coffee", "personal", "stated"), DateTimeOffset.UtcNow);
-            FactJournal.Write(connection, sandbox.Home, DateTimeOffset.UtcNow);
+            FactJournal.Write(connection, sandbox.Home, DateTimeOffset.UtcNow, BackupScope.Full);
         }
 
         var journalPath = Path.Combine(sandbox.Home.BackupDir, FactJournal.FileName);
