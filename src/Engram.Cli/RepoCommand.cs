@@ -40,7 +40,7 @@ internal static class RepoCommand
 
     private static int Enroll(EngramHome home, string[] args, TextWriter stdout, TextWriter stderr)
     {
-        if (!TryResolveCheckout(args, stderr, out var root))
+        if (!TryResolveCheckout(args, stderr, out var root, out var identity))
         {
             return 1;
         }
@@ -48,7 +48,7 @@ internal static class RepoCommand
         RepoDecisionResult result;
         using (var connection = EngramDatabase.OpenInitialized(home))
         {
-            result = ApplyDecision(home, connection, root, "enroll", CliSessionId, DateTimeOffset.UtcNow);
+            result = ApplyDecision(home, connection, root, identity, "enroll", CliSessionId, DateTimeOffset.UtcNow);
         }
 
         stdout.WriteLine($"Enrolled {root} ({result.Identity}).");
@@ -68,7 +68,7 @@ internal static class RepoCommand
 
     private static int Decline(EngramHome home, string[] args, TextWriter stdout, TextWriter stderr)
     {
-        if (!TryResolveCheckout(args, stderr, out var root))
+        if (!TryResolveCheckout(args, stderr, out var root, out var identity))
         {
             return 1;
         }
@@ -76,7 +76,7 @@ internal static class RepoCommand
         RepoDecisionResult result;
         using (var connection = EngramDatabase.OpenInitialized(home))
         {
-            result = ApplyDecision(home, connection, root, "decline", CliSessionId, DateTimeOffset.UtcNow);
+            result = ApplyDecision(home, connection, root, identity, "decline", CliSessionId, DateTimeOffset.UtcNow);
         }
 
         stdout.WriteLine($"Declined {root} ({result.Identity}). Engram will not offer to index it again unless the decision is reset.");
@@ -85,7 +85,7 @@ internal static class RepoCommand
 
     private static int Later(EngramHome home, string[] args, TextWriter stdout, TextWriter stderr)
     {
-        if (!TryResolveCheckout(args, stderr, out var root))
+        if (!TryResolveCheckout(args, stderr, out var root, out var identity))
         {
             return 1;
         }
@@ -93,7 +93,7 @@ internal static class RepoCommand
         RepoDecisionResult result;
         using (var connection = EngramDatabase.OpenInitialized(home))
         {
-            result = ApplyDecision(home, connection, root, "later", CliSessionId, DateTimeOffset.UtcNow);
+            result = ApplyDecision(home, connection, root, identity, "later", CliSessionId, DateTimeOffset.UtcNow);
         }
 
         stdout.WriteLine($"Deferred {root} ({result.Identity}). Engram will offer again in "
@@ -106,12 +106,10 @@ internal static class RepoCommand
         var apply = args.Contains("--apply");
         var positional = args.Where(a => a != "--apply").ToArray();
 
-        if (!TryResolveCheckout(positional, stderr, out var root))
+        if (!TryResolveCheckout(positional, stderr, out var root, out var identity))
         {
             return 1;
         }
-
-        var identity = CodeIndexer.ResolveIdentity(root);
 
         if (!apply)
         {
@@ -124,7 +122,7 @@ internal static class RepoCommand
         RepoDecisionResult result;
         using (var connection = EngramDatabase.OpenInitialized(home))
         {
-            result = ApplyDecision(home, connection, root, "reset", CliSessionId, DateTimeOffset.UtcNow);
+            result = ApplyDecision(home, connection, root, identity, "reset", CliSessionId, DateTimeOffset.UtcNow);
         }
 
         stdout.WriteLine(result.ResetExisted
@@ -148,7 +146,7 @@ internal static class RepoCommand
     private const string CliSessionId = "cli";
 
     /// <summary>
-    /// The one place an enrollment decision is resolved, written, and told to telemetry — the
+    /// The one place an enrollment decision is written and told to telemetry — the
     /// <c>engram repo</c> verb group and <see cref="EngramMcpTools.IndexRepo"/> both call this
     /// rather than re-assembling the same steps independently (spec §6.10).
     /// </summary>
@@ -156,17 +154,19 @@ internal static class RepoCommand
     /// Takes an already-open connection rather than resolving one from <paramref name="home"/>,
     /// because a caller two levels up already holds one; <paramref name="home"/> is needed only
     /// for <see cref="TrySpawnFirstIndex"/>'s detached process launch and for the telemetry write,
-    /// neither of which is a database operation.
+    /// neither of which is a database operation. <paramref name="identity"/> comes from the
+    /// caller, which resolved it before opening the store, so an Unknown origin is refused before
+    /// anything is written (D94).
     /// </remarks>
     internal static RepoDecisionResult ApplyDecision(
         EngramHome home,
         SqliteConnection connection,
         string root,
+        string identity,
         string decision,
         string sessionId,
         DateTimeOffset now)
     {
-        var identity = CodeIndexer.ResolveIdentity(root);
         var resetExisted = false;
         var spawned = false;
         string? spawnError = null;
@@ -300,6 +300,7 @@ internal static class RepoCommand
         var serviced = 0;
         var skippedAbsent = 0;
         var skippedLocked = 0;
+        var skippedUnknown = 0;
         var failed = 0;
         var truncated = 0;
 
@@ -312,6 +313,14 @@ internal static class RepoCommand
             {
                 skippedAbsent++;
                 stdout.WriteLine($"{identity}: skipped — {root} no longer exists on disk.");
+                continue;
+            }
+
+            // Unknown: nothing started, so no telemetry and no index (D94).
+            if (!CodeIndexer.TryResolveIdentity(root, out _, out var originFailure))
+            {
+                skippedUnknown++;
+                stdout.WriteLine($"{identity}: {CodeIndexer.UnknownOriginNote(root, originFailure)}");
                 continue;
             }
 
@@ -370,6 +379,7 @@ internal static class RepoCommand
         stdout.WriteLine();
         stdout.WriteLine($"{serviced} serviced, {skippedAbsent} skipped (absent), "
             + $"{skippedLocked} skipped (locked), {failed} failed"
+            + (skippedUnknown > 0 ? $", {skippedUnknown} skipped (origin unknown)" : string.Empty)
             + (truncated > 0 ? $", {truncated} partial — not marked scanned" : string.Empty));
 
         if (!apply)
@@ -378,7 +388,7 @@ internal static class RepoCommand
             stdout.WriteLine("Dry run only — nothing was changed. Re-run with --apply to index.");
         }
 
-        return failed > 0 || skippedLocked > 0 ? 1 : 0;
+        return failed > 0 || skippedLocked > 0 || skippedUnknown > 0 ? 1 : 0;
     }
 
     private static void PrintCandidateReport(string identity, IndexReport report, TextWriter stdout)
@@ -428,10 +438,11 @@ internal static class RepoCommand
         }
     }
 
-    private static bool TryResolveCheckout(string[] args, TextWriter stderr, out string root)
+    private static bool TryResolveCheckout(string[] args, TextWriter stderr, out string root, out string identity)
     {
         var requested = args.FirstOrDefault(a => !a.StartsWith('-')) ?? Directory.GetCurrentDirectory();
         var resolved = ResolveCheckoutRoot(requested);
+        identity = string.Empty;
         if (resolved is null)
         {
             stderr.WriteLine($"error: {Path.GetFullPath(requested)} is not inside a git checkout.");
@@ -440,6 +451,14 @@ internal static class RepoCommand
         }
 
         root = resolved;
+
+        // Unknown: nothing enrolled, stamped or written to last_root (D94).
+        if (!CodeIndexer.TryResolveIdentity(root, out identity, out var failure))
+        {
+            stderr.WriteLine($"error: {CodeIndexer.UnknownOriginNote(root, failure)}");
+            return false;
+        }
+
         return true;
     }
 

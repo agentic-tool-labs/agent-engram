@@ -77,7 +77,7 @@ public static class RepoEnrollment
 
     /// <summary>
     /// Full two-step resolution: <see cref="ByRoot"/> first, then — only on a miss —
-    /// <see cref="CodeIndexer.ResolveIdentity"/>, which shells out to git. Callers on the
+    /// <see cref="CodeIndexer.TryResolveIdentity(string, out string, out string)"/>, which shells out to git. Callers on the
     /// session-start hook's own latency budget must use <see cref="ByRoot"/> alone; this method
     /// is for the detached maintenance child, never the hook itself (D4).
     /// </summary>
@@ -91,7 +91,12 @@ public static class RepoEnrollment
                 return cached.State == RepoEnrollmentState.Enrolled;
             }
 
-            var identity = CodeIndexer.ResolveIdentity(root);
+            // Unknown is "not this run", never the root path standing in for it (D94).
+            if (!CodeIndexer.TryResolveIdentity(root, out var identity, out _))
+            {
+                return false;
+            }
+
             var row = Get(connection, identity);
             if (row is null)
             {

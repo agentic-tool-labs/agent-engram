@@ -5970,6 +5970,194 @@ because a plugin older than the binary still registers it and an unknown verb pr
 **Not measured.** Nothing here has run on an organization-managed install. That `prompt.submit` reaches a
 user-installed mod there rests on the docs not listing it as skipped.
 
+## D95 — The per-file fact read is a byte range over `ix_fact_path`
+
+`LiveCodeFacts.UnderFilePredicate` is the one definition of "facts about this file or a symbol in it",
+read by the indexer's per-file reconcile (`CodeIndexer.ReadLiveUnderSql`) and by the mod API's
+`path-facts` (`ModApi.PathFactsSql`). It matched "the path, then `#`" with `substr(fact.path, 1, $len)`,
+which SQLite cannot seek through, so both statements planned as `SCAN fact USING INDEX ix_fact_scope`:
+every live fact, once per file.
+
+**The rule.** The predicate is `fact.path = $p OR (fact.path >= $p || '#' AND fact.path < $p || '$')`,
+`$` being the code point after `#`. On the bundled SQLite (3.53.3) both statements plan as `MULTI-INDEX
+OR` over `ix_fact_path` (`path=?`, then `path>? AND path<?`). The range is exact only because
+`fact.path` declares no collation and compares BINARY over UTF-8: `$p#…` sorts inside it, and a sibling
+that extends the name (`Foo.cs2`, `Foo.cs$`, `Foo.csé`), a directory's children (`/`), and anything
+below `#` sort outside it. A `COLLATE` on the column or in the predicate changes what the bounds admit.
+No schema change and no index was added.
+
+**Measured**, on a copy of the real store (621,904 live facts at snapshot, 624,635 after the run):
+- One file: 255 ms → 0.6 ms (indexer statement), 85 ms → 0.1 ms (`path-facts`).
+- Identity, old predicate against new: all 5,360 distinct file paths with live facts under
+  `/projects/wrangl/code/wrangl-3` (248,389 rows) and 500 of the 32,086 elsewhere (seed 95, 8,339 rows):
+  zero ids in either EXCEPT direction. 468 s of old reads against 0.49 s of new.
+- `index --full --apply` of the wrangl checkout, published binaries, each on its own copy:
+  real/user/sys **545.1/327.1/197.3 s → 8.9/1.9/3.2 s**. Summary line identical (3,592 written,
+  12,614 unchanged, 234,914 closes skipped), and the two stores identical afterwards by count, id sum
+  and body length.
+- `index --drain --apply` of five touched files whose `file_state` rows were removed so all five are
+  analyzed: 0.52 s → 0.10 s, summary identical.
+
+**One divergence the identity run could not see.** The old form bound `$len` as the C# string length,
+UTF-16 code units, against SQLite's `substr`, which counts code points; for a path holding a surrogate
+pair (an emoji) the two disagree and the old predicate missed the file's symbols. The store holds no
+non-ASCII path, so the identity counts are unaffected. `LiveCodeFactsTests` covers it and reddens with
+the old form restored.
+
+**Guards.** `LiveCodeFactsTests` pins the matched set and the plan of both statements. Each was broken
+against the committed tree and went red: the old predicate restored (both plan pins and the non-ASCII
+case), `<` widened to `<=`, the upper bound widened to `%`, the lower bound widened to `>= $p`, and
+`COLLATE NOCASE` added (both plan pins and the matched set).
+
+**Rejected.** A `UNION ALL` of the two arms was not needed, since MULTI-INDEX OR appeared on the bundled
+SQLite. `LIKE $p || '#%'` was not tried: `LIKE` is case-insensitive by default, which disables the
+prefix optimization (see `DirectiveFacts.Read`), and `_` and `%` in a path would need escaping.
+## D94 — A git failure is never "no remote", and a complete scan retires what it superseded
+
+**Problem.** `repo_registry` is keyed on identity: origin URL, else the root path (D67). A new identity
+gets a new `repo_path`, `-2`, `-3` and so on, and nothing ever retired the old one. On the real store 45
+rows covered 20 checkouts, and 25 of them no longer described their checkout: 206,171 live regenerable
+facts (37.2% of all code facts) under paths whose checkout now resolves to another identity. Two causes:
+remotes that really changed, which D67 makes a new identity on purpose, and runs where the origin lookup
+failed and the root path stood in for it. `CodeEntityResolver` also picked an arbitrary row when several
+shared a `disk_path`, so a live file could resolve to a stale path.
+
+**Rule 1: three outcomes, never two.** `git remote get-url origin` stays the one call on the happy path
+and the only source of identity, so `url.*.insteadOf` rewriting keeps applying. Only when it yields
+nothing does `git config --get remote.origin.url` classify. Exit 1 is **NoRemote**, and the root path is
+the identity as before. Anything else is **Unknown**: a URL that `get-url` did not return, a corrupt
+config, an empty value, a timeout, git missing. On Unknown, writers (`index`, the `repo` verbs, the MCP
+enrollment tool, freshen) do nothing for that root and record no `index` event (D55). `--auto` refuses
+silently. Doctor reports `Warn` with no fix (D37).
+
+Observed on git 2.54.0 (Apple Git-157), and pinned in tests:
+
+| case | `config --get remote.origin.url` |
+|---|---|
+| no origin URL, with a `[remote "origin"]` section present (global `prune = true`) | exit 1 |
+| checkout with an origin | exit 0, the URL |
+| directory that is not a repository | exit 1 (so it stays NoRemote, as before) |
+| corrupt `.git/config` | exit 128 |
+| `remote.origin.url` set to empty | exit 0, empty value |
+
+`git remote`, the list, is never consulted: with a global `[remote "origin"]` section it lists `origin`
+in every repository, which the first draft of this rule would have read as Unknown, so checkouts with no
+remote would never have been indexed again. `config --get` is never the identity source either: it
+returns the URL before `insteadOf` rewriting, so switching to it would re-key every such user's
+repositories.
+
+**Rule 2: retirement.** A registry row is retired when a complete full scan of its checkout has just run
+under a different identity that git resolved positively. "Complete" is exactly the `stampFullScan`
+condition: `ScanStop.Complete`, not `empty-scan`, with `--apply`. It runs inside the transaction that
+stamps the scan and clears the suppression reason (D69). It sets `detached_at = now` on every row whose
+canonical `disk_path` equals the scanned root's, whose identity differs from the one this run resolved
+(never `EnrolledIdentity`), whose `repo_path` differs, and which is not already detached. A dry run
+notes "would retire". Nothing is deleted. The row for the identity git resolves now is never retired:
+`EnsureRepo` clears `detached_at` on the row it reuses, in the statement that re-homes a moved checkout,
+whatever its `disk_path`, so pointing a remote back un-retires that row and its next complete scan
+retires the other. (The re-home `UPDATE` alone did not: it runs only when `disk_path` differs, so at an
+unmoved checkout the re-resolved row stayed retired while being the live one.) A dry run clears nothing.
+
+A root that stays Unknown is never stamped, so it would be the most overdue pick on every pass. Every
+"next due" pick (the server tick, `index --freshen`) goes through `RepoFreshness.NextDueResolvable`,
+which skips an Unknown candidate and takes the next one in the same pass; drain-all and
+`repo index --all` already visit every root and skip the Unknown one. "Current" means what git resolves now,
+not the newest row: on the real store `fx` (the newest row) retires in favour of the bundle identity, and
+`agent-tools-3` in favour of `agent-tools-2`. Doctor adds one store-wide `indexing` row while retired
+paths still hold `file_state`, counted from `repo_registry` and `file_state` only. It names no command:
+until removal ships it says the paths are excluded from code lookup and removable in a later version,
+because a doctor that names a verb which does not exist teaches people to stop reading it (D37).
+
+**Known oddity, unchanged.** An in-repo `[remote "origin"]` section with no url (or an empty one) makes
+`git remote get-url origin` print `origin`, exit 0, so the identity is the literal string `origin`.
+This predates D94 and is recorded rather than changed.
+
+**Why `detached_at`.** Nothing set it before, and its two readers (`CodeEntityResolver`,
+`FileFreshness`) already exclude what a retired row must be excluded from. A new column would need a
+migration and edits to both readers for the same effect.
+
+**Rejected.** Changing identity derivation (disk path or root commit): it rewrites D67 and moves every
+row's key; root commit fails for forks and shallow clones. Retiring by newest `created_at`: wrong for the
+`-history` and bundle groups, and it lets a transient root-path row, which is the newest, retire the real
+origin row. Detection on demand in doctor or a verb: it has no completed-scan evidence, which D53
+requires before absence counts. Deleting at the end of the scan: destructive work is dry-run first, and
+compact's snapshot plus VACUUM do not belong in the maintenance child. Removal is a separate verb
+(eng-34 phase 3).
+## D92 — Compact's deletes are index-backed (schema v20)
+
+On the user's store (890,829 facts, 2.45 GB) the shipped `compact --apply` finished **0 of 46** calls. The
+first call ran 30 minutes at full CPU before it was killed, and it rolled back cleanly. With
+`foreign_keys = ON`, which `EngramDatabase.Open` sets, three checks scanned `fact` once for every deleted
+row:
+
+| Path | Cause | As shipped | Fix |
+|---|---|---|---|
+| P1: `DELETE FROM fact` | The foreign-key child check on `fact.superseded_by` had no index | 73 ms a fact | `ix_fact_superseded_by` |
+| P2: `EntitySql` | `subject_id = entity.id OR object_id = entity.id` | 1,340 entities in 76.8 s | Two `NOT EXISTS` probes |
+| P3: `DELETE FROM entity` | `ix_fact_object` is live-only, so it cannot serve the check on `fact.object_id` | 732 entities in 97.17 s | `ix_fact_object_ref` |
+
+**The partial form was enough.** Both new indexes are partial (`… IS NOT NULL`), because the check runs
+`col = ?` and that implies the column is not null. That was the expectation, not a proven fact. It held:
+on the bundled SQLite (tier 2) and on a copy of the real store, `superseded_by = ?` and `object_id = ?` seek
+the partial indexes, and every compact call completed. The full-index fallback the spec pre-decided was
+not used. Built on the real-store copy: 0.11 s and 0.21 s.
+
+**`ix_fact_object` is untouched.** Widening it would add every closed row to the index recall reads.
+`RecallRankerPlanTests` and `ForeignKeyIndexPlanTests` hold recall's plans. Most of the latter's
+statements are copies of private inline SQL, so an edit to one of those sites leaves the guard planning
+the old text. Only `BackfillBatchSql`, `PendingCountSql` and `PruneIneligibleSql` are read from
+production. On the real-store copy the
+statements C4 lists, and every other carrier of the regenerable-edge predicate, plan the same with and
+without v20, with one exception.
+
+**The exception is `VectorIndex.PruneIneligible`.** Under v20 its inner select
+(`regenerable IS 1 AND object_id IS NOT NULL`) moved from `SCAN fact` to a range seek on
+`ix_fact_object_ref`. The predicate matches 509,024 of 890,829 rows, so a seek plus a rowid lookup per row
+loses to one sequential pass. Medians of seven alternated warm runs on the real-store copy: inner select
+586.03 ms seeking against 210.08 ms scanning, and the whole `DELETE` 952.29 ms against 446.22 ms. A first
+run measured 530.96 against 198.37 and 806.62 against 404.04. A unary plus on that one term
+(`+object_id IS NOT NULL`) restores the v19 plan. `NOT INDEXED` was rejected because it would also refuse
+a better index a later schema adds. Its one caller is `engram embed --prune --apply`, which someone types,
+and which reaches the delete only when ineligible vectors were counted. One earlier measurement was
+invalid: 172.05 against 171.75 ms, taken after `backup take`, which opens the store without migrating
+it, so neither arm had the index. The 530.96/198.37 run above did differ by plan, and its "scan" arm
+was `NOT INDEXED` rather than the unary plus.
+
+**The split in P2 is no longer what removes the scan.** With `ix_fact_object_ref` present, the old `OR`
+form also seeks, as a `MULTI-INDEX OR` over `ix_fact_thread` and the new index. The split is kept because
+the spec named it and it reads plainly, and a plan assertion (no `MULTI-INDEX OR`) pins it.
+
+**Two guards change what is removed, and nothing else does.** An entity that carries an `entity_alias`
+row is kept even with no fact left. The `ON DELETE CASCADE` had deleted all 4,823 alias rows with no count,
+and no index run rebuilds rename history. The dry run and the apply report "entities kept for rename
+history". A regenerable fact that `fact_relation` (either end), `fact_review` or `fact_sync_request` names is
+kept too. None of those cascades, so deleting the fact used to fail the whole call on a foreign key. Both
+side-table checks and the authored supersession edge form one predicate, `StoreCompactor.AuthoredDependencySql`,
+which the backup journal filter is to reuse (the backup-slim stream cherry-picks 6b4e992).
+
+**Acceptance on a copy of the real store** (published binary, WAL mode):
+- All 46 calls complete. `foreign_key_check` is clean. A digest over authored facts, their supersessions,
+  `fact_relation`, `fact_review`, `fact_sync_request`, `entity_alias` and `session` is equal before and after.
+- Counts before and after: facts 890,829 → 68,613; entities 409,255 → 170,747; aliases 4,823 → 4,823;
+  registry rows 45 → 0.
+- The first call also migrated. Its D31 `pre-v20` snapshot took 6.30 s.
+- Summed over the calls: selection before each snapshot 16.13 s, snapshots 109.5 s, snapshot end to commit
+  44.52 s, checkpoints 2.17 s, VACUUM 365.0 s, wall 537.4 s. The median call takes 0.52 s from snapshot to
+  commit.
+- The spec's target was a summed transaction time under 30 s. That is **not shown**: 44.52 s is an upper
+  bound, because it includes `BackupStore.PruneAfterWrite`, which runs between the snapshot and the
+  transaction and cannot be separated from outside the process. Counting the selection before each
+  snapshot too, compaction work outside the snapshots and VACUUM is at most 60.65 s, against the
+  emulation's 19.28 s.
+- Re-index after a path compact (rocket, 65 aliases): 64 of 65 aliased entities are again the subject of a
+  live fact. No path is duplicated, so the indexer reuses the surviving entity. The 65th,
+  `engine/view/main.gd.uid` (renamed from `src/view/main.gd.uid`), is no longer on disk. No second
+  entity holds its path, and no fact references it, so nothing was left to re-index.
+
+**Not measured.** Where those 44.52 s go inside each call. The outlier is `agent-tools-2`, which took 7.31 s
+from snapshot to commit for 15,261 facts, against 3.33 s for 248,389 facts in `wrangl-3`. The real-store
+plan checks ran on Python's SQLite 3.54.1, not the bundled one, and tier 2 reproduced each switch on the
+bundled build. Snapshots and VACUUM are 88% of the wall time. Making them cheaper is a separate change.
 ## D87 — Re-filing is close-and-reassert; `reorganize` moves the ledger out and closes misfiled captures
 
 The store held 5,960 live `user` facts and 5,624 of them were another tool's ledger: `/ah2/…`, predicate
@@ -6150,3 +6338,232 @@ in the dry run reddens N14; dropping the `superseded_by` condition reddens N8, N
 restatement in the same second share the identity key, so the live restatement matches the closed row
 and is never restored; `Sync.ApplyClose` with no superseder writes no `supersession` row; and
 `supersession.evidence` is never journalled.
+of scope here.
+## D84 — Prior sessions are enumerated from `session`; a NULL-session note takes no label
+
+**Supersedes D81's choice of CTE form**, not its reasoning. `RecallRanker`'s `prior_sessions` is
+now driven from `session` (`s.id IS NOT $currentSessionId`) with an `EXISTS` probe over
+`ix_fact_session` that stops at the first live fact whose entity path is in
+`['/sessions/', '/sessions0')`. The set is unchanged: every session other than the current one
+that owns a live session note, whether or not it contributes a candidate (ruling 6). The probe has
+no `object_id` test, so an object-bearing live note still makes its session a prior session — that
+is how "both live partitions" is kept, behaviourally rather than by seeking both indexes.
+
+**A live `/sessions/` fact with `session_id IS NULL` contributes no row.** The old CTE emitted one,
+and it was unusable by construction: `scored` joins `ps.session_id = f.session_id`, `NULL = NULL`
+is not true, so the fact that produced the row got no label and `ReadCandidate` threw "drifted
+apart". Its only other effect was to sort first in `DENSE_RANK` and shift every real session's
+label up by one. Now such a fact, when ranked as a prior-session candidate, renders `p?`; a missing
+label on a note that *has* a session still throws, because that is real drift. With
+`$currentSessionId` NULL the origin CASE as D84 shipped it read `NULL IS NULL` as current session, so
+the note was a current-session line there and never `p?`; **D90 amends this** — the CASE compares
+with `=`, so with no current session nothing is current and the note renders `p?` there too.
+`SessionFacts.Append` always sets
+`session_id`, so the population is import or legacy only: **0** such facts on the 621,904-fact
+snapshot (E3), so its recall output is byte-identical.
+
+**Measured** on a JIT host (Release, not the AOT binary), CTE alone, p50 of 21, arms alternated,
+same-form self-spread ≤ 0.46 ms; rows identical on every shape (EXCEPT both ways 0/0, and the full
+statement's 501 rows ordered-identical, with current session NULL and set):
+
+| store shape | old (D81) | new |
+|---|---|---|
+| real snapshot: 62,303 live notes, 222 closed, 1,620 sessions | 57.28 ms | 4.85 ms |
+| D81 rebuild: 50 live notes, 50,000 closed, 50,000 knowledge facts, 1,600 sessions | 5.05 ms | 8.18 ms |
+| adversarial: 800 sessions of closed notes only; 800 with 62 user facts before one live note | 5.42 ms | 25.56 ms |
+
+Full statement on the snapshot (overlap lane on, vector off, five queries) fell by 44–46 ms each,
+e.g. 104.6 → 59.6 ms. D81's fixture was never committed; the rebuild follows its prose (session
+count and insertion order are not stated there), and its old-form figure (5.05 ms) does not
+reproduce D81's 2.19 ms, so trust the direction on that row rather than the size.
+
+**Why the new form, though it loses two rows of three.** Each form is linear in a different
+population: the old one in live session notes, the new one in the closed or non-note facts a
+session holds before its first live note. Nothing closes session notes today, so the live
+population is the one that grows; the real store pays 52 ms per recall for the old form, and the
+shape D81 measured costs the new one 3 ms. D81's reasoning stands for a history-heavy store.
+
+**Known ceiling.** If anything starts closing session notes in bulk — expiry, or P4 promotion
+re-filing them — closed rows grow and this form degrades toward the adversarial row. The upgrade
+path is a partial index `fact(session_id) WHERE valid_to IS NULL`, so the probe skips closed rows;
+that is a schema migration (D31 snapshot) and deliberately not part of this change. P4 must
+re-measure this CTE after a promotion run and add the index if it exceeds 10 ms.
+
+**Guards.** `RecallRankerPlanTests` now pins `SEARCH f USING INDEX ix_fact_session (session_id=?)`
+in place of D81's two live-partition seeks. `RecallSessionRangeTests` keeps the legacy oracle,
+restated as the oracle minus its NULL row, and adds: unmodified-oracle equality for a store with no
+NULL-session note, the one-down label shift when a NULL note exists but does not match, `p?` with
+D84 numbering for current session set and NULL, and the drift throw (a session id with no `session`
+row, foreign keys off).
+
+## D85 — Memory type is `fact.scope`; recall takes an optional `types` filter
+
+**The type of a memory is the `scope` column every producer already writes**, not a path-derived
+class: a `CASE` over path roots would be a second statement of what each writer states, and a GLOB
+cannot tell `/projects/<p>/code/…` from `/projects/<p>/notes/…`. `MemoryScopes` is the one registry
+— `session, user, project, agent, code, tool` — and every reader and validator takes the list from
+it. Origin (current / prior session / long term) stays path-derived; type and origin are different
+axes.
+
+**`engram_recall(query, budget_tokens?, types?)`**, and the same optional field on the mod `recall`
+op and `engram explain --types a,b`. `types` is validated before anything runs: an empty array or
+any unknown name — even beside known ones — is an error naming the valid values, because an
+ignored filter reads as "nothing of that type exists". Known duplicates collapse, and the list is
+normalized to registry order, so one filter has one header spelling. Each surface reports the error
+its usual way (MCP returns the string, the mod op its 400, `explain` stderr and exit 1), and no
+`recall` record is written for a refused call.
+
+**Where the filter applies, and why both places.** One predicate, `MemoryScopes.FilterSql`
+(`f.scope IN (SELECT value FROM json_each($types))`) with `MemoryScopes.BindFilter`, used in three
+statements: `lex` before its `LIMIT $seedK`, because otherwise BM25's top 32 come from a corpus
+dominated by code and a filtered recall starves (E2: user share of the unfiltered lexical top-32 is
+0.001); `scored`, so `matched_total` and `corroborated_total` — hence D44 coverage — describe what
+was asked; and `FactStore.SearchRanked`, so explain's lexical row is the lane `Rank` ran (D30). The
+overlap lane is unbounded, so filtering at `scored` loses nothing. **The vector lane is not filtered
+before its `k`**: vec0 returns the global top `seed_k` and `scored` drops what is outside the filter,
+so for `types:["user"]` the lane contributes nothing (E2: 0.000). Accepted; explain's vector row
+says so in words under `--types`, and the fix is a filter inside the KNN (E10), not oversampling.
+A scope value outside the registry is returned by no filter and still by default — mapping such
+values to `project` is a doctor concern, not recall's.
+
+**The default excludes `tool` at `scored` only** — `MemoryScopes.ExcludedByDefault`, the directive
+precedent — so the default `lex` lane and its D58–D60 cost are untouched, and the default statement
+differs from the one before by that single term. No `tool` row exists until P3 re-files the ledger,
+so until then default recall is byte-identical: measured on the 621,904-fact snapshot by compiling
+one probe against both trees (1184e93 and this change) and comparing `RecallRanker.Pack` text for
+the first 30 recorded E1 queries, with no current session and with session 1550 — 60 of 60 equal
+(`cmp`). The rows and plan detail of the pre-filter statement equal the new default on a fixture
+without tool rows (a test). Statement variants are 8 (overlap × vector × filter); the plan guard
+enumerates all of them.
+
+**Header and telemetry.** With a filter, the RECALL header gains ` · types: <list>` after the
+coverage value and before availability notes; without one it is unchanged. The `recall` record gains
+`types` (set only when passed; the log writes unset fields as null) and `packed_by_scope` on every
+record — packed lines by `fact.scope`, with session notes split into `current-session` and
+`prior-session` by origin. It is a line count beside `fact_count`, whose meaning is unchanged
+(D43, D46). The mod op's `mod-call` record gets neither.
+
+**Measured** (JIT host, Release; overlap on, vector off; statement p50 of 9 alternating runs,
+current session 1550; same-statement self-spread 0.3–11.6 ms):
+
+| query | before | default | `user` | `code` |
+|---|---|---|---|---|
+| ah2 hierarchy pane web UI TUI removed renamed | 259.8 | 260.8 | 119.0 | 218.9 |
+| agent-hierarchy v1 Claude Code pane hierarchy … | 445.1 | 442.9 | 203.4 | 347.4 |
+| ah2 sub-orchestrators feature status … | 250.0 | 260.0 | 100.9 | 171.2 |
+| how Claude Code loads plugin mods … | 360.0 | 354.9 | 166.9 | 314.3 |
+| ah2 web UI graph busy working member node … | 162.8 | 152.1 | 82.0 | 101.4 |
+
+The default is within noise of before, and a filtered recall was cheaper than the default on every
+query measured; why was not profiled.
+
+## D90 — Recall scores only the overlap hits it could return; results are unchanged
+
+**The cost was materializing every overlap hit, not ranking them.** About 20,000 hits per query on
+the real store were joined to `fact` and `entity`, scored, counted by window functions and sorted,
+all to keep 501. Ranking every hit stays: `overlap_ranked` is unchanged. Only these are now joined:
+- the first `$limit` *eligible* hits in rank order (`overlap_prefix`);
+- every lexical and vector hit;
+- every current-session hit (`current_arm`).
+Each joined row keeps the overlap rank it has among all hits.
+
+**Why the window is exactly the old one.** Take a fact that was a candidate and is no longer
+materialized. It is not in lex, vec or the current-session arm, so it is an eligible, overlap-only,
+non-current hit whose eligible position is past `$limit`. Its fused score is 1/(k + its rank). Each
+of the `$limit` eligible hits ranked above it fuses at least 1/(k + a smaller rank), which is
+strictly greater because ranks are unique. So `$limit` rows sort before it, and it could never have
+been kept. Nothing at the bound can tie.
+
+**Totals.** `matched_total` is the eligible-hit count plus the materialized rows that are not overlap
+hits. `corroborated_total` is the sum over the materialized rows. A corroborated fact is in two lanes,
+so it is in lex or vec and always materialized, and its overlap rank comes from every hit, not from
+the prefix. Coverage is therefore unchanged.
+
+**One definition of the exclusion.** A new `excluded` CTE holds directives (by path range) and, on a
+default call, the registry's default-excluded scopes (`MemoryScopes.ExcludedByDefaultSql`, through
+`ix_fact_scope`). Overlap eligibility and `scored` both test membership in it, so they cannot
+disagree.
+
+**Construction.** The spec allowed two:
+- (b), default calls: raw rank ≤ `$limit` + the excluded hits, so no second ordering is needed.
+- (a), `types` calls: an ordering over eligible hits, which needs each hit's scope.
+
+L2 measured (a) on default calls at 69.5 ms against (b)'s 68.9, with identical rows, so the spec's
+choice stands. The snapshot holds no tool rows, so the comparison that would separate the two
+constructions (default calls once P3's ledgers exist) could not be run.
+
+**The origin CASE compares with `=`**, amending D84 (Orchestrator ruling U3). With `IS`, a NULL
+`$currentSessionId` made a NULL-session note origin 0. Such a note is not in the current arm, so it
+could be origin 0 without being materialized, which breaks the proof. It now renders `p?`. The
+snapshot holds 0 of them.
+
+**The one assumption.** `fact_token` must hold live facts only (D59). A stale token row is counted
+in the totals, because hits are counted without a `fact` join, and it can take one prefix position.
+`scored` still requires a live fact, so it is never returned. Accepted (U1): `repair` restores the
+index, and a stale index already perturbs overlap ranks today.
+
+**Two plan traps.** Both CTEs below are now `MATERIALIZED`.
+- `scored` has two readers, `totals` and `bounded`. Inlined into each, the planner drove every copy
+  from a scan of all live facts (through `ix_fact_scope`) rather than from `candidates`.
+  `RecallRankerPlanTests`' no-fact-scan guard caught it.
+- `overlap_eligible` has two readers, the prefix and the count. Inlined, it paid the per-hit `fact`
+  lookup twice, and `types:["user"]` ran 65.6 ms against 56.2 before.
+
+**Measured** on the 2.4 GB snapshot over the 30-query attribution sample (every 9th recorded query).
+Overlap on, vector off, NULL session.
+
+JIT statement time, Release. p50 of per-query medians over 5 alternated reps. The old statement
+against itself spreads 2.4 ms.
+
+| arm | fda1cb8 | D90 |
+|---|---|---|
+| default | 117.2 ms (p90 236.7, max 256.9) | 68.9 ms (p90 146.5, max 171.9) |
+| `types:["user"]` | 56.2 | 54.5 |
+| `types:["session"]` | 82.0 | 73.3 |
+
+Published AOT `explain`, timed to a file, on an APFS clone of the snapshot, with the 9.7 ms
+`engram home` floor subtracted. Self-spread 0.2 ms.
+
+| percentile | before | after |
+|---|---|---|
+| p50 | 156.5 ms | 108.7 ms |
+| p90 | 321.2 ms | 232.1 ms |
+
+The spec estimated 75–85 ms for the statement; it came in under that. What remains is mostly the
+lexical lane.
+
+**Equivalence**, zero tolerance, between fda1cb8 and D90 on the snapshot. 270 recorded queries ×
+19 configurations, 5,130 comparisons, 0 differences. Each comparison covers every returned column
+(hashed), the totals and the packed digest text. The configurations are:
+- the current session NULL, and set to each of the 10 sessions holding the most live notes;
+- `minCandidates` 1,000 (explain's case), with NULL and with the largest session;
+- `types` user, session and code, each with NULL and with the largest session.
+
+The harness was shown able to fail. Probes were built from the committed tree with a break applied
+and run on the first 5 queries (95 comparisons):
+- (iii), corroboration from the prefix: 91 differ.
+- (ii), no current arm: 60 differ.
+- (i), prefix `$limit − 1`: 0 differ. This is expected. Lex and current-session rows outside the
+  prefix take window slots, so real queries leave the prefix slack, and only the synthetic fixture
+  can reach (i).
+
+**Guards.** `RecallBoundedMaterializationTests` compares the bounded call with an unbounded oracle:
+the same statement with `minCandidates` above every candidate. It also checks the oracle's totals
+against its own rows, so a totals defect cannot hide by being in both. Falsified against the
+committed tree, with each break shown to have landed (red count in brackets):
+1. prefix `$limit − 1` [5]
+2. no current arm [9]
+3. corroboration from the prefix [6]
+4. (b) without the excluded count [6]
+5. totals without the lex/vec term [5]
+6. origin CASE back to `IS` [1, `RecallSessionRangeTests`]
+7. filtered eligibility without `types` [4]
+8. no tool arm in `excluded` [9]
+9. `scored` inlined [8 plan rows]
+10. `scored` without `valid_to IS NULL` [1, the stale-token test]
+
+`AStoreOfFiveFacts` turned red under none of them, since none bounds anything at that size. Its
+guarantee rests on the oracle comparison alone.
+
+`RecallTypesTests`' pre-D85 identity check now removes the tool arm from `excluded`. It compares rows
+only, because that arm has a plan of its own, and `RecallRankerPlanTests` pins that plan.

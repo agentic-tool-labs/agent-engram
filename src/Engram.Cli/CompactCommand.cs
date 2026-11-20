@@ -93,7 +93,7 @@ internal static class CompactCommand
         if (report.ProtectedByAuthoredHistory > 0)
         {
             stdout.WriteLine(
-                $"  kept: {Count(report.ProtectedByAuthoredHistory, "fact")} revised into authored history — never pruned");
+                $"  kept: {Count(report.ProtectedByAuthoredHistory, "fact")} that authored history, relations, reviews or sync requests depend on — never pruned");
         }
 
         if (report.SupersessionsRemoved > 0)
@@ -111,6 +111,7 @@ internal static class CompactCommand
             stdout.WriteLine(report.EntitiesRemoved > 0
                 ? $"  entities: {Count(report.EntitiesRemoved, "code entity")} {verb}removed"
                 : "  entities: none left unreferenced");
+            stdout.WriteLine($"  entities kept for rename history: {report.EntitiesKeptForRenameHistory}");
             stdout.WriteLine(
                 $"  index state: {Count(report.FileStatesRemoved, "file record")} + "
                 + $"{Count(report.ReposDeregistered, "repo registration")} {verb}cleared, so a re-index re-reads");

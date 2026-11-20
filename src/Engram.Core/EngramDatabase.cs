@@ -20,7 +20,7 @@ namespace Engram.Core;
 /// </remarks>
 public static class EngramDatabase
 {
-    public const int SchemaVersion = 19;
+    public const int SchemaVersion = 20;
 
     public const int BusyTimeoutMilliseconds = 5000;
 
@@ -583,6 +583,21 @@ public static class EngramDatabase
             WriteMeta(connection, transaction, "schema_version", "19");
             transaction.Commit();
         }
+
+        if (from < 20)
+        {
+            // Pure query planning: the foreign-key child checks behind deleting a fact or an
+            // entity scan fact once per deleted row without these. ix_fact_object is left alone
+            // because recall plans against it (compact-quadratic-deletes.md F1, F3).
+            using var transaction = BeginWrite(connection);
+            Execute(connection, transaction,
+                """
+                CREATE INDEX IF NOT EXISTS ix_fact_superseded_by ON fact(superseded_by) WHERE superseded_by IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS ix_fact_object_ref ON fact(object_id) WHERE object_id IS NOT NULL;
+                """);
+            WriteMeta(connection, transaction, "schema_version", "20");
+            transaction.Commit();
+        }
     }
 
     /// <summary>
@@ -606,7 +621,7 @@ public static class EngramDatabase
         Execute(
             connection,
             transaction,
-            """
+            $$"""
             DROP TRIGGER IF EXISTS fact_fts_insert;
             DROP TRIGGER IF EXISTS fact_fts_close;
             DROP TRIGGER IF EXISTS fact_fts_delete;
@@ -652,9 +667,18 @@ public static class EngramDatabase
 
             INSERT INTO fact_fts(rowid, body, predicate, path)
               SELECT id, body, predicate, path FROM fact
-              WHERE valid_to IS NULL AND NOT (regenerable IS 1 AND object_id IS NOT NULL);
+              WHERE valid_to IS NULL AND {{LexicallyIndexed}};
             """);
     }
+
+    /// <summary>
+    /// Which live facts belong in <c>fact_fts</c>, as an unqualified <c>fact</c>-row condition:
+    /// everything except regenerable, object-bearing edges. The rebuild's backfill and
+    /// <see cref="StoreRepairer"/>'s missing-entry detector both read it, so the detector cannot
+    /// expect what the rebuild will not insert; the schema triggers spell it with
+    /// <c>new.</c>/<c>old.</c> and a test holds them to this text.
+    /// </summary>
+    internal const string LexicallyIndexed = "NOT (regenerable IS 1 AND object_id IS NOT NULL)";
 
     private static bool TableExists(SqliteConnection connection, string name)
     {

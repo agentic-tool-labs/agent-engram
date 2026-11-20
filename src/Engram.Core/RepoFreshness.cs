@@ -91,9 +91,36 @@ public static class RepoFreshness
         // Filtering the already-ordered Due() result rather than re-querying preserves the same
         // most-neglected-first order within the ambient-restricted subset — a second, separately
         // maintained ordering here could silently diverge from Due()'s.
-        return Due(connection, intervalMinutes, now, exclude)
-            .Where(candidate => includeAmbient || candidate.Reason == FreshnessReason.UnfulfilledEnrollment)
-            .FirstOrDefault();
+        return Pickable(connection, intervalMinutes, now, includeAmbient, exclude).FirstOrDefault();
+    }
+
+    private static IEnumerable<FreshnessCandidate> Pickable(
+        SqliteConnection connection, int intervalMinutes, DateTimeOffset now,
+        bool includeAmbient, IReadOnlySet<string> exclude) =>
+        Due(connection, intervalMinutes, now, exclude)
+            .Where(candidate => includeAmbient || candidate.Reason == FreshnessReason.UnfulfilledEnrollment);
+
+    /// <summary>
+    /// <see cref="NextDue"/> for a caller about to index: a candidate whose origin git cannot
+    /// resolve is skipped and the next one taken in the same pass, so a root that stays Unknown is
+    /// never stamped and would otherwise be picked first forever (D94). Each skip is reported to
+    /// <paramref name="onUnknown"/> with git's reason.
+    /// </summary>
+    public static FreshnessCandidate? NextDueResolvable(
+        SqliteConnection connection, int intervalMinutes, DateTimeOffset now,
+        bool includeAmbient, IReadOnlySet<string> exclude, Action<FreshnessCandidate, string>? onUnknown = null)
+    {
+        foreach (var candidate in Pickable(connection, intervalMinutes, now, includeAmbient, exclude))
+        {
+            if (CodeIndexer.TryResolveIdentity(candidate.Root, out _, out var failure))
+            {
+                return candidate;
+            }
+
+            onUnknown?.Invoke(candidate, failure);
+        }
+
+        return null;
     }
 
     /// <summary>

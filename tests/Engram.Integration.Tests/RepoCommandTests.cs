@@ -396,7 +396,8 @@ public class RepoCommandTests
         var now = DateTimeOffset.UtcNow;
 
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
-        var result = RepoCommand.ApplyDecision(sandbox.Home, connection, root, decision, "cli", now);
+        var result = RepoCommand.ApplyDecision(
+            sandbox.Home, connection, root, CodeIndexer.ResolveIdentity(root), decision, "cli", now);
 
         var stamp = RepoIndexStamp.Read(sandbox.Home.RepoIndexStampPath, root);
         Assert.NotNull(stamp);
@@ -415,8 +416,9 @@ public class RepoCommandTests
         var now = DateTimeOffset.UtcNow;
 
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
-        RepoCommand.ApplyDecision(sandbox.Home, connection, root, "enroll", "cli", now);
-        RepoCommand.ApplyDecision(sandbox.Home, connection, root, "reset", "cli", now.AddMinutes(1));
+        var identity = CodeIndexer.ResolveIdentity(root);
+        RepoCommand.ApplyDecision(sandbox.Home, connection, root, identity, "enroll", "cli", now);
+        RepoCommand.ApplyDecision(sandbox.Home, connection, root, identity, "reset", "cli", now.AddMinutes(1));
 
         var stamp = RepoIndexStamp.Read(sandbox.Home.RepoIndexStampPath, root);
         Assert.NotNull(stamp);
