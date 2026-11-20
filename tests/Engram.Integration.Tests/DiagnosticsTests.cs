@@ -1,7 +1,5 @@
 using System.Diagnostics;
 using System.Globalization;
-using System.Net;
-using System.Net.Sockets;
 using Engram.Cli;
 using Engram.Core;
 using Microsoft.Data.Sqlite;
@@ -670,15 +668,17 @@ public sealed class DiagnosticsTests : IDisposable
     {
         Directory.CreateDirectory(directory);
         var script = Path.Combine(directory, "doctor-black-hole.py");
-        var port = FreePort();
 
+        // Port 0 and read back, as StartStandInEmbedder does and for its reason: a port probed here
+        // and bound a process start later can be taken in between. Printed after listen, so the
+        // number arriving means connections are already accepted.
         File.WriteAllText(script, $$"""
             #!{{Python}}
             import socket
             s = socket.socket()
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("127.0.0.1", {{port}}))
+            s.bind(("127.0.0.1", 0))
             s.listen(16)
+            print(s.getsockname()[1], flush=True)
             held = []
             while True:
                 c, _ = s.accept()
@@ -691,43 +691,17 @@ public sealed class DiagnosticsTests : IDisposable
             File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
-        started.Add(Process.Start(new ProcessStartInfo(script)
+        var process = Process.Start(new ProcessStartInfo(script)
         {
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-        })!);
+        })!;
+        started.Add(process);
 
-        WaitUntilAccepting(port);
+        var port = ReadPort(process);
         return $"http://127.0.0.1:{port.ToString(CultureInfo.InvariantCulture)}/v1";
-    }
-
-    private static void WaitUntilAccepting(int port)
-    {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
-        while (DateTime.UtcNow < deadline)
-        {
-            try
-            {
-                using var probe = new TcpClient();
-                probe.Connect(IPAddress.Loopback, port);
-                return;
-            }
-            catch (SocketException)
-            {
-                Thread.Sleep(50);
-            }
-        }
-
-        Assert.Fail("the stand-in black hole never started listening");
-    }
-
-    private static int FreePort()
-    {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 
     /// <summary>
@@ -735,7 +709,7 @@ public sealed class DiagnosticsTests : IDisposable
     /// </summary>
     /// <remarks>
     /// <para><b>The server picks its own port and reports it back.</b> Choosing one here with
-    /// <see cref="FreePort"/> first meant handing back a port that was free at that instant and
+    /// a probe first meant handing back a port that was free at that instant and
     /// binding it a process start later — and on a loaded CI runner something else can take it in
     /// between, at which point python exits with <c>Address already in use</c>. Binding port 0
     /// closes the window rather than narrowing it, and the socket is listening before the number is
