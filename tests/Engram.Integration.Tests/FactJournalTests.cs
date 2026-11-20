@@ -936,10 +936,12 @@ public sealed class FactJournalTests
         using var command = connection.CreateCommand();
         command.CommandText =
             """
-            SELECT 'f', id, subject_id, predicate, body, valid_from, valid_to, superseded_by, created_at, NULL, NULL
+            SELECT 'f', id, subject_id, predicate, body, object_id, path, scope, learned_via, regenerable,
+                   evidence, session_id, valid_from, valid_to, superseded_by, created_at, details, analyzer_tier
               FROM fact
             UNION ALL
-            SELECT 's', old_fact_id, new_fact_id, reason, evidence, session_id, created_at, NULL, NULL, NULL, NULL
+            SELECT 's', old_fact_id, new_fact_id, reason, evidence, session_id, created_at,
+                   NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
               FROM supersession
             ORDER BY 1, 2;
             """;
