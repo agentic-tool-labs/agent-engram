@@ -7041,3 +7041,111 @@ to the constant. The guard also asserts that its pattern matches what the templa
 reworded definition cannot leave it scanning for a spelling nobody uses. It does not see the bare
 complement: a hand copy of `f.regenerable IS 1 AND f.object_id IS NOT NULL` without the `NOT` passes,
 and that is also what keeps `PruneIneligibleSql` legal.
+## D103 — Replay pairs journal records with target rows one-to-one, liveness first; a synced backfill writes its edge row
+
+**The defect (F-a).** Replay identity is subject path, predicate, body and `valid_from`, plus the
+object path for an edge (D32). That key is not unique. `Remember` stamps whole seconds, and after a
+`Forget` the same statement is a new row, so "state A, forget A, state A again" within one second
+leaves a closed row and a live row with one key. Replay matched many-to-one. A was inserted closed,
+then A′ matched the row just inserted for A, counted `AlreadyPresent`, and was never written: the
+live belief was lost, and any verdict on A′ would resolve to the closed row. The same happens for
+revise A→B→A in one second and for a source holding closed exact duplicates.
+
+**The decision (adr-5).** The key is unchanged, so D32's contract and every old journal stand. What
+changed is how records pair with rows that share a key. `FactJournal.Assign` computes the pairing
+once, before pass 1, against the rows the target held before this replay. On apply it reads inside
+the write transaction; the dry run uses the same routine.
+- **Round 1, same liveness.** In journal order, each record takes the lowest-id unclaimed row whose
+  liveness matches its own. A taken row is claimed.
+- **Round 2, cross liveness**, for records round 1 left unpaired. This keeps D68 and D99 for states
+  that really disagree: a retraction whose row the target still holds live, or an old live record
+  whose row has since been forgotten. One exception: a live record never takes a closed row whose
+  `valid_to` equals its `valid_from`. That row closed in the second the record began, so the record
+  restates it.
+- **`AddressUsable` keeps D68's meaning**, measured over the round that paired: false iff that round
+  had two or more eligible rows and the one taken is closed.
+  - The count covers rows of the round's liveness, which keeps the A/A′ fixed point unambiguous.
+  - It is taken before any pairing, claimed or not (reviewer finding 4, ruled). Counting only
+    unclaimed rows made it depend on order: of N identical closed records against N closed rows,
+    the last would get an address that D68 says none has. Now none gets one, and reordering the
+    journal gives the same idMap.
+- Rows this replay inserts are never candidates. Pass 1 branches on the pairing instead of a lookup,
+  and both of its branches are otherwise unchanged. Pass 2 is untouched.
+
+Liveness and not exact `valid_to`, because `valid_to` would give D68's all-closed ambiguous pair a
+basis to pick a row and change what D68 and D99 decided. This amends D68 §4.2: a closed record now
+prefers a closed row over a live twin, because pointing it at the live twin is the defect.
+
+**What moved, on purpose.** A target still holding A live (an older snapshot) now pairs A′ with
+the live row and inserts A closed with its retraction: `(1,1,0,0)`, where it was `(0,2,0,1)`. Two
+identical closed records now both land, `(2,0,0,0)` where it was `(1,1,0,0)`, because the source
+really held two rows. No existing test's counts moved. One known mis-case is accepted: a journal
+written in the same second as a state-then-forget, replayed into the post-forget store, inserts a
+live copy of a belief forgotten in the second it was stated.
+
+**F-b part 1.** `Sync.BackfillSupersededBy` set `superseded_by` for a pass-1 close whose successor
+arrived later in the same import, and never wrote the edge's `supersession` row. A pointer with no
+row is journalled with `reason = null`, and a later replay's `Link` then invents "replayed from the
+fact journal". When the backfill's update moves a pointer from NULL to an id, it now writes the
+same row `ApplyClose` writes, through one shared `InsertSupersession`: reason "synced from another
+machine", `created_at` = the record's `valid_to`, `ON CONFLICT DO NOTHING`. Nothing is written when
+the update touches no row. E-b confirmed both gaps on ad6f965: a synced forget and a backfilled
+edge each had 0 rows.
+
+**F-b part 2 (user choice U-b: yes).** A synced forget wrote no row either: the close record had no
+reason to write. The `"t":"close"` record now carries an optional `"reason"`. It is the origin's
+NULL-new `supersession` reason, read beside the row in `LookupExact`, and it is emitted only when
+the close names no successor and that row exists. It is absent otherwise, never null. When
+`ApplyClose` is the call that closed the row, the close names no successor, and `Reason` is
+present, it writes `(old, NULL, reason, created_at = valid_to)` through the same
+`InsertSupersession`, `ON CONFLICT DO NOTHING`. A missing, null or non-string `reason` writes
+nothing. A no-successor close may be a lost pointer rather than a forget, and stating an account
+the source never had is what D99 forbids. Old binaries ignore the key, old chunks carry none, and
+both import as before.
+
+A machine can first see a fact line and its close in the same import. In that case
+`MergeSameBatchClosesIntoFactLines` folds the close into the line instead of applying it. The fold
+copies the close's `reason` into the line when there is one, and never adds one. Replay's own
+retraction branch (D99) then writes the row. Before this, that path left a forget with no row: the
+fold copied only `valid_to` and `superseded_by`. This was found during implementation and the
+Orchestrator ruled it in.
+
+**Known limits.**
+- A deferred close loses its reason. `sync_deferred_close` has no column for it, so a retraction
+  that is deferred and applied on a later retry lands with no row. Adding the column is a migration
+  (U-b2) and is not built.
+- `LookupExact`, `TryResolveSuccessorId` and the backfill's own subquery use the same key with no
+  liveness filter, so with an A/A′ pair present they may pick either row. This was observed:
+  suppose the target already holds a closed duplicate of a synced fact, its pointer set, closed in
+  the second it began. The backfill's subquery reaches that duplicate, touches nothing, and leaves
+  the live copy it should have linked closed with no pointer and no row.
+
+**Falsified against a committed tree** (each patch confirmed by `git diff --quiet`, then restored):
+- Rule 6 broken, with pairing re-read per record during pass 1 so it sees this replay's inserts:
+  rows 3, 4 and 11 redden. Row 1 stays green because rule 3's exception also rescues A′ there,
+  which the spec had not predicted.
+- Claiming disabled: row 4 reddens.
+- Rule 3's exception dropped: row 7 reddens.
+- Round 1 dropped, leaving one liveness-blind round: rows 2 and 4 and D68 test 1 redden.
+- The backfill's insert deleted: the backfill test reddens.
+- `reason` not emitted: the retraction test reddens.
+- `reason` ignored on apply: the retraction test reddens.
+- A reason invented when absent: the three no-usable-reason cases and row 3 redden.
+- The fold drops the reason: the same-batch forget test reddens.
+- The fold invents one: the same-batch no-reason test reddens.
+- The backfill inserts into whatever row its key lookup reaches, whether or not the update moved a
+  pointer: the pointer-already-set test reddens.
+- Ambiguity counted over unclaimed rows again: the order-independence test reddens.
+
+**F-c tripwire.** `supersession.evidence` is not journalled and is not being journalled. Its only
+writer, `Remember`'s supersede branch, stores the same value as the superseding fact's
+`fact.evidence`, which the journal carries, and nothing reads the column. Anything that starts
+reading `supersession.evidence` must read the superseding fact's `fact.evidence` instead, or reopen
+this as a journal-format change.
+
+**F-d tripwire.** The primer's per-scope example probe walks every `agent`-scope fact and finds
+none, because they all live under `/agents/`. That is the shape the `session` scope already has, and
+the cost was accepted there. It is deferred until live `agent`-scope facts exceed 10,000 or a
+file-timed `subagent-start` attributes more than 5 ms to that arm. The fix then is a guard test that
+every live `agent` and `session` fact sits under its prefix, followed by excluding both scopes from
+the walk.

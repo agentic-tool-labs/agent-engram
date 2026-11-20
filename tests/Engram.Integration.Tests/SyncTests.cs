@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Engram.Cli;
 using Engram.Core;
 using Microsoft.Data.Sqlite;
@@ -375,6 +376,371 @@ public sealed class SyncTests
                 Directory.Delete(syncRoot, recursive: true);
             }
         }
+    }
+
+    /// <summary>
+    /// Runs the forget round trip: A states a fact, B imports it live, A closes it with
+    /// <paramref name="closeOnA"/> and exports, <paramref name="editCloseChunk"/> may rewrite the
+    /// close record in the chunk, then B imports. Returns B's closed row id and the close line as
+    /// exported (before any edit).
+    /// </summary>
+    private static (long ClosedId, JsonObject CloseLine) ForgetRoundTrip(
+        SandboxHome a, SqliteConnection connB, string syncRoot,
+        Action<SqliteConnection, long> closeOnA, Action<JsonObject>? editCloseChunk = null, bool sameBatch = false)
+    {
+        using (var connA = EngramDatabase.OpenInitialized(a.Home))
+        {
+            var id = Write(connA, "/project/x", "a passing belief", T0);
+            var machineA = Sync.ResolveMachineId(syncRoot);
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+
+            // sameBatch: B first sees the fact line and its close in one import, so the close is
+            // folded into the fact line (MergeSameBatchClosesIntoFactLines) instead of applied.
+            if (!sameBatch)
+            {
+                Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(1), apply: true, CloseResolver.DefaultRetryCeiling);
+            }
+
+            closeOnA(connA, id);
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+        }
+
+        var (chunk, lines, index) = FindCloseLine(syncRoot);
+        var closeLine = (JsonObject)JsonNode.Parse(lines[index])!;
+        if (editCloseChunk is not null)
+        {
+            var edited = (JsonObject)closeLine.DeepClone();
+            editCloseChunk(edited);
+            lines[index] = edited.ToJsonString();
+            File.WriteAllLines(chunk, lines);
+        }
+
+        Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(3), apply: true, CloseResolver.DefaultRetryCeiling);
+
+        var closedId = FactId(connB, "/project/x", "a passing belief", liveOnly: false);
+        Assert.NotNull(closedId);
+        Assert.Null(FactId(connB, "/project/x", "a passing belief", liveOnly: true));
+        Assert.Null(SupersededByOf(connB, "/project/x", "a passing belief"));
+        return (closedId!.Value, closeLine);
+    }
+
+    private static (string Chunk, string[] Lines, int Index) FindCloseLine(string syncRoot)
+    {
+        foreach (var chunk in Directory.GetFiles(syncRoot, "*.jsonl", SearchOption.AllDirectories))
+        {
+            var lines = File.ReadAllLines(chunk);
+            for (var i = 0; i < lines.Length; i++)
+            {
+                if (JsonNode.Parse(lines[i]) is JsonObject o && (string?)o["t"] == "close")
+                {
+                    return (chunk, lines, i);
+                }
+            }
+        }
+
+        throw new InvalidOperationException("no close record was exported");
+    }
+
+    private static readonly Action<SqliteConnection, long> ForgetIt =
+        (connection, id) => Assert.True(FactStore.Forget(connection, id, "no longer true", T0.AddMinutes(2)));
+
+    /// <summary>
+    /// E-b retraction case, then F-b part 2: a forget on A reaches B as a close with no successor
+    /// and carries A's reason, so B writes the same NULL-new row A has, stamped at the close. On
+    /// ad6f965 this wrote 0 rows.
+    /// </summary>
+    [Fact]
+    public void ForgettingOnA_ThenSyncing_WritesTheOriginsRetractionOnB()
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+            var (closedId, closeLine) = ForgetRoundTrip(a, connB, syncRoot, ForgetIt);
+
+            Assert.Equal("no longer true", (string?)closeLine["reason"]);
+            Assert.Equal(1, SupersessionRows(connB, closedId));
+            using var row = connB.CreateCommand();
+            row.CommandText = "SELECT new_fact_id, reason, created_at FROM supersession WHERE old_fact_id = $id;";
+            row.Parameters.AddWithValue("$id", closedId);
+            using var reader = row.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.True(reader.IsDBNull(0));
+            Assert.Equal("no longer true", reader.GetString(1));
+            Assert.Equal(T0.AddMinutes(2).ToUnixTimeSeconds(), reader.GetInt64(2));
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// F-b row 2 and the null / non-string rows: a close record with no usable <c>reason</c> — a
+    /// chunk from an older binary, or a hand-edited value — closes B's copy and writes no row. Never
+    /// an invented reason (D99).
+    /// </summary>
+    [Theory]
+    [InlineData("absent")]
+    [InlineData("null")]
+    [InlineData("number")]
+    public void ACloseWithNoUsableReason_ClosesBsCopy_AndWritesNoRow(string shape)
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            Action<JsonObject> edit = shape switch
+            {
+                "absent" => o => o.Remove("reason"),
+                "null" => o => o["reason"] = null,
+                _ => o => o["reason"] = 42,
+            };
+
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+            var (closedId, _) = ForgetRoundTrip(a, connB, syncRoot, ForgetIt, edit);
+
+            Assert.Equal(0, SupersessionRows(connB, closedId));
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// F-b row 3: a close on A with no successor and no retraction row there — a lost pointer, not
+    /// a forget — emits no <c>reason</c>, and B writes no row.
+    /// </summary>
+    [Fact]
+    public void ACloseTheOriginNeverExplained_EmitsNoReason_AndWritesNoRow()
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            Action<SqliteConnection, long> closeWithNoAccount = (connection, id) =>
+            {
+                using var close = connection.CreateCommand();
+                close.CommandText = "UPDATE fact SET valid_to = $at WHERE id = $id;";
+                close.Parameters.AddWithValue("$at", T0.AddMinutes(2).ToUnixTimeSeconds());
+                close.Parameters.AddWithValue("$id", id);
+                Assert.Equal(1, close.ExecuteNonQuery());
+            };
+
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+            var (closedId, closeLine) = ForgetRoundTrip(a, connB, syncRoot, closeWithNoAccount);
+
+            Assert.False(closeLine.ContainsKey("reason"));
+            Assert.Equal(0, SupersessionRows(connB, closedId));
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// E-b, backfill case and F-b part 1: a revise whose close and successor arrive in one batch is
+    /// linked by <c>BackfillSupersededBy</c>, and that link must carry its edge row — a pointer with
+    /// no row is journalled with no reason, and a later replay invents one.
+    /// </summary>
+    [Fact]
+    public void RevisingOnA_ThenSyncingInOneBatch_BackfillWritesTheEdgeRow()
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            using var connA = EngramDatabase.OpenInitialized(a.Home);
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+
+            Write(connA, "/project/x", "the old belief", T0);
+            var machineA = Sync.ResolveMachineId(syncRoot);
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(1), apply: true, CloseResolver.DefaultRetryCeiling);
+
+            Write(connA, "/project/x", "the new belief", T0.AddMinutes(2));
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(3), apply: true, CloseResolver.DefaultRetryCeiling);
+
+            var successorId = FactId(connB, "/project/x", "the new belief", liveOnly: true);
+            var oldId = FactId(connB, "/project/x", "the old belief", liveOnly: false);
+            Assert.NotNull(successorId);
+            Assert.Equal(successorId, SupersededByOf(connB, "/project/x", "the old belief"));
+            Assert.Equal(1, SupersessionRows(connB, oldId!.Value));
+
+            using var row = connB.CreateCommand();
+            row.CommandText = "SELECT new_fact_id, reason, created_at FROM supersession WHERE old_fact_id = $id;";
+            row.Parameters.AddWithValue("$id", oldId.Value);
+            using var reader = row.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.Equal(successorId!.Value, reader.GetInt64(0));
+            Assert.Equal("synced from another machine", reader.GetString(1));
+            Assert.Equal(T0.AddMinutes(2).ToUnixTimeSeconds(), reader.GetInt64(2));
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Ruling on the same-batch fold: when B first sees a fact line and its forget in one import,
+    /// the close is folded into the line and carries its reason, so Replay writes the origin's
+    /// NULL-new row at the close's time.
+    /// </summary>
+    [Fact]
+    public void ASameBatchForget_FoldsItsReasonIntoTheFactLine_AndWritesTheRetraction()
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+            var (closedId, _) = ForgetRoundTrip(a, connB, syncRoot, ForgetIt, sameBatch: true);
+
+            using var row = connB.CreateCommand();
+            row.CommandText = "SELECT new_fact_id, reason, created_at FROM supersession WHERE old_fact_id = $id;";
+            row.Parameters.AddWithValue("$id", closedId);
+            using var reader = row.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.True(reader.IsDBNull(0));
+            Assert.Equal("no longer true", reader.GetString(1));
+            Assert.Equal(T0.AddMinutes(2).ToUnixTimeSeconds(), reader.GetInt64(2));
+            Assert.False(reader.Read());
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>The fold's negative: a same-batch close with no reason lands closed with no row — none is added.</summary>
+    [Fact]
+    public void ASameBatchCloseWithNoReason_FoldsNoReason_AndWritesNoRow()
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+            var (closedId, _) = ForgetRoundTrip(a, connB, syncRoot, ForgetIt, o => o.Remove("reason"), sameBatch: true);
+
+            Assert.Equal(0, SupersessionRows(connB, closedId));
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// F-b row 7: Backfill reaching a row whose pointer is already set writes no edge row. B holds
+    /// a closed duplicate of the synced fact — same key, closed in the second it began, pointer set
+    /// and no supersession row, the state pre-fix backfills left behind — beside the live copy
+    /// (adr-5 rule 3 lets that live copy land). Backfill's key lookup is liveness-blind; whichever
+    /// row it reaches, the duplicate must come out exactly as it went in.
+    /// </summary>
+    [Fact]
+    public void Backfill_OnARowWhosePointerIsAlreadySet_WritesNoEdgeRow()
+    {
+        var syncRoot = NewSyncRoot();
+        try
+        {
+            using var a = new SandboxHome(initialize: false);
+            using var b = new SandboxHome(initialize: false);
+            using var connA = EngramDatabase.OpenInitialized(a.Home);
+            using var connB = EngramDatabase.OpenInitialized(b.Home);
+
+            var elsewhere = Write(connB, "/project/elsewhere", "an unrelated belief", T0);
+            var duplicate = Write(connB, "/project/x", "the old belief", T0);
+            using (var close = connB.CreateCommand())
+            {
+                close.CommandText = "UPDATE fact SET valid_to = $at, superseded_by = $to WHERE id = $id;";
+                close.Parameters.AddWithValue("$at", T0.ToUnixTimeSeconds());
+                close.Parameters.AddWithValue("$to", elsewhere);
+                close.Parameters.AddWithValue("$id", duplicate);
+                Assert.Equal(1, close.ExecuteNonQuery());
+            }
+
+            FactTokenIndex.Remove(connB, null!, duplicate);
+            Assert.Equal(0, SupersessionRows(connB, duplicate));
+
+            Write(connA, "/project/x", "the old belief", T0);
+            var machineA = Sync.ResolveMachineId(syncRoot);
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(1), apply: true, CloseResolver.DefaultRetryCeiling);
+            Assert.NotNull(FactId(connB, "/project/x", "the old belief", liveOnly: true));
+
+            Write(connA, "/project/x", "the new belief", T0.AddMinutes(2));
+            Sync.Export(connA, syncRoot, machineA, apply: true);
+            Sync.Import(connB, syncRoot, "b-machine", T0.AddMinutes(3), apply: true, CloseResolver.DefaultRetryCeiling);
+
+            Assert.Equal("the new belief", BodyOf(connB, "/project/x"));
+            Assert.Equal(0, SupersessionRows(connB, duplicate));
+
+            // Proof Backfill reached the duplicate and not the live copy: the copy it closed is
+            // left unlinked (D103's liveness-blind limit). If a plan change sends Backfill to the
+            // copy instead, this goes red rather than leaving the guard above silently disarmed.
+            using (var copy = connB.CreateCommand())
+            {
+                copy.CommandText =
+                    """
+                    SELECT f.superseded_by FROM fact f JOIN entity e ON e.id = f.subject_id
+                    WHERE e.path = '/project/x' AND f.body = 'the old belief' AND f.id <> $dup;
+                    """;
+                copy.Parameters.AddWithValue("$dup", duplicate);
+                Assert.IsType<DBNull>(copy.ExecuteScalar());
+            }
+            using var pointer = connB.CreateCommand();
+            pointer.CommandText = "SELECT superseded_by, valid_to FROM fact WHERE id = $id;";
+            pointer.Parameters.AddWithValue("$id", duplicate);
+            using var reader = pointer.ExecuteReader();
+            Assert.True(reader.Read());
+            Assert.Equal(elsewhere, reader.GetInt64(0));
+            Assert.Equal(T0.ToUnixTimeSeconds(), reader.GetInt64(1));
+        }
+        finally
+        {
+            if (Directory.Exists(syncRoot))
+            {
+                Directory.Delete(syncRoot, recursive: true);
+            }
+        }
+    }
+
+    private static long SupersessionRows(SqliteConnection connection, long factId)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM supersession WHERE old_fact_id = $id;";
+        command.Parameters.AddWithValue("$id", factId);
+        return (long)command.ExecuteScalar()!;
     }
 
     private static long? FactId(SqliteConnection connection, string path, string body, bool liveOnly)

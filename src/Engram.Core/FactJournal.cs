@@ -336,7 +336,10 @@ public static class FactJournal
     /// <para>Idempotent by content — a fact matching an existing subject, predicate, body and
     /// <c>valid_from</c> is left alone rather than duplicated. This is what makes replay safe to
     /// run twice, and safe against a store that was partially recovered by other means. It is not
-    /// a merge: nothing here rewrites or closes a fact the target store already had. Facts are
+    /// a merge: nothing here rewrites or closes a fact the target store already had. Matching is
+    /// one-to-one, liveness first: each target row answers for at most one journal record, so a
+    /// fact forgotten and restated in the same second — two rows, one key — comes back as both
+    /// (adr-5). Facts are
     /// append-only (D8), and a recovery tool that could silently retire live beliefs would be a
     /// worse problem than the one it was called to fix.</para>
     ///
@@ -406,9 +409,11 @@ public static class FactJournal
 
         if (!apply)
         {
-            foreach (var fact in facts)
+            var dryAssignment = Assign(connection, null, facts);
+            for (var i = 0; i < facts.Count; i++)
             {
-                if (Existing(connection, null, fact) is not null)
+                var fact = facts[i];
+                if (dryAssignment[i] is not null)
                 {
                     present++;
                 }
@@ -428,10 +433,14 @@ public static class FactJournal
 
         using var transaction = EngramDatabase.BeginWrite(connection);
 
-        foreach (var fact in facts)
+        // Read inside the write transaction and before any insert, so the assignment sees exactly
+        // the rows pass 1 sees and none this replay writes (rule 6 of adr-5).
+        var assignment = Assign(connection, transaction, facts);
+
+        for (var i = 0; i < facts.Count; i++)
         {
-            var existing = Existing(connection, transaction, fact);
-            if (existing is { } match)
+            var fact = facts[i];
+            if (assignment[i] is { } match)
             {
                 if (match.AddressUsable)
                 {
@@ -572,38 +581,114 @@ public static class FactJournal
         return command.ExecuteScalar() is not null;
     }
 
-    /// <summary>Whether a match exists, and — separately — whether it names a usable address.</summary>
+    /// <summary>The target row a journal record was paired with — one-to-one — and whether it names a usable address.</summary>
     /// <param name="AddressUsable">
-    /// False only for several closed matches with no live one: no basis exists to prefer any of
-    /// them as the row a supersession would point at (D68 §4.2).
+    /// False only when the round that paired it had several eligible rows (counted before any
+    /// pairing, claimed or not) and the one taken is closed: no basis exists to prefer any of them as the row a supersession would point at
+    /// (D68 §4.2, adr-5).
     /// </param>
     private readonly record struct ExistingMatch(long Id, bool AddressUsable);
 
-    private static ExistingMatch? Existing(SqliteConnection connection, SqliteTransaction? transaction, JournalFact fact)
+    private readonly record struct Candidate(long Id, bool IsLive, long? ValidTo);
+
+    /// <summary>
+    /// Pairs each journal record with at most one target row sharing its identity key, and each
+    /// row with at most one record (adr-5). Computed once, against the rows the target held before
+    /// this replay, identically for apply and dry run.
+    /// </summary>
+    /// <remarks>
+    /// <para>The key alone is not unique: a fact forgotten and restated in the same second leaves a
+    /// closed and a live row with one key, and many-to-one matching let one row answer for both, so
+    /// the restatement was never written. Round 1 pairs same liveness (live record with live row,
+    /// closed with closed); round 2 pairs the rest across liveness — a retraction whose row the
+    /// target still holds live, an old live record whose row has since been forgotten (D68, D99).
+    /// Round 2 never gives a live record a closed row whose <c>valid_to</c> equals the record's
+    /// <c>valid_from</c>: that row closed in the second the record began, so the record restates
+    /// it.</para>
+    ///
+    /// <para>Liveness rather than exact <c>valid_to</c>, because <c>valid_to</c> would give an
+    /// all-closed ambiguous pair a basis to pick a row and change what D68 and D99 decided.</para>
+    /// </remarks>
+    private static ExistingMatch?[] Assign(SqliteConnection connection, SqliteTransaction? transaction, IReadOnlyList<JournalFact> facts)
+    {
+        var candidates = new List<Candidate>[facts.Count];
+        for (var i = 0; i < facts.Count; i++)
+        {
+            candidates[i] = Candidates(connection, transaction, facts[i]);
+        }
+
+        var assignment = new ExistingMatch?[facts.Count];
+        var claimedRows = new HashSet<long>();
+
+        void Take(int i, Func<Candidate, bool> eligible)
+        {
+            Candidate? taken = null;
+            var offered = 0;
+            // Ambiguity counts the round's whole eligible set, claimed or not, so it does not depend
+            // on journal order: N identical closed records against N closed rows are all
+            // "no basis to prefer" (D68), not all but the last.
+            foreach (var candidate in candidates[i])
+            {
+                if (!eligible(candidate))
+                {
+                    continue;
+                }
+
+                offered++;
+                if (!claimedRows.Contains(candidate.Id))
+                {
+                    taken ??= candidate;
+                }
+            }
+
+            if (taken is { } row)
+            {
+                claimedRows.Add(row.Id);
+                assignment[i] = new ExistingMatch(row.Id, AddressUsable: offered < 2 || row.IsLive);
+            }
+        }
+
+        for (var i = 0; i < facts.Count; i++)
+        {
+            var live = facts[i].ValidTo is null;
+            Take(i, c => c.IsLive == live);
+        }
+
+        for (var i = 0; i < facts.Count; i++)
+        {
+            if (assignment[i] is not null)
+            {
+                continue;
+            }
+
+            var fact = facts[i];
+            var live = fact.ValidTo is null;
+            Take(i, c => c.IsLive != live && !(live && c.ValidTo == fact.ValidFrom));
+        }
+
+        return assignment;
+    }
+
+    private static List<Candidate> Candidates(SqliteConnection connection, SqliteTransaction? transaction, JournalFact fact)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        // Two rows, not one: the second says only "there is more than one", which is what decides
-        // whether an address exists. Live first, so row 0 is the live one when any match is live —
-        // the two v13 partial indexes together still guarantee at most one live row per
-        // (subject, predicate, object).
+        // Every row sharing the key, lowest id first — the order both rounds take from.
         command.CommandText = fact.Object is null
             ? """
-              SELECT f.id, f.valid_to IS NULL AS is_live FROM fact f
+              SELECT f.id, f.valid_to FROM fact f
               JOIN entity e ON e.id = f.subject_id
               WHERE e.path = $path AND f.predicate = $predicate AND f.body = $body
                 AND f.valid_from = $validFrom AND f.object_id IS NULL
-              ORDER BY is_live DESC, f.id ASC
-              LIMIT 2;
+              ORDER BY f.id ASC;
               """
             : """
-              SELECT f.id, f.valid_to IS NULL AS is_live FROM fact f
+              SELECT f.id, f.valid_to FROM fact f
               JOIN entity e ON e.id = f.subject_id
               JOIN entity o ON o.id = f.object_id
               WHERE e.path = $path AND f.predicate = $predicate AND f.body = $body
                 AND f.valid_from = $validFrom AND o.path = $object
-              ORDER BY is_live DESC, f.id ASC
-              LIMIT 2;
+              ORDER BY f.id ASC;
               """;
         command.Parameters.AddWithValue("$path", fact.Subject);
         command.Parameters.AddWithValue("$predicate", fact.Predicate);
@@ -615,19 +700,14 @@ public static class FactJournal
         }
 
         using var reader = command.ExecuteReader();
-        if (!reader.Read())
+        var rows = new List<Candidate>();
+        while (reader.Read())
         {
-            return null;
+            long? validTo = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+            rows.Add(new Candidate(reader.GetInt64(0), validTo is null, validTo));
         }
 
-        var id = reader.GetInt64(0);
-        var live = reader.GetInt64(1) != 0;
-        var ambiguous = reader.Read();
-
-        // Ambiguity does not affect presence (D68 §4.1) — only whether this row may be used as the
-        // address a supersession points at. Several closed duplicates give no basis for preferring
-        // one.
-        return new ExistingMatch(id, AddressUsable: !ambiguous || live);
+        return rows;
     }
 
     /// <summary>
