@@ -152,6 +152,20 @@ public sealed class ProjectNotesTests : IDisposable
     }
 
     [Fact]
+    public void ScopeProject_IndexedCheckoutGitCannotAnswer_KeepsASessionNoteRatherThanThrowing()
+    {
+        using var sandbox = new SandboxHome();
+        var repo = IndexedCheckout(sandbox);
+
+        // A corrupt config makes `git remote get-url` exit 128: TryResolveIdentity's Unknown (D94).
+        File.AppendAllText(Path.Combine(repo, ".git", "config"), "[[[broken\n");
+
+        var response = Remember(sandbox, "s1", "Something durable.", "project", repo);
+
+        AssertDegraded(sandbox, response, "not-indexed", $"{repo} is not indexed by Engram — kept as a session note");
+    }
+
+    [Fact]
     public void ScopeProject_FromASubdirectoryNeverIndexed_NamesTheDirectoryAsGiven()
     {
         using var sandbox = new SandboxHome();

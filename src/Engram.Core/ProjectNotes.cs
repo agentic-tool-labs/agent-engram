@@ -56,9 +56,9 @@ public static partial class ProjectNotes
     /// uses. Enrollment is not consulted: a live registry row is what knows the project slug.
     /// </summary>
     /// <remarks>
-    /// <see cref="ProjectUnresolved.GitUnknown"/> is not produced yet: <see cref="CodeIndexer.ResolveIdentity"/>
-    /// falls back to the root path when git cannot answer, which then finds no row and reads as
-    /// <see cref="ProjectUnresolved.NotIndexed"/>. It is enabled and tested after eng-34 (PR #16).
+    /// <see cref="ProjectUnresolved.GitUnknown"/> is not produced yet: when git cannot answer,
+    /// <see cref="CodeIndexer.TryResolveIdentity(string, out string, out string)"/> fails and the
+    /// call reads as <see cref="ProjectUnresolved.NotIndexed"/>. Producing it is a separate item.
     /// </remarks>
     public static ProjectResolution Resolve(SqliteConnection connection, string? projectDir)
     {
@@ -78,9 +78,8 @@ public static partial class ProjectNotes
         }
 
         var root = CodeIndexer.ResolveRoot(projectDir);
-        var identity = CodeIndexer.ResolveIdentity(root);
-
-        if (CodeIndexer.LiveRepoPath(connection, identity) is not { } repoPath)
+        if (!CodeIndexer.TryResolveIdentity(root, out var identity, out _)
+            || CodeIndexer.LiveRepoPath(connection, identity) is not { } repoPath)
         {
             return new(null, root, ProjectUnresolved.NotIndexed);
         }

@@ -91,7 +91,7 @@ public class FactTokenIndexTests
         {
             Write(connection, "/projects/acme/notes", "the zanzibar workflow ships releases");
             Write(connection, "/projects/acme/notes", "the trunk workflow ships releases now");
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(1));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(1), BackupScope.Full);
         }
 
         var facts = FactJournal.Parse(File.ReadLines(FactJournal.PathIn(source.Home)), out var skipped);
@@ -119,7 +119,7 @@ public class FactTokenIndexTests
         using (var connection = EngramDatabase.OpenInitialized(source.Home))
         {
             Write(connection, "/projects/acme/notes", "the trunk workflow ships releases");
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(1));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(1), BackupScope.Full);
         }
 
         var facts = FactJournal.Parse(File.ReadLines(FactJournal.PathIn(source.Home)), out var skipped);

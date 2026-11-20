@@ -63,6 +63,14 @@ public static class DefaultConfig
         # walker someone should choose rather than inherit from auto_index_on_session_start.
         auto_index_in_background = false
 
+        # When a checkout's origin changes (a renamed or repointed remote), the old
+        # registration is retired: excluded from code lookup, its indexed facts kept
+        # until you remove them with `engram compact --retired`. Set this to true to
+        # remove them automatically at session start, once a retired path has been
+        # shown for 7 days and only if it is small. Large ones stay for the manual
+        # verb, and a snapshot is taken first. Off unless you turn it on.
+        # auto_remove_retired = false
+
         # Where there is a git checkout, git decides what belongs to the repo:
         # tracked files plus untracked ones that are not ignored. That already
         # excludes build output, node_modules, caches and temp files, per every
@@ -108,11 +116,13 @@ public static class DefaultConfig
 
         [taxonomy]
         # top-level roots of the memory tree; extendable without migration
-        roots = ["/knowledge", "/user", "/sessions", "/machine", "/projects", "/people", "/concepts"]
+        roots = ["/knowledge", "/user", "/sessions", "/machine", "/projects", "/people", "/concepts", "/tools"]
         default_user = "jim"          # preference-kind facts route to /people/<default_user>/…
         # /knowledge holds the seeded corpus; /user holds what the user stated about
         # themselves, one entity per statement. Both were in use before they were listed
         # here — this list is documentation, not a constraint anything enforces yet.
+        # /tools/<tool>/… holds another tool's records (scope "tool"): kept, but not the
+        # user's memory, so the primer neither counts nor samples them (D87).
         # Code is not a root: a codebase belongs to a project, so it lands at
         # /projects/<name>/code/<repo>/… beside that project's decisions (D27). A note the
         # model files with scope "project" lands at /projects/<name>/notes/<fingerprint> (D98).

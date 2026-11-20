@@ -325,19 +325,38 @@ public sealed class GitFileLister : IFileLister
     }
 
     /// <summary>
-    /// Test seam: when a flow sets this, every <see cref="Run"/> on that flow counts itself, so a
-    /// test can assert that a path spawned no git process without racing parallel tests (D98).
+    /// Test seam: when a flow sets this, every <see cref="RunWithStatus"/> on that flow — and so
+    /// every <see cref="Run"/> — counts itself, so a test can assert that a path spawned no git
+    /// process without racing parallel tests (D98).
     /// </summary>
     internal static readonly AsyncLocal<StrongBox<int>?> InvocationCounter = new();
 
     internal static string? Run(string workingDirectory, params string[] arguments)
+    {
+        var (exitCode, stdout) = RunWithStatus(workingDirectory, arguments);
+
+        // Not a checkout, or git is unhappy. Either way the caller walks the directory.
+        return exitCode == 0 ? stdout : null;
+    }
+
+    /// <summary>
+    /// <see cref="Run"/> with the exit code kept, for the one caller that has to tell git's
+    /// answers apart (<see cref="CodeIndexer.TryResolveIdentity"/>, D94). A null code means git
+    /// never answered: it timed out, or could not be started at all. <paramref name="executable"/>
+    /// and <paramref name="timeout"/> exist for tests that need a git which is absent or hangs.
+    /// </summary>
+    internal static (int? ExitCode, string Stdout) RunWithStatus(
+        string workingDirectory,
+        IReadOnlyList<string> arguments,
+        string executable = "git",
+        TimeSpan? timeout = null)
     {
         if (InvocationCounter.Value is { } counter)
         {
             counter.Value++;
         }
 
-        var info = new ProcessStartInfo("git")
+        var info = new ProcessStartInfo(executable)
         {
             WorkingDirectory = workingDirectory,
             RedirectStandardOutput = true,
@@ -356,7 +375,7 @@ public sealed class GitFileLister : IFileLister
             using var process = Process.Start(info);
             if (process is null)
             {
-                return null;
+                return (null, string.Empty);
             }
 
             // Read before waiting: a large repository fills the pipe buffer, and a process
@@ -364,19 +383,18 @@ public sealed class GitFileLister : IFileLister
             // timeout on exactly the repositories this matters most for.
             var stdout = process.StandardOutput.ReadToEnd();
 
-            if (!process.WaitForExit(Timeout))
+            if (!process.WaitForExit(timeout ?? Timeout))
             {
                 process.Kill(entireProcessTree: true);
-                return null;
+                return (null, string.Empty);
             }
 
-            // Not a checkout, or git is unhappy. Either way the caller walks the directory.
-            return process.ExitCode == 0 ? stdout : null;
+            return (process.ExitCode, stdout);
         }
         catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
         {
             // git is not installed. A perfectly ordinary machine state, not an error.
-            return null;
+            return (null, string.Empty);
         }
     }
 }

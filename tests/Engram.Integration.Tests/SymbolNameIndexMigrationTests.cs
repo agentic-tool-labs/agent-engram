@@ -25,7 +25,7 @@ public class SymbolNameIndexMigrationTests
         using var migrated = EngramDatabase.OpenInitialized(sandbox.Home);
         using var freshHome = new SandboxHome(initialize: false);
         using var fresh = EngramDatabase.OpenInitialized(freshHome.Home);
-        Assert.Equal(19, EngramDatabase.ReadSchemaVersion(migrated));
+        Assert.Equal(EngramDatabase.SchemaVersion, EngramDatabase.ReadSchemaVersion(migrated));
         foreach (var index in new[] { "ix_symbol_name", "ix_symbol_name_nocase" })
         {
             Assert.Equal(IndexShape(fresh, index), IndexShape(migrated, index));

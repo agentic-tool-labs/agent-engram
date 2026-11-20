@@ -27,9 +27,20 @@ public sealed record IndexingSettings(
     bool UseGit,
     IReadOnlyList<string> Problems,
     IReadOnlyList<string> Ignored,
-    bool AutoIndexInBackground)
+    bool AutoIndexInBackground,
+    bool AutoRemoveRetired = IndexingSettings.DefaultAutoRemoveRetired)
 {
     public const string Section = "indexing";
+
+    /// <summary>The one switch for automatic removal of retired registry paths (D97).</summary>
+    public const string AutoRemoveRetiredKey = "auto_remove_retired";
+
+    /// <summary>
+    /// Off, and nothing Engram ships or runs turns it on: <c>true</c> is a standing
+    /// <c>compact --retired --apply</c> the user typed (D97, D49). An unparseable value reads as
+    /// off and is reported through <see cref="Problems"/>.
+    /// </summary>
+    public const bool DefaultAutoRemoveRetired = false;
 
     public const bool DefaultAutoIndexOnSessionStart = true;
 
@@ -180,6 +191,12 @@ public sealed record IndexingSettings(
             }
         }
 
+        var autoRemove = config.Bool(Section, AutoRemoveRetiredKey);
+        if (autoRemove is null && config.Raw(Section, AutoRemoveRetiredKey) is not null)
+        {
+            problems.Add($"[{Section}] {AutoRemoveRetiredKey} must be true or false; automatic removal stays off.");
+        }
+
         return new IndexingSettings(
             config.Bool(Section, "auto_index_on_session_start") ?? DefaultAutoIndexOnSessionStart,
             ignore,
@@ -188,7 +205,8 @@ public sealed record IndexingSettings(
             config.Bool(Section, "use_git") ?? true,
             problems,
             ignored,
-            config.Bool(Section, "auto_index_in_background") ?? DefaultAutoIndexInBackground);
+            config.Bool(Section, "auto_index_in_background") ?? DefaultAutoIndexInBackground,
+            autoRemove ?? DefaultAutoRemoveRetired);
     }
 
     private static int Positive(ConfigFile config, string key, int fallback, List<string> problems)

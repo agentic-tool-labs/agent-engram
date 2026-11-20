@@ -138,6 +138,15 @@ public static class MaintenanceLauncher
             }
         }
 
+        // Last, after any freshen, so a scan that retires a row this session never races its
+        // removal. Unconditional: --auto makes the verb read [indexing] auto_remove_retired and
+        // exit 0 silently when it is off, so the key is read in one place (D97). Never on the
+        // enrollment list, which is commanded work and not ambient.
+        if (jobs == MaintenanceJobs.SessionStart)
+        {
+            command.Append(engram).Append(" compact --retired --apply --auto").Append(home).Append("; ");
+        }
+
         // `exec` before the group, not a redirection after it. Redirecting the group covers the
         // engram children and leaves /bin/sh itself holding whatever it inherited, so the pipe
         // stays open for as long as the slowest job runs — which is the whole of what this

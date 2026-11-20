@@ -50,7 +50,10 @@ index-vs-fact set difference compares `fact` against itself and calls any desync
 read the real index). And FTS5's own `'rebuild'` command re-reads the whole content
 table, closed beliefs included, while the index deliberately holds live facts only —
 rebuild through `EngramDatabase.RebuildFactFts`, which is the one implementation of what
-belongs in the index.
+belongs in the index. Both sides of the detector, "missing" and "extra", measure against only that, which is
+`EngramDatabase.LexicallyIndexed` — live code edges are excluded by design, and a detector
+counting them called **360,391** facts missing on a real store, so every `repair --apply`
+rebuilt the whole index and none converged.
 
 **`fact_token` is maintained from C# call sites, and `--tokens` reads the stamp only.** The overlap
 index cannot be trigger-maintained the way `fact_fts` is, because a trigger cannot call `Tokenizer`
@@ -115,7 +118,12 @@ descriptor leak first. What survives the correction: `PrimerSummary.Read` replac
 the same primer and spawns nothing — went **69.5 → 43.4 ms over floor at 50,097** and 7.8 → 3.7 at
 5,308, with the primers byte-identical on both binaries at both sizes. The ~40 ms that remains at
 50,097 is the topic histogram, which transfers one row per distinct subject but still scans every
-live fact; at the 5,000 this instance holds it is ~4 ms. Nothing here breaches
+live fact; at the 5,000 this instance holds it is ~4 ms. The real store then grew to **621,904
+live facts**, where the published binary, timed through a file (p50, N=30, ~10 ms floor
+included), took **516 ms for `subagent-start` and 715 ms for `session-start`**; counting the
+histogram per `subject_id` over the two live partial indexes, probing each scope for its first
+fact instead of grouping, and driving `CountDue` from `fact_review` brought them to **176 ms and
+208 ms**, primers byte-identical (a same-binary calibration pair read within 2.2 ms). Nothing here breaches
 `file-touched`'s 10 ms rule, which is about that hook alone. So the rule does not rest on the
 arithmetic — an opening `file-touched` would still fit at
 p50. It rests on the word *unconditionally*. Under an indexer-shaped writer committing
@@ -182,8 +190,20 @@ unparseable: bytes that could not be obtained are left alone, because deleting o
 `--if-large`, in the same fork as `backup take --if-due` — `MaintenanceLauncher` owns both, and a
 bound that depends on someone typing the command is not a bound (D41).
 
+**Moving a belief across scope is close-and-reassert, never an `UPDATE` of `scope`.** `FactStore.Refile`
+writes the same predicate, object, body and details at the new address through `Remember`, then closes the
+source onto it with a supersession row naming the move — so `fact_fts` and `fact_token` stay right by
+construction, and `scope` stays off the append-only exception list, where only `path` (D2) and
+`analyzer_tier` sit. It is idempotent: a closed source is skipped, an identical live target absorbs the
+source, and so does a *different* live target whose `valid_from` is at or after the source's, since that is
+the newer belief. An older different target leaves the source live. A target is never re-asserted over and
+never closed, because re-asserting an older belief over a newer one is the wrong direction.
+`FactStore.PlanRefile` is that decision, and the dry run counts with it. The cost is accepted and stated: one extra row per move, and
+`History` of the new fact shows one version — the trail is the evidence suffix and the supersession row
+(D87).
+
 **Anything destructive is dry-run first.** `repair`, `compact`, `forget`, `backup prune`,
-`backup restore`, `backup replay`, `queue compact`, and `uninstall.sh` print what they would do and
+`backup restore`, `backup replay`, `queue compact`, `reorganize`, and `uninstall.sh` print what they would do and
 require an explicit flag to act. `install.sh` is the deliberate exception and the boundary is the
 word *destructive*: every verb on that list removes or rewrites something already there, while the
 installer only adds, and running an installer is already the request to install. It acts by default
@@ -299,7 +319,15 @@ database copied with `cp` was measured here to yield not a stale file but an unu
 because a migration is the only thing Engram's own code does that rewrites structure rather than
 appending to it, and it runs unattended on open (D31). Session start spawns `backup take --if-due`
 detached, and the snapshot is skipped entirely unless the fingerprint of authored truth actually
-moved, so an idle day costs nothing.
+moved, so an idle day costs nothing. **What a snapshot holds is its caller's stated scope, never a
+default** (D93): `pre-vN` and `pre-restore` are full; `backup take`, `pre-compact`, `pre-repair` and
+`pre-reorganize` are *authored* — the copy, and only the copy, has `fact_vec` dropped and vacuumed
+away, and every live fact stays, code facts included, so a restore needs no re-index. Measured on
+the real store: 2,446,798,848 → 830,271,488 B. Slimming runs behind a guard that refuses
+`home.DatabasePath`, and a slimming failure **takes the copy again** rather than renaming what is
+there: `VectorIndex.Drop` commits before the stamp, so the copy on disk after a late failure is
+neither full nor marked. A restored store is told it is no longer a snapshot — restore deletes
+`backup_scope`/`backup_omitted` — or the next full snapshot of it would list as slim.
 
 **A detached child must not inherit the hook's stdout, and the redirection has to be on the shell
 rather than on the group.** `MaintenanceLauncher` runs several jobs, so it cannot `exec` them the
@@ -331,8 +359,13 @@ small — but it is no longer justified by a number, and the telemetry-collision
 forced (zero lost, zero torn across 160 session starts, because every caller but `file-touched`
 passes a 500 ms retry budget) stands on its own and still applies.
 
-**A snapshot restores; the journal survives.** `backups/facts.jsonl` is every fact in plain text,
-rewritten whole and atomically alongside each snapshot. A `.db` snapshot only restores into the
+**A snapshot restores; the journal survives.** `backups/facts.jsonl` is authored truth in plain
+text — every `regenerable = 0` fact plus any regenerable one authored truth depends on, by
+`StoreCompactor.AuthoredDependencySql`, the predicate compact protects with, so it is never written
+twice and every relation, review and sync line beside it resolves (D93). It is rewritten whole and
+atomically alongside each snapshot, **from that snapshot file, not the live store**, so the pair
+cannot disagree. Code facts are not in it — they are in every snapshot and an index run regenerates
+them — and that took it from ~531 MB to 39,944,804 B on the real store. `export` keeps all facts. A `.db` snapshot only restores into the
 schema version that wrote it — the journal is addressed by path and predicate, so it replays into
 any later one (D32). `backup replay` is additive and idempotent, matching on subject, predicate,
 body and `valid_from`: it never rewrites or closes a fact the target store already had, because a
@@ -538,6 +571,11 @@ stopped at its ceiling in two seconds and classification then spent six more rea
 than in a separate pre-check, because two checks against one clock cannot be told apart by a test —
 whichever fires first answers for both, and the other can be deleted with the suite still green.
 2.0 s and 258 MB after, unchanged at 0.00 s inside a checkout where git answers (D53).
+A full index then paid per file for its reconcile read: `LiveCodeFacts.UnderFilePredicate` matched
+"path then `#`" with `substr`, which no index answers, so every file scanned all 624,635 live facts
+and `index --full --apply` of wrangl took **545 s, against 8.9 s** once the predicate became a byte
+range over `ix_fact_path` — identical summary, identical store. That range is exact only under BINARY
+comparison, so a `COLLATE` on `fact.path` breaks it silently (D95).
 
 **`embed --status` takes its counts from the store and everything else from the note.** The database
 is the authority on how many facts are embedded and how many wait, and it is right whether or not a
@@ -698,6 +736,14 @@ before deciding it can wait. And a migration whose DDL is conditional needs a fi
 missing it: `WriteVersion1Store` rolls a *current*-schema store back, so `CREATE INDEX IF NOT
 EXISTS` no-opped and a deliberately wrong migration left 18 of 18 green until the test dropped the
 index first (D60).
+
+**`ix_fact_superseded_by` and `ix_fact_object_ref` serve no query, and dropping either one returns
+compact to hours.** They exist for the foreign-key checks SQLite runs when a fact or an entity is
+deleted. Without them each deleted row scans fact: 73 ms per fact and 133 ms per entity on an
+890,829-fact store, so the shipped `compact --apply` finished 0 of 46 calls, and the first one ran for
+30 minutes. With them all 46 finish in 537 s of wall time, nearly all of it snapshots and VACUUM.
+`ix_fact_object_ref` looks like a duplicate of `ix_fact_object` and is not one: that index is live-only,
+so it cannot answer the check for a closed row, and it stays unwidened because recall plans against it (D92).
 
 **Recall says when a lane did not run, and that note is keyed to lane state, never to hit count.**
 With one lane the corroboration term degenerates to `(rank IS NOT NULL) > 1` — false for every row —

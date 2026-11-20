@@ -77,9 +77,62 @@ public readonly record struct BackupFingerprint(
 }
 
 /// <summary>One snapshot on disk.</summary>
-public sealed record BackupSnapshot(string Path, DateTimeOffset TakenAt, int SchemaVersion, long Bytes)
+/// <param name="Warning">Set by a take that wrote the snapshot but could not slim it as asked.</param>
+public sealed record BackupSnapshot(string Path, DateTimeOffset TakenAt, int SchemaVersion, long Bytes, string? Warning = null)
 {
     public string Name => System.IO.Path.GetFileName(Path);
+}
+
+/// <summary>What a snapshot holds: everything, or authored truth with regenerable state left out.</summary>
+public enum BackupScope
+{
+    /// <summary>A plain <c>VACUUM INTO</c> copy. Migration and pre-restore snapshots.</summary>
+    Full,
+
+    /// <summary>The copy, with what Engram rebuilds dropped from it. Scheduled and pre-rewrite snapshots.</summary>
+    Authored,
+}
+
+/// <summary>
+/// The markers a slimmed snapshot carries in <c>schema_meta</c>. A snapshot with none reads as
+/// <c>full</c>, which is what every snapshot written before slimming existed is.
+/// </summary>
+/// <param name="VectorsOmitted">Every <c>fact_vec</c> row the snapshot omits: the drop runs before compact, so none goes uncounted.</param>
+/// <param name="FactsClosed">Closed regenerable facts compact pruned from the copy (Phase 2b); zero when it did not run.</param>
+public sealed record BackupMarkers(string Scope, long VectorsOmitted, long FactsClosed = 0)
+{
+    public const string ScopeKey = "backup_scope";
+    public const string OmittedKey = "backup_omitted";
+
+    public const string FullScope = "full";
+    public const string AuthoredScope = "authored";
+    public const string AuthoredWithVectorsScope = "authored+vectors";
+
+    public bool IsMarked => Scope != FullScope;
+
+    public static string NameOf(BackupScope scope) => scope == BackupScope.Authored ? AuthoredScope : FullScope;
+
+    public static BackupMarkers Read(SqliteConnection connection)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var scope = EngramDatabase.ReadMeta(connection, ScopeKey);
+        if (scope is null)
+        {
+            return new BackupMarkers(FullScope, 0);
+        }
+
+        long vectors = 0;
+        long factsClosed = 0;
+        if (EngramDatabase.ReadMeta(connection, OmittedKey) is { } omitted
+            && System.Text.Json.Nodes.JsonNode.Parse(omitted) is System.Text.Json.Nodes.JsonObject counts)
+        {
+            vectors = counts["vectors"]?.GetValue<long>() ?? 0;
+            factsClosed = counts["facts_closed"]?.GetValue<long>() ?? 0;
+        }
+
+        return new BackupMarkers(scope, vectors, factsClosed);
+    }
 }
 
 /// <summary>Why a snapshot is or is not due, in words a person can act on.</summary>
@@ -328,12 +381,20 @@ public static class BackupStore
     /// cleanly and is missing recent facts. <c>VACUUM INTO</c> reads through one transaction and
     /// writes a single consistent, compacted database — and takes no write lock, so a snapshot
     /// never blocks a hook trying to record a fact.
+    /// <para><paramref name="scope"/> has no default on purpose: a caller that does not say which
+    /// it wants is a migration snapshot quietly written slim, or a scheduled one quietly written
+    /// full. <see cref="BackupScope.Authored"/> slims the copy only — never the live store — and a
+    /// slimming failure keeps the full copy rather than losing the snapshot.</para>
     /// </remarks>
+    /// <param name="keepClosedHistory">Authored scope only: keep closed code history (skip phase
+    /// 2b). For <c>pre-compact</c>, whose snapshot must hold what the compact after it deletes (D96).</param>
     public static BackupSnapshot Take(
         SqliteConnection connection,
         EngramHome home,
         DateTimeOffset now,
-        string? label = null)
+        BackupScope scope,
+        string? label = null,
+        bool keepClosedHistory = false)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(home);
@@ -344,17 +405,41 @@ public static class BackupStore
         var final = Path.Combine(home.BackupDir, Unique(home.BackupDir, now, version, label));
         var partial = final + PartialSuffix;
 
-        // VACUUM INTO refuses to overwrite, so a partial left by a killed process would block
-        // every future snapshot. Clearing it is safe precisely because the name says it was never
-        // finished.
-        File.Delete(partial);
+        if (scope == BackupScope.Authored)
+        {
+            // Checked before the try as well as inside Slim, so that a refusal fails the take instead
+            // of being caught below and turned into a full snapshot. Take always passes a fresh name
+            // under backups/, so this cannot fire today; it covers a future caller with a bad path.
+            RefuseLiveStore(partial, home);
+        }
 
+        string? warning = null;
         try
         {
-            using var command = connection.CreateCommand();
-            command.CommandText = "VACUUM INTO $target;";
-            command.Parameters.AddWithValue("$target", partial);
-            command.ExecuteNonQuery();
+            Copy(connection, partial);
+
+            if (scope == BackupScope.Full)
+            {
+                // A full snapshot's label must say full. Markers can reach the live store (an older
+                // binary's restore, or a clear that failed) and VACUUM INTO would copy them across.
+                warning = StripMarkersIfPresent(connection, partial);
+            }
+            else
+            {
+                try
+                {
+                    warning = Slim(partial, home, now, keepClosedHistory);
+                }
+                catch (Exception exception)
+                {
+                    // Slimming may have committed part of its work before failing, so the copy on
+                    // disk is no longer known to be the full one. Taking it again is what makes
+                    // "a backup is never lost to slimming" true rather than probable.
+                    EngramDatabase.ReleasePooledConnections(partial);
+                    Copy(connection, partial);
+                    warning = "the snapshot was kept full because slimming it failed — " + exception.Message;
+                }
+            }
 
             File.Move(partial, final);
         }
@@ -364,7 +449,223 @@ public static class BackupStore
             throw;
         }
 
-        return new BackupSnapshot(final, now.ToUniversalTime(), version, new FileInfo(final).Length);
+        return new BackupSnapshot(final, now.ToUniversalTime(), version, new FileInfo(final).Length, warning);
+    }
+
+    private static void Copy(SqliteConnection connection, string partial)
+    {
+        // VACUUM INTO refuses to overwrite, so a partial left by a killed process would block
+        // every future snapshot. Clearing it is safe precisely because the name says it was never
+        // finished.
+        File.Delete(partial);
+
+        using var command = connection.CreateCommand();
+        command.CommandText = "VACUUM INTO $target;";
+        command.Parameters.AddWithValue("$target", partial);
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// A test-only fault injected after the copy is opened, standing in for whatever a slimming step
+    /// might throw. Async-local, so a test sets it for its own flow and no other test's take sees it.
+    /// </summary>
+    internal static readonly AsyncLocal<Action?> SlimFault = new();
+
+    internal static void RefuseLiveStore(string path, EngramHome home)
+    {
+        if (string.Equals(Path.GetFullPath(path), Path.GetFullPath(home.DatabasePath), StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Refusing to slim " + path + ": it is the live store, and slimming only ever runs on a snapshot copy.");
+        }
+    }
+
+    /// <summary>
+    /// Deletes both markers from a full copy, when the store it was copied from carried any. Checked
+    /// on the live connection first, so the ordinary full take opens nothing extra. Returns a
+    /// warning when the delete fails.
+    /// </summary>
+    /// <remarks>
+    /// A failure keeps the copy. It is still a full snapshot, only its label is stale, and failing
+    /// the take would leave nothing — before a migration, that blocks the migration. No labelling
+    /// step may cost the snapshot (the same rule as a slimming failure).
+    /// </remarks>
+    private static string? StripMarkersIfPresent(SqliteConnection live, string partial)
+    {
+        if (EngramDatabase.ReadMeta(live, BackupMarkers.ScopeKey) is null
+            && EngramDatabase.ReadMeta(live, BackupMarkers.OmittedKey) is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var copy = EngramDatabase.Open(partial);
+            StripFault.Value?.Invoke();
+            DeleteMarkers(copy);
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return "the snapshot is full but may list as authored, because clearing the scope markers its "
+                + "store carried failed — " + exception.Message;
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(partial);
+        }
+    }
+
+    /// <summary>The test-only counterpart of <see cref="SlimFault"/>, for the marker strip on a full take.</summary>
+    internal static readonly AsyncLocal<Action?> StripFault = new();
+
+    private static void DeleteMarkers(SqliteConnection connection)
+    {
+        using var transaction = EngramDatabase.BeginWrite(connection);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "DELETE FROM schema_meta WHERE key IN ($scope, $omitted);";
+        command.Parameters.AddWithValue("$scope", BackupMarkers.ScopeKey);
+        command.Parameters.AddWithValue("$omitted", BackupMarkers.OmittedKey);
+        command.ExecuteNonQuery();
+        transaction.Commit();
+    }
+
+    /// <summary>
+    /// Drops what Engram rebuilds from a snapshot copy and stamps what was left out. Returns a
+    /// warning when something could not be dropped.
+    /// </summary>
+    /// <remarks>
+    /// The guard runs before anything is opened and is the one line that keeps this from being a
+    /// way to delete the live vector index. It compares full paths only: a symlinked home reached
+    /// by two spellings is not caught, and no caller passes anything but a fresh name under
+    /// <c>backups/</c>.
+    /// </remarks>
+    internal static string? Slim(string path, EngramHome home, DateTimeOffset now, bool keepClosedHistory = false)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(home);
+
+        RefuseLiveStore(path, home);
+
+        string? warning = null;
+        try
+        {
+            using var copy = EngramDatabase.Open(path, home.LibDir);
+            SlimFault.Value?.Invoke();
+
+            // Vectors go first, so the compact below has no vector rows to sweep: compacting first
+            // spent 6.0 s on the real store deleting rows this drop removes anyway (D96).
+            var scope = BackupMarkers.AuthoredScope;
+            long vectors = 0;
+            if (VectorIndex.Exists(copy))
+            {
+                // Open loads sqlite-vec and discards the result; whether it loaded is the question
+                // here, because dropping a vec0 table without its module is an error.
+                if (VectorExtension.Load(copy, home.LibDir) == VectorExtensionState.Loaded)
+                {
+                    vectors = VectorIndex.Count(copy);
+                    VectorIndex.Drop(copy);
+                }
+                else
+                {
+                    scope = BackupMarkers.AuthoredWithVectorsScope;
+                    warning = "sqlite-vec could not be loaded, so this snapshot keeps its vector index";
+                }
+            }
+
+            // Phase 2b: closed code history, through the one definition of disposable (D8, D96).
+            // Before v20 the compactor's foreign-key deletes are unindexed — about 73 ms a row on a
+            // large store — so an older copy keeps its history rather than stalling the take. A
+            // pre-compact snapshot keeps it too: it is what undoes the compact about to run.
+            long? factsClosed = null;
+            if (keepClosedHistory)
+            {
+                // Nothing pruned and nothing to warn about; facts_closed stays absent.
+            }
+            else if (EngramDatabase.ReadSchemaVersion(copy) >= StoreCompactor.IndexedDeletesSchemaVersion)
+            {
+                factsClosed = StoreCompactor.Compact(copy, home, path: null, apply: true, now, onSnapshotCopy: true).ClosedPruned;
+            }
+            else
+            {
+                var kept = "closed code history was kept, because this store predates schema version "
+                    + StoreCompactor.IndexedDeletesSchemaVersion + " and pruning it there is unindexed";
+                warning = warning is null ? kept : warning + "; " + kept;
+            }
+
+            var omitted = new System.Text.Json.Nodes.JsonObject { ["vectors"] = vectors };
+            if (factsClosed is { } closed)
+            {
+                omitted["facts_closed"] = closed;
+            }
+
+            using (var transaction = EngramDatabase.BeginWrite(copy))
+            {
+                EngramDatabase.WriteMeta(copy, transaction, BackupMarkers.ScopeKey, scope);
+                EngramDatabase.WriteMeta(copy, transaction, BackupMarkers.OmittedKey, omitted.ToJsonString());
+                transaction.Commit();
+            }
+
+            using var vacuum = copy.CreateCommand();
+            vacuum.CommandText = "VACUUM;";
+            vacuum.ExecuteNonQuery();
+        }
+        finally
+        {
+            // The copy is about to be renamed; a pooled handle would keep it open under its old name.
+            EngramDatabase.ReleasePooledConnections(path);
+        }
+
+        return warning;
+    }
+
+    /// <summary>Reads a snapshot's markers without migrating it. Unreadable reads as null.</summary>
+    public static BackupMarkers? ReadMarkers(BackupSnapshot snapshot, EngramHome home)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(home);
+
+        try
+        {
+            using var connection = EngramDatabase.Open(snapshot.Path, home.LibDir);
+            return BackupMarkers.Read(connection);
+        }
+        catch (Exception exception) when (exception is SqliteException or System.Text.Json.JsonException or InvalidOperationException)
+        {
+            return null;
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(snapshot.Path);
+        }
+    }
+
+    /// <summary>
+    /// How many live facts the vector lane wants and the snapshot has no vector for — what the
+    /// server will embed after a restore. Null when it cannot be counted.
+    /// </summary>
+    public static int? CountUnembedded(BackupSnapshot snapshot, EngramHome home)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(home);
+
+        try
+        {
+            using var connection = EngramDatabase.Open(snapshot.Path, home.LibDir);
+            return VectorIndex.Exists(connection)
+                ? VectorIndex.CountPending(connection)
+                : VectorIndex.CountEmbeddable(connection);
+        }
+        catch (SqliteException)
+        {
+            // A vector table whose module cannot load here. Saying nothing beats a wrong count.
+            return null;
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(snapshot.Path);
+        }
     }
 
     /// <summary>
@@ -494,10 +795,34 @@ public static class BackupStore
         File.Delete(home.DatabasePath + "-wal");
         File.Delete(home.DatabasePath + "-shm");
 
+        ClearMarkers(home);
+
         // Only now, and with the chosen snapshot pinned: pruning right after the preserving snapshot could delete the very one being restored from.
         if (preserved is not null)
         {
             PruneAfterWrite(home, preserved, snapshot);
+        }
+    }
+
+    /// <summary>
+    /// A restored store is a live store, not a snapshot, so it must not go on describing itself as
+    /// one: the next full snapshot of it would read back as slim.
+    /// </summary>
+    private static void ClearMarkers(EngramHome home)
+    {
+        try
+        {
+            using var connection = EngramDatabase.Open(home);
+            DeleteMarkers(connection);
+        }
+        catch (SqliteException)
+        {
+            // The store is already in place, and reporting the restore as failed would be a lie
+            // about it. A marker left behind is harmless: a full take strips it from its copy.
+        }
+        finally
+        {
+            EngramDatabase.ReleasePooledConnections(home.DatabasePath);
         }
     }
 
@@ -519,7 +844,7 @@ public static class BackupStore
         try
         {
             using var connection = EngramDatabase.Open(home);
-            return Take(connection, home, now, "pre-restore");
+            return Take(connection, home, now, BackupScope.Full, "pre-restore");
         }
         catch (Exception exception) when (exception is SqliteException or InvalidOperationException)
         {

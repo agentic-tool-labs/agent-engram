@@ -154,18 +154,49 @@ public sealed record PrimerSummary(
         command.Parameters.AddWithValue("$dprefix", directivePrefix);
         command.Parameters.AddWithValue("$aplen", RoleNotes.Root.Length + 1);
         command.Parameters.AddWithValue("$aprefix", RoleNotes.Root + "/");
+        command.Parameters.AddWithValue("$tool", FactStore.ToolScope);
     }
 
+    // Counts per subject_id over the two live partial indexes first, then joins entity once per
+    // subject rather than once per live fact. ux_fact_live and ux_fact_edge_live partition the
+    // live facts exactly (object_id IS NULL / IS NOT NULL), so the two arms together count every
+    // live fact once; a subject holding both kinds appears in both arms, which is what the outer
+    // SUM merges. entity.path is UNIQUE, so grouping by subject_id and by e.path give identical
+    // groups — the same argument ExampleCandidatesSql makes for its version count. Measured on a
+    // 621,904-live-fact snapshot: 305 ms for the per-fact join grouped on path, 85 ms for this,
+    // identical 184,659 rows by EXCEPT both ways.
+    //
+    // Tool-scope facts (D87) are taken out by a third, negative arm rather than a scope filter on
+    // the first two: those arms are answered from the partial indexes alone, and a `scope` test
+    // there would read the table once per live fact. The negative arm reads only the tool rows,
+    // through ix_fact_scope, and HAVING drops a subject whose every live fact was a tool record —
+    // with no tool rows it yields nothing, so the result is unchanged.
     private const string TopicHistogramSql =
         """
-        SELECT e.path, COUNT(*)
-          FROM fact f
-          JOIN entity e ON e.id = f.subject_id
-         WHERE f.valid_to IS NULL
-           AND substr(e.path, 1, $plen) <> $prefix
+        WITH c(sid, n) AS (
+          SELECT subject_id, SUM(n)
+            FROM (SELECT subject_id, COUNT(*) AS n
+                    FROM fact INDEXED BY ux_fact_live
+                   WHERE valid_to IS NULL AND object_id IS NULL
+                   GROUP BY subject_id
+                  UNION ALL
+                  SELECT subject_id, COUNT(*) AS n
+                    FROM fact INDEXED BY ux_fact_edge_live
+                   WHERE valid_to IS NULL AND object_id IS NOT NULL
+                   GROUP BY subject_id
+                  UNION ALL
+                  SELECT subject_id, -COUNT(*) AS n
+                    FROM fact INDEXED BY ix_fact_scope
+                   WHERE valid_to IS NULL AND scope = $tool
+                   GROUP BY subject_id)
+           GROUP BY subject_id
+          HAVING SUM(n) > 0)
+        SELECT e.path, c.n
+          FROM c
+          JOIN entity e ON e.id = c.sid
+         WHERE substr(e.path, 1, $plen) <> $prefix
            AND substr(e.path, 1, $dplen) <> $dprefix
-           AND substr(e.path, 1, $aplen) <> $aprefix
-         GROUP BY e.path;
+           AND substr(e.path, 1, $aplen) <> $aprefix;
         """;
 
     // The lowest-id live non-session fact per scope, unioned with the first $limit live
@@ -184,29 +215,51 @@ public sealed record PrimerSummary(
     // two groupings return identical numbers; here the row already carries both, and subject_id
     // is what ix_fact_thread indexes. Do not "fix" this back to a path join.
     //
+    // The first arm finds each scope-first without grouping every live fact. `scopes` walks the
+    // distinct live scopes as a skip over ix_fact_scope — one seek per scope, and live scopes are
+    // few — and for each one the probe walks that scope's live facts in id order (ix_fact_scope
+    // entries are ordered by rowid within a scope) and stops at the first that passes the
+    // exclusions: exactly MIN(id) over that scope's qualifying facts, so the proof above is
+    // unchanged. A scope with no qualifying fact yields NULL, which IN never matches, where the
+    // grouped form produced no row; the selected set is the same. Measured on a 621,904-live-fact
+    // snapshot: 141 ms grouped, 10 ms probed — nearly all of it the 'session' scope, whose live
+    // facts all sit under the session prefix, so its probe walks them all and finds none. The
+    // second arm is unchanged: it already stops after $limit qualifying rows (0.07 ms there).
+    //
     // SQLite rejects ORDER BY ... LIMIT directly inside a compound-SELECT operand, which is why
     // the second arm is wrapped in a subquery.
     private const string ExampleCandidatesSql =
         $"""
+        WITH RECURSIVE scopes(s) AS (
+          SELECT (SELECT MIN(scope) FROM fact INDEXED BY ix_fact_scope WHERE valid_to IS NULL)
+          UNION ALL
+          SELECT (SELECT MIN(scope) FROM fact INDEXED BY ix_fact_scope
+                   WHERE valid_to IS NULL AND scope > s)
+            FROM scopes
+           WHERE s IS NOT NULL)
         SELECT {FactStore.FactColumns},
                (SELECT COUNT(*) FROM fact fv
                  WHERE fv.subject_id = f.subject_id AND fv.predicate = f.predicate)
           FROM fact f
           JOIN entity e ON e.id = f.subject_id
-         WHERE f.id IN (SELECT MIN(sf.id)
-                          FROM fact sf
-                          JOIN entity se ON se.id = sf.subject_id
-                         WHERE sf.valid_to IS NULL
-                           AND substr(se.path, 1, $plen) <> $prefix
-                           AND substr(se.path, 1, $dplen) <> $dprefix
-                           AND substr(se.path, 1, $aplen) <> $aprefix
-                         GROUP BY sf.scope
+         WHERE f.id IN (SELECT (SELECT sf.id
+                                  FROM fact sf INDEXED BY ix_fact_scope
+                                  JOIN entity se ON se.id = sf.subject_id
+                                 WHERE sf.scope = s AND sf.valid_to IS NULL
+                                   AND substr(se.path, 1, $plen) <> $prefix
+                                   AND substr(se.path, 1, $dplen) <> $dprefix
+                                   AND substr(se.path, 1, $aplen) <> $aprefix
+                                 ORDER BY sf.id
+                                 LIMIT 1)
+                          FROM scopes
+                         WHERE s IS NOT NULL AND s <> $tool
                         UNION
                         SELECT id
                           FROM (SELECT nf.id
                                   FROM fact nf
                                   JOIN entity ne ON ne.id = nf.subject_id
                                  WHERE nf.valid_to IS NULL
+                                   AND nf.scope <> $tool
                                    AND substr(ne.path, 1, $plen) <> $prefix
                                    AND substr(ne.path, 1, $dplen) <> $dprefix
                                    AND substr(ne.path, 1, $aplen) <> $aprefix
