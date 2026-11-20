@@ -6738,7 +6738,7 @@ have been the one a remember looks up, so every project write would have degrade
 and "not yet bound" cases would have been indistinguishable. So the project comes from the call's
 own `project_dir`:
 1. `RepoEnrollment.FindCheckoutRoot`: is there a `.git` above it at all? This is filesystem only.
-2. `CodeIndexer.ResolveRoot`, then `ResolveIdentity`.
+2. `CodeIndexer.ResolveRoot`, then `TryResolveIdentity`.
 3. `CodeIndexer.LiveRepoPath`: the `repo_registry` row for that identity with `detached_at IS NULL`.
 4. The project is the second segment of that row's `repo_path`.
 
@@ -6755,9 +6755,8 @@ capture). The response gains one line naming why. The `remember` record's `proje
 carries the same reason as a closed code (`no-dir`, `bad-dir`, `not-checkout`, `git-unknown`,
 `not-indexed`), so the adoption question can be split from the resolution one. `scope` is recorded
 only when a project note was actually written. `git-unknown` is reserved and not yet produced:
-before eng-34, `ResolveIdentity` falls back to the root path when git cannot answer, which then
-finds no row and reads as `not-indexed`. That outcome row is enabled and tested in a follow-up after
-eng-34 (PR #16) merges. Until then, the `not-indexed` notice names `project_dir` as the call gave
+when git cannot answer, `TryResolveIdentity` fails and the call reads as `not-indexed`. Producing
+it is a separate item. Until then, the `not-indexed` notice names `project_dir` as the call gave
 it, not a root git may have failed to find, so a subdirectory is never reported as unindexed on the
 strength of a failed lookup.
 
