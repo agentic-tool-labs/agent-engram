@@ -6368,7 +6368,9 @@ invariant is amended:
   at all.
 - `agent`'s description now asks for that key, never an instance name. A write under an
   instance-style key still lands; it is not refused, it is just no longer invited.
-- The ceiling moved from 6,963 to 7,012.
+- The description reads "if the primer gave you a role memory key", not "if you are a subagent",
+  because a main `--agent` session gets the key line too.
+- The ceiling moved from 6,963 to 7,012, then to 7,031 for that wording.
 
 The cost of the line is `TokenEstimator`'s `ceil(chars / 3.6)` over 23 characters plus the key.
 That comes to 11 tokens for `wrangl:architect` and 9 for `explorer`, about 8–12 for ordinary keys,
