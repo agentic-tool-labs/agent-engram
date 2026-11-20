@@ -162,6 +162,17 @@ public sealed class ProjectNotesTests : IDisposable
 
         var response = Remember(sandbox, "s1", "Something durable.", "project", repo);
 
+        AssertDegraded(sandbox, response, "git-unknown", $"could not ask git about {repo} — kept as a session note");
+    }
+
+    [Fact]
+    public void ScopeProject_InACheckoutWithNoOriginNeverIndexed_IsNotIndexedRatherThanGitUnknown()
+    {
+        using var sandbox = new SandboxHome();
+        var repo = Checkout(origin: false);
+
+        var response = Remember(sandbox, "s1", "Something durable.", "project", repo);
+
         AssertDegraded(sandbox, response, "not-indexed", $"{repo} is not indexed by Engram — kept as a session note");
     }
 
@@ -401,11 +412,15 @@ public sealed class ProjectNotesTests : IDisposable
         return repo;
     }
 
-    private string Checkout(bool commit = false)
+    private string Checkout(bool commit = false, bool origin = true)
     {
         var repo = NewDirectory();
         Assert.True(Git(repo, "init", "-q"), "git init failed");
-        Assert.True(Git(repo, "remote", "add", "origin", "https://example.invalid/acme/widget-" + Path.GetFileName(repo) + ".git"));
+        if (origin)
+        {
+            Assert.True(Git(repo, "remote", "add", "origin", "https://example.invalid/acme/widget-" + Path.GetFileName(repo) + ".git"));
+        }
+
         Directory.CreateDirectory(Path.Combine(repo, "src"));
         File.WriteAllText(Path.Combine(repo, "src", "Widget.cs"), "namespace Acme; public class Widget { }\n");
         if (commit)

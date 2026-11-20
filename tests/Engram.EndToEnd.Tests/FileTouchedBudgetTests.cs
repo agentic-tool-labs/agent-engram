@@ -10,6 +10,7 @@ public class FileTouchedBudgetTests
 {
     private const int Warmup = 20;
     private const int Samples = 100;
+    private const int Attempts = 3;
 
     /// <summary>
     /// Measured on this machine: a database open costs 2.1–2.4 ms (session-start +2.38,
@@ -19,6 +20,9 @@ public class FileTouchedBudgetTests
     /// merely busy.
     /// </summary>
     private const double MaxMarginalCostMs = 1.0;
+
+    /// <summary>The ceiling on the floor-scaled allowance (D101); see where it is applied.</summary>
+    private const double MaxScaledAllowanceMs = 1.25;
 
     /// <summary>
     /// The difference of minimums, not of medians. Process-start noise is one-sided — a
@@ -53,34 +57,59 @@ public class FileTouchedBudgetTests
             TimeFileTouched(home.Root);
         }
 
-        var floor = new List<double>(Samples);
-        var hook = new List<double>(Samples);
-
-        // Interleaved rather than one batch after the other: a machine that gets busier
-        // partway through then slows both arms equally instead of moving the difference this
-        // asserts on.
-        for (var i = 0; i < Samples; i++)
+        // Best of up to three independent measurements (D101). Under load the hook's real cost
+        // grows faster than the floor, so the fastest-of-100 stops converging: idle the marginal
+        // is 8% of the floor against a 10% allowance, and the five failures seen under load ran
+        // 10.7–18.6%. A violation is deterministic — an opened database shifts every sample of
+        // every attempt — so it fails all three, while noise has to win three times running.
+        // Raising the ratio was rejected instead: the planted open is 22% of the idle floor, so a
+        // 20% allowance would leave it two points to fail by.
+        var attempts = new List<string>(Attempts);
+        for (var attempt = 0; attempt < Attempts; attempt++)
         {
-            floor.Add(TimeNoOp(home.Root));
-            hook.Add(TimeFileTouched(home.Root));
+            var floor = new List<double>(Samples);
+            var hook = new List<double>(Samples);
+
+            // Interleaved rather than one batch after the other: a machine that gets busier
+            // partway through then slows both arms equally instead of moving the difference this
+            // asserts on.
+            for (var i = 0; i < Samples; i++)
+            {
+                floor.Add(TimeNoOp(home.Root));
+                hook.Add(TimeFileTouched(home.Root));
+            }
+
+            var floorCost = Cost(floor);
+            var hookCost = Cost(hook);
+            var marginal = hookCost - floorCost;
+
+            // The allowance scales with the floor: a macOS runner with a 32.49 ms floor (4×
+            // this machine) kept 2.68 ms of noise in the fastest-of-100 difference, so a flat
+            // threshold measures the runner, not the hook. Ten percent of the floor only
+            // rises above the local 1.0 ms when the floor itself says the machine is slow —
+            // locally the max() keeps the threshold the planted open (1.19 ms) failed.
+            //
+            // Capped at 1.25 ms (D101), because the scaling admitted the violation it exists to
+            // catch: through this test host the floor runs 13.3–24.1 ms, not the 8.6 ms the ten
+            // percent was calibrated on, so the uncapped allowance (1.33–2.41 ms) let a planted
+            // open (1.53–2.83 ms) pass. Clean costs 0.45–1.45 ms, and best-of-three takes the
+            // lowest attempt. The price is the slow-runner headroom above: a runner whose
+            // fastest-of-100 noise stays over 1.25 ms in all three attempts fails this.
+            var allowance = Math.Max(MaxMarginalCostMs, Math.Min(floorCost * 0.1, MaxScaledAllowanceMs));
+
+            if (marginal < allowance)
+            {
+                return;
+            }
+
+            attempts.Add(
+                $"{marginal:0.00} ms (fastest of {Samples}: {hookCost:0.00} ms against a floor of "
+                    + $"{floorCost:0.00} ms, allowance {allowance:0.00} ms)");
         }
 
-        var floorCost = Cost(floor);
-        var hookCost = Cost(hook);
-        var marginal = hookCost - floorCost;
-
-        // The allowance scales with the floor: a macOS runner with a 32.49 ms floor (4×
-        // this machine) kept 2.68 ms of noise in the fastest-of-100 difference, so a flat
-        // threshold measures the runner, not the hook. Ten percent of the floor only
-        // rises above the local 1.0 ms when the floor itself says the machine is slow —
-        // locally the max() keeps the threshold the planted open (1.19 ms) failed.
-        var allowance = Math.Max(MaxMarginalCostMs, floorCost * 0.1);
-
-        Assert.True(
-            marginal < allowance,
-            $"file-touched cost {marginal:0.00} ms more than starting the binary to do nothing "
-                + $"(fastest of {Samples}: {hookCost:0.00} ms against a floor of {floorCost:0.00} ms, "
-                + $"allowance {allowance:0.00} ms). "
+        Assert.Fail(
+            $"file-touched cost more than starting the binary to do nothing in all {Attempts} attempts: "
+                + string.Join("; ", attempts) + ". "
                 + "D4 rule 4 gives it a 10 ms budget that is almost all process start, so anything "
                 + "measurable here — an opened database above all — is most of the headroom.");
     }

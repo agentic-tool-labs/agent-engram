@@ -83,10 +83,21 @@ internal static class EngramProcess
         // The process is gone; the readers may not be done — or may never finish, if
         // something it spawned inherited the pipe and outlived it. A bounded join is
         // what keeps one wedged invocation from hanging the whole suite.
-        if (!Task.WaitAll([stdoutTask, stderrTask], 5_000))
+        //
+        // 30 s, not 5 (D101). The one time this fired in QA, seven tests hit it in the same
+        // second, several of them for commands that spawn nothing, so no inherited pipe can
+        // explain it: the readers were not scheduled at all. Thread-pool starvation in this test
+        // host is the suspect and is not confirmed, which is why the message reports the pool
+        // instead of naming a cause. The bound was never what guarded the detach leak — that
+        // leaked chain lives 0.2 s, far inside either bound — so raising it hides nothing that
+        // the 5 s bound caught. A pipe held open forever still fails here.
+        var sinceExit = Stopwatch.StartNew();
+        if (!Task.WaitAll([stdoutTask, stderrTask], 30_000))
         {
             throw new TimeoutException(
-                "engram exited but its output pipes never closed — something it spawned still holds them.");
+                $"engram exited but its output pipes had not closed {sinceExit.Elapsed.TotalSeconds:0.0} s later "
+                    + $"(thread pool: {ThreadPool.ThreadCount} threads, {ThreadPool.PendingWorkItemCount} pending work items). "
+                    + "Either something still holds the write end, or the readers were never scheduled.");
         }
 
         return (process.ExitCode, stdoutTask.Result, stderrTask.Result);
