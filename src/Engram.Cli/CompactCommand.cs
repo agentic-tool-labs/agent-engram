@@ -249,6 +249,11 @@ internal static class CompactCommand
             return;
         }
 
+        if (report.Prefixes.Count > 0)
+        {
+            stdout.WriteLine("  snapshot: would be taken first");
+        }
+
         stdout.WriteLine();
         stdout.WriteLine(report.Prefixes.Count > 0
             ? "Dry run only — nothing was written. Re-run with --apply to remove these."

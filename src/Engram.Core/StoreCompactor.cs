@@ -274,9 +274,15 @@ public static class StoreCompactor
             if (!apply)
             {
                 var dry = Measure(connection, null, eligible.Select(e => (string?)e.RepoPath).ToList(), listAuthored: true);
+                var dryNotes = dry.Notes.ToList();
+                if (SyncScopeStopsResolving(connection, home, eligible.Select(e => e.RepoPath).ToHashSet(StringComparer.Ordinal)) is { } syncNote)
+                {
+                    dryNotes.Add(syncNote);
+                }
+
                 return new RetiredCompactReport(
                     Applied: false, auto, dry.PerPrefix, skipped, dry.Supersessions, dry.Vectors,
-                    SnapshotName: null, Vacuumed: false, dry.Notes);
+                    SnapshotName: null, Vacuumed: false, dryNotes);
             }
 
             if (eligible.Count == 0)
@@ -344,7 +350,7 @@ public static class StoreCompactor
                     }
                 }
 
-                overBudget = auto && timer.Elapsed > AutoOverBudget;
+                overBudget = auto && survivors.Count > 0 && timer.Elapsed > AutoOverBudget;
                 foreach (var survivor in survivors)
                 {
                     Note(home, "removed", trigger, survivor.RepoPath);
@@ -474,7 +480,36 @@ public static class StoreCompactor
             }
         }
 
-        return FindWinner(connection, transaction, candidate.Checkout, candidate.Resolved) is not null;
+        // The same winner test as before the lock, suppression included, so a truncated scan that
+        // lands in between keeps the row.
+        return FindWinner(connection, transaction, candidate.Checkout, candidate.Resolved) is { SuppressedReason: null };
+    }
+
+    /// <summary>
+    /// The configured <c>[sync]</c> <c>repo:</c> scope, when it resolves today and would resolve to
+    /// nothing once <paramref name="removed"/> are gone (spec §5). Uses the one resolver sync uses.
+    /// </summary>
+    internal static string? SyncScopeStopsResolving(SqliteConnection connection, EngramHome home, IReadOnlySet<string> removed)
+    {
+        if (removed.Count == 0)
+        {
+            return null;
+        }
+
+        var scope = SyncSettings.Read(ConfigFile.Load(home.ConfigPath)).Scope;
+        if (!SyncScope.TryParse(scope, out var kind, out var value, out _) || kind != SyncScopeKind.Repo)
+        {
+            return null;
+        }
+
+        var rows = Sync.ReadRepoRegistry(connection);
+        if (!SyncScope.ResolveRepo(rows, value!).Found
+            || SyncScope.ResolveRepo(rows.Where(r => !removed.Contains(r.RepoPath)).ToList(), value!).Found)
+        {
+            return null;
+        }
+
+        return $"[sync] scope '{scope}' would stop resolving: no enrolled repo would match '{value}', and sync export would stop";
     }
 
     private static void Note(EngramHome home, string phase, string trigger, string? repo, bool overBudget = false)

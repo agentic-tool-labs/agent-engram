@@ -1303,13 +1303,14 @@ public static class Diagnostics
             bool Large((long DetachedAt, long Files, string RepoPath) p) =>
                 StoreCompactor.EntitiesUnder(connection, p.RepoPath) > StoreCompactor.AutoRemoveCap;
 
-            var pastGrace = present.Where(p => p.DetachedAt <= at - grace).ToList();
-            var large = pastGrace.Where(Large).ToList();
+            // Over the cap is Warn whatever the grace: --auto will never take it, so an Ok
+            // "removed automatically after" would be false for the whole grace period.
+            var large = present.Where(Large).ToList();
             var tooLarge = large.Count;
-            var overdue = pastGrace.Count(p => !large.Contains(p) && p.DetachedAt <= at - grace - 86_400L);
+            bool Overdue((long DetachedAt, long Files, string RepoPath) p) => p.DetachedAt < at - grace - 86_400L;
+            var overdue = present.Count(p => !large.Contains(p) && Overdue(p));
             var pending = present
-                .Where(p => !large.Contains(p))
-                .Where(p => !(p.DetachedAt <= at - grace - 86_400L))
+                .Where(p => !large.Contains(p) && !Overdue(p))
                 .ToList();
 
             if (tooLarge > 0)

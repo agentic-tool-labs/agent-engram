@@ -400,7 +400,7 @@ public static class Sync
     }
 
     /// <summary>Every enrolled repo's <c>(repo_path, identity)</c> pair, for <see cref="SyncScope.ResolveRepo"/>.</summary>
-    private static IReadOnlyList<(string RepoPath, string Identity)> ReadRepoRegistry(SqliteConnection connection)
+    internal static IReadOnlyList<(string RepoPath, string Identity)> ReadRepoRegistry(SqliteConnection connection)
     {
         var rows = new List<(string RepoPath, string Identity)>();
 

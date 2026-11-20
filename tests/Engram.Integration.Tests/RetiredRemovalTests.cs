@@ -306,6 +306,55 @@ public class RetiredRemovalTests
         Assert.Equal(before, FactsUnder(sandbox, retired.RetiredPath));
     }
 
+    /// <summary>The in-lock half repeats the suppression test: a truncated scan after the check keeps the row.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Recheck_WinnerSuppressedBetweenTheCheckAndTheTransaction_DeletesNothing(bool auto)
+    {
+        using var sandbox = new SandboxHome();
+        var retired = Retire(sandbox, "late-truncate", daysAgo: 8);
+        var before = FactsUnder(sandbox, retired.RetiredPath);
+
+        var report = Run(
+            sandbox, apply: true, auto,
+            new StoreCompactor.RetiredHooks(AfterCheck: () =>
+                Exec(sandbox, $"UPDATE repo_registry SET last_scan_suppressed_reason = 'truncated' WHERE repo_path = '{retired.WinnerPath}';")));
+
+        Assert.Empty(report.Prefixes);
+        Assert.Contains(report.Skipped, s => s.Reason.Contains("since the check", StringComparison.Ordinal));
+        Assert.Equal(before, FactsUnder(sandbox, retired.RetiredPath));
+    }
+
+    // ---- [sync] repo scope (spec §5) ----------------------------------------------------------
+
+    /// <summary>
+    /// A scope naming the retired identity resolves today and would not afterwards; one naming
+    /// the winner, and a non-repo scope, keep resolving and get no note.
+    /// </summary>
+    [Theory]
+    [InlineData("retired", true)]
+    [InlineData("winner", false)]
+    [InlineData("all", false)]
+    public void DryRun_ListsASyncRepoScopeThatWouldStopResolving(string which, bool listed)
+    {
+        using var sandbox = new SandboxHome();
+        var retired = Retire(sandbox, "sync-scope", daysAgo: 8);
+        var scope = which switch
+        {
+            "retired" => "repo:" + retired.RetiredIdentity,
+            "winner" => "repo:git@example.com:acme/sync-scope-b",
+            _ => "all",
+        };
+        File.AppendAllText(sandbox.Home.ConfigPath, $"\n[sync]\nscope = \"{scope}\"\n");
+
+        var (exit, stdout, _) = Cli(sandbox, "--retired");
+
+        Assert.Equal(0, exit);
+        Assert.Equal(listed, stdout.Contains("would stop resolving", StringComparison.Ordinal));
+        Assert.Contains("snapshot: would be taken first", stdout, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Recheck_WinnerRetiredSince_Skips()
     {
@@ -649,8 +698,24 @@ public class RetiredRemovalTests
         Assert.Equal("engram compact --retired", row.Fix);
     }
 
+    /// <summary>Over the cap is Warn inside grace too: --auto will never take it.</summary>
+    [Fact]
+    public void Doctor_KeyOn_InsideGraceOverTheCap_WarnsTooLarge()
+    {
+        using var sandbox = new SandboxHome();
+        var retired = Retire(sandbox, "doc-large-early", daysAgo: 2);
+        Pad(sandbox, retired.RetiredPath, StoreCompactor.AutoRemoveCap + 1);
+
+        var row = Assert.Single(Doctor(sandbox, keyOn: true));
+
+        Assert.Equal(DiagnosisState.Warn, row.State);
+        Assert.Contains("too large to remove automatically", row.Detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>8 days is exactly one day past grace: "more than a day" is not yet met.</summary>
     [Theory]
     [InlineData(9, DiagnosisState.Warn)]
+    [InlineData(8, DiagnosisState.Ok)]
     [InlineData(7, DiagnosisState.Ok)]
     public void Doctor_KeyOn_OverdueByMoreThanADay_Warns_AndNotBefore(int daysAgo, DiagnosisState expected)
     {
