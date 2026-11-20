@@ -61,6 +61,8 @@ Check Engram's memory BEFORE reading files or exploring the repo. Searches Engra
   What you want to know, as a few keywords or a short question.
   param: budget_tokens
   Maximum tokens to spend on the response. Defaults to 500.
+  param: types
+  session,user,project,agent,code,tool; omit=all but tool
 
 tool: engram_remember
 Engram's durable memory, and where anything worth keeping goes even when another memory system is available. Call it when the user asks you to remember or save something, and whenever you learn something durable: a decision, a constraint, a partial result, a dead end already ruled out — state you would otherwise repeat in context and would lose to compaction. `engram_recall` ranks these above long-term memory for the rest of this session, and they stay recallable in later ones, so this is for anything still true next week rather than only the next ten minutes. Subagents pass their own name in `agent`. When restating something the user just said, pass the bracketed id of its automatic capture in `supersedes` so the rewrite replaces it rather than duplicating it. When candidates are enabled, also returns up to 3 similar live facts already stored, for a follow-up engram_judge call.

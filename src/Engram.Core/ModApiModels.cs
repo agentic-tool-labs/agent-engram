@@ -27,7 +27,8 @@ public sealed record ModRequest(
     [property: JsonPropertyName("event_epoch")] string? EventEpoch = null,
     [property: JsonPropertyName("event_after")] long? EventAfter = null,
     [property: JsonPropertyName("scope")] string? Scope = null,
-    [property: JsonPropertyName("limit")] int? Limit = null);
+    [property: JsonPropertyName("limit")] int? Limit = null,
+    [property: JsonPropertyName("types")] string[]? Types = null);
 
 public sealed record ModError(
     [property: JsonPropertyName("error")] string Error,
