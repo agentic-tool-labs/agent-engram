@@ -160,7 +160,38 @@ public class MaintenanceLauncherTests
         Assert.DoesNotContain("queue compact", script, StringComparison.Ordinal);
         Assert.DoesNotContain("repair", script, StringComparison.Ordinal);
         Assert.DoesNotContain("sync", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("compact --retired", script, StringComparison.Ordinal);
     }
+
+    private const string RetiredRemoval = " compact --retired --apply --auto --home ";
+
+    /// <summary>
+    /// D97: automatic removal rides the session-start chain, after the claim and after the
+    /// freshen job, so it runs under the maintenance lock and after any scan that could retire a
+    /// row this session. The launcher passes no setting: --auto makes the verb read the key.
+    /// </summary>
+    [Fact]
+    public void SessionStart_RemovesRetiredPathsLast_AfterFreshen_AndUnderTheClaim()
+    {
+        var script = MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, "/repo");
+
+        var removal = script.IndexOf(RetiredRemoval, StringComparison.Ordinal);
+        Assert.True(removal > 0, script);
+        Assert.True(removal > script.IndexOf(" index --freshen ", StringComparison.Ordinal), script);
+        Assert.True(removal > script.IndexOf(" maintenance claim ", StringComparison.Ordinal), script);
+        Assert.True(removal > script.IndexOf(MaintenanceLauncher.Redirect, StringComparison.Ordinal), script);
+    }
+
+    /// <summary>
+    /// The job is on the session-start list itself, not on the index jobs: with no root to index
+    /// there is no freshen, and removal still runs.
+    /// </summary>
+    [Fact]
+    public void SessionStart_WithNoIndexRoot_StillRemovesRetiredPaths() =>
+        Assert.Contains(
+            RetiredRemoval,
+            MaintenanceLauncher.BuildScript(Executable, Home, syncEnabled: false, indexRoot: null),
+            StringComparison.Ordinal);
 
     /// <summary>
     /// The one-descriptor-precedes-first-job property (D55/D56) must hold for both job lists —
@@ -225,6 +256,7 @@ public class MaintenanceLauncherTests
             + e + " sync compact --apply --if-large" + h + "; "
             + e + " index --drain-all --apply --auto '/repo'" + h + "; "
             + e + " index --freshen --apply --skip '/repo'" + h + "; "
+            + e + " compact --retired --apply --auto" + h + "; "
             + "}";
 
         Assert.Equal(
