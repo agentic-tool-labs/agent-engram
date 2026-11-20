@@ -6201,7 +6201,8 @@ dry run emits nothing. It is in `TelemetryEventKind.All`.
 
 **Doctor.** Key off: Warn with the residue count, `-> engram compact --retired`, and the key named as an
 option. Key on: Ok "removed automatically after <date>" while inside grace; Warn "too large to remove
-automatically" past grace over the cap; Warn "automatic removal has not run" more than a day past grace.
+automatically" over the cap whatever the grace, since `--auto` will never take it and an Ok would be false
+for seven days; Warn "automatic removal has not run" strictly more than a day past grace.
 A row whose checkout is absent here is Ok "kept: checkout not on this machine", never Warn. Doctor does
 not read telemetry, so `over_budget` is telemetry-only.
 
@@ -6212,4 +6213,9 @@ verb's. Every transaction took 388–607 ms; 536 writes, none failed, the slowes
 copy the same runs failed nothing either, but one write per run waited 3.0–4.8 s on the snapshot's
 `VACUUM INTO`, which blocks writers there and not under WAL.
 
-**Open.** The `[sync]` repo-scope listing §5 of the spec mentions is not built.
+**Sync scope.** The dry run notes a configured `[sync]` `repo:` scope that resolves today and would
+resolve to nothing once the eligible prefixes are gone, by asking `SyncScope.ResolveRepo` — the resolver
+`sync export` uses — over the registry before and after, so the note and the export cannot disagree.
+
+**The in-lock re-check repeats the suppression test**, not only "still retired, winner still there": a
+truncated scan landing between the git check and `BEGIN IMMEDIATE` keeps the row.
