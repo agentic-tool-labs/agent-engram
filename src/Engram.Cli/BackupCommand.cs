@@ -105,15 +105,32 @@ public static class BackupCommand
             stdout.WriteLine("Taking a snapshot: " + decision.Reason + ".");
         }
 
+        return TakeNow(home, settings, connection, stdout, stderr) is null ? 1 : 0;
+    }
+
+    /// <summary>
+    /// What <c>backup take</c> does once it holds the lock and has decided to take: the snapshot,
+    /// the journals beside it, and the prune. Null when the snapshot itself could not be written.
+    /// The caller holds <see cref="BackupStore.TryLock"/>. Shared so a verb that snapshots before
+    /// rewriting (<c>reorganize</c>, D87) leaves a journal as current as the snapshot.
+    /// </summary>
+    internal static BackupSnapshot? TakeNow(
+        EngramHome home,
+        BackupSettings settings,
+        Microsoft.Data.Sqlite.SqliteConnection connection,
+        TextWriter stdout,
+        TextWriter stderr,
+        string? label = null)
+    {
         BackupSnapshot snapshot;
         try
         {
-            snapshot = BackupStore.Take(connection, home, DateTimeOffset.UtcNow);
+            snapshot = BackupStore.Take(connection, home, DateTimeOffset.UtcNow, label);
         }
         catch (Exception exception) when (exception is IOException or Microsoft.Data.Sqlite.SqliteException)
         {
             stderr.WriteLine("error: could not write a snapshot — " + exception.Message);
-            return 1;
+            return null;
         }
 
         stdout.WriteLine($"Wrote {snapshot.Name} ({Size(snapshot.Bytes)}).");
@@ -153,7 +170,7 @@ public static class BackupCommand
             stdout.WriteLine($"Pruned {plan.Delete.Count} older {Snapshots(plan.Delete.Count)}, kept {plan.Keep.Count}.");
         }
 
-        return 0;
+        return snapshot;
     }
 
     private static int ListSnapshots(EngramHome home, TextWriter stdout)

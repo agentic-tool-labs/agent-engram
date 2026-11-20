@@ -5970,6 +5970,78 @@ because a plugin older than the binary still registers it and an unknown verb pr
 **Not measured.** Nothing here has run on an organization-managed install. That `prompt.submit` reaches a
 user-installed mod there rests on the docs not listing it as skipped.
 
+## D87 — Re-filing is close-and-reassert; `reorganize` moves the ledger out and closes misfiled captures
+
+The store held 5,960 live `user` facts and 5,624 of them were another tool's ledger: `/ah2/…`, predicate
+`records`, imported with `scope:"user"` and `learned_via:"stated"`, both false. Replayed recall packed that
+ledger in 54 of 270 recorded default queries. Separately, captures under `/user/about-you` and
+`/user/instructions` included agent text a person does not type.
+
+**The primitive.** `FactStore.Refile` moves one belief to another address and scope inside the caller's
+`BEGIN IMMEDIATE`: it writes a new fact through `Remember` at the target path with the same predicate,
+object, body, details, subject kind, regenerable flag, session and analyzer tier, the given scope and
+`learned_via`, `valid_from = now`, and evidence `"<old evidence>; re-filed from f<old>"`; then it closes the
+source with `superseded_by` set to the new fact and a supersession row whose reason names the move. A closed
+source is skipped. If the target already holds the identical body for that predicate and object, the source
+is closed onto that fact and nothing new is written. If the target holds a *different* live body, the two
+`valid_from` values decide. When the target's is the same or later, it is the newer belief about the
+subject: the source is closed onto it, nothing is inserted, and the case is counted as "superseded by newer
+target". This is what lets the step converge once wrangl writes `/tools/ah2` itself (U8). When the target
+is older, nothing is written and the source stays live ("left in place", listed by handle). A target is
+never re-asserted over and never closed. `FactStore.PlanRefile` is the one decision, called by the apply
+and by the dry run's four counts.
+
+**Rejected: `MoveSubtree` plus an `UPDATE` of `scope`.** `MoveSubtree` is licensed for `path` only (D2).
+Adding `scope` to the append-only exceptions beside `analyzer_tier` would change an invariant this does not
+need. The chosen route costs one fact row and one supersession row per moved fact (5,624 against ~890k).
+D57 `History` of a re-filed fact shows one version, because history is keyed by path; the trail is in the
+evidence and the supersession row. `SyncScope` syncs `scope='user'`, so the ledger stops syncing as user
+memory after the move, which is intended.
+
+**The verb.** `engram reorganize --ledger` re-files every live fact at or under `/ah2` to `/tools/ah2`
+(`MoveSubtree`'s `/`-or-`#` boundary, so `/ah2x` is not selected). The pair is fixed, not an option: there
+is no second caller, and an unbounded source prefix could re-file session notes or directives. The facts go
+to scope `tool`,
+`learned_via observed` (D19: a tool's observation, never the user's words). The original row keeps its
+historical `stated`. `engram reorganize --captures` lists suspects under deterministic rules, reported by
+name. Tier A is agent signature and can be closed as a set: R1 is an agent-report opener as the first word,
+R2 is a tooling-marker substring (bare `Subagent` dropped, because a person writes it), and R5 is a body that
+also exists as a `/sessions/` note. Tier B is shape only and is closed by handle: R3 is a `path.ext:line`
+citation, with no backtick clause, and R4 is over 400 UTF-16 code units. `--apply --tier a` and
+`--apply --only f…,f…` act. `--apply` alone is refused, and so is a handle that is not a printed suspect, so
+the verb cannot become a general forget. Captures are closed with `Forget` and never re-filed: a misfiled
+capture is not the user's belief anywhere. The verb is dry-run by default. `--apply` refuses while
+`ServerIsAlive`, because the server's recall and backlog read these rows (D38/D42). A dry run does not
+refuse: it only reads, and the capture list has to be reviewable without stopping memory for every
+session, so it prints one line saying an apply will need the server stopped. Every refusal, including a
+captures `--only` naming a non-suspect in a run that also asks for `--ledger`, is decided before either
+step writes. Before its first write the verb takes a `pre-reorganize` snapshot through `backup take`'s own
+routine, under its lock and with the journals beside it, so a later `backup replay` reads a journal as
+current as the snapshot. A held backup lock refuses the apply. It takes no snapshot when there is nothing
+to write.
+
+**Primer.** `PrimerSummary` neither counts nor samples `scope = 'tool'`. The histogram takes them out with a
+third, negative arm over `ix_fact_scope` and a `HAVING`, not with a scope filter on the two count arms,
+because those arms are answered from the partial indexes alone. The candidate arms skip the scope. A store
+with no tool rows reads exactly as before.
+
+**Measured on a copy of the real store** (621,904 live facts, published binary). Live counts before were
+code 553,641, session 62,303, user 5,960. `--ledger --apply` re-filed 5,624 in 12.30 s wall. Most of
+that is the `backup take` routine: the snapshot, with `VACUUM INTO` of the 2.4 GB store timed alone at
+~4.2 s, and an 890,829-fact journal. An earlier build that snapshotted without journals took 5.16 s, which
+puts the re-file itself at about 1 s. A second `--apply` found 0. On the
+captures, 299 were live and 60 suspect: R1 3, R2 0, R5 0, R3 5, R4 55, so tier A was 3 and tier B was 57.
+E6 counted R2 as 2, but both of those hits were the bare word `SubagentStart`, which the dropped clause
+matched. It counted R3 as 67 with identifier-shaped backtick spans included. `--tier a` closed 3, and a
+second run closed 0. Live counts after were code 553,641, session 62,303, tool 5,624, user 333. `repair`
+afterwards reported tokens in sync. It also reported **360,391 FTS rows missing**, identical on an untouched
+copy, so that drift was already in the store and is not from this change.
+
+**Not done here.** Wrangl's `bin/ah-memory-engram` has to write `/tools/ah2/…`, scope `tool`, `learned_via
+observed` before the real `--ledger --apply`, or new rows keep landing at `/ah2` (U8). Until then the step is
+safe to re-run, and once wrangl writes the new address, a re-recorded path converges through the
+newer-target rule. Engram adds no import-time remap and special-cases `ah2` nowhere but this step. A
+forward fix for misfiled captures waits on E7.
 ## D84 — Prior sessions are enumerated from `session`; a NULL-session note takes no label
 
 **Supersedes D81's choice of CTE form**, not its reasoning. `RecallRanker`'s `prior_sessions` is
