@@ -237,7 +237,7 @@ public sealed class EngramMcpTools
 
         if (wantsAgent && roleOutcome is null)
         {
-            response += "\nno agent given — kept as a session note; pass your role key from the primer as agent";
+            response += "\nno usable agent key — kept as a session note; pass your role key from the primer as agent";
         }
         else if (roleOutcome == RoleWrite.Capped)
         {

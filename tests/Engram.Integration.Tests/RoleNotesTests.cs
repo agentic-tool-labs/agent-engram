@@ -42,8 +42,19 @@ public sealed class RoleNotesTests
         var response = Remember(sandbox, "s1", "A lesson.", "agent", agent: null);
 
         Assert.StartsWith("/sessions/", Assert.Single(Notes(sandbox)).Path, StringComparison.Ordinal);
-        Assert.EndsWith("\nno agent given — kept as a session note; pass your role key from the primer as agent", response, StringComparison.Ordinal);
+        Assert.EndsWith("\nno usable agent key — kept as a session note; pass your role key from the primer as agent", response, StringComparison.Ordinal);
         Assert.Null(LastRemember(sandbox).Scope);
+    }
+
+    [Fact]
+    public void AgentScope_WithAKeyThatSlugsToNothing_KeepsASessionNote()
+    {
+        using var sandbox = new SandboxHome();
+
+        var response = Remember(sandbox, "s1", "A lesson.", "agent", "???");
+
+        Assert.StartsWith("/sessions/", Assert.Single(Notes(sandbox)).Path, StringComparison.Ordinal);
+        Assert.EndsWith("\nno usable agent key — kept as a session note; pass your role key from the primer as agent", response, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -170,6 +181,34 @@ public sealed class RoleNotesTests
         Assert.Equal(
             PrimerBuilder.Build(PrimerSummary.Read(connection, Now), MemoryPrecedence.EngramFirst),
             PrimerBuilder.Build(PrimerSummary.Read(connection, Now, Role), MemoryPrecedence.EngramFirst));
+    }
+
+    [Fact]
+    public void ARoleFact_MovesNoPrimerCountOrExample_OnEitherSummaryPath()
+    {
+        using var sandbox = new SandboxHome();
+        Remember(sandbox, "s1", "Seed so the store is not empty.", scope: null, agent: null);
+        string Primers()
+        {
+            using var connection = Open(sandbox);
+            return PrimerBuilder.Build(PrimerSummary.Read(connection, Now), MemoryPrecedence.EngramFirst)
+                + "\n--\n" + PrimerBuilder.BuildForSubagent(PrimerSummary.Read(connection, Now), MemoryPrecedence.EngramFirst);
+        }
+
+        var before = Primers();
+        Remember(sandbox, "s1", "Quokka lesson for one role only.", "agent", Role);
+
+        Assert.Equal(before, Primers());
+        using var connection = Open(sandbox);
+        foreach (var summary in new[] { PrimerSummary.Read(connection, Now), PrimerSummary.From(FactCatalog.ReadLongTerm(connection, Now)) })
+        {
+            Assert.DoesNotContain(summary.ExampleCandidates, fact => fact.SubjectPath?.StartsWith("/agents/", StringComparison.Ordinal) == true);
+            Assert.DoesNotContain("agents", summary.TopicCounts.Keys);
+        }
+
+        Assert.Equal(
+            PrimerSummary.Read(connection, Now).FactCount,
+            PrimerSummary.From(FactCatalog.ReadLongTerm(connection, Now)).FactCount);
     }
 
     [Fact]

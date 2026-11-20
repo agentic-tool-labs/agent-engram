@@ -6331,9 +6331,13 @@ id space, which is the check P4 failed.
   lessons every future <role> needs; kept as a session note". It is never refused.
 - The repeat check runs before the cap, so re-recording a lesson already held returns its handle,
   spends none of the cap, and is not demoted.
-- A missing `agent` gives a session note with "no agent given — kept as a session note; pass your
-  role key from the primer as agent".
+- A missing `agent`, or one that slugs to nothing, gives a session note with "no usable agent key —
+  kept as a session note; pass your role key from the primer as agent".
 - Delivery is capped at five facts and the primer's 300-token budget.
+- Role memory never reaches a count or example line: `/agents/` is excluded from the histogram and
+  both example arms by path prefix, the same mechanism as sessions and directives, and from
+  `PrimerSummary.From` so both summary paths agree. `FactCatalog.ReadLongTerm` keeps them, because
+  recall reads it and the spec puts agent facts in default recall.
 - The known gap stands: nothing expires role memory. Newest-first delivery lets stale lessons fall
   off the primer while staying recallable.
 

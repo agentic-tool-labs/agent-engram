@@ -55,14 +55,19 @@ public sealed record PrimerSummary(
     /// </summary>
     public static PrimerSummary From(IReadOnlyList<CannedFact> facts, string? role = null)
     {
+        // Role memory reaches only its role's block (D100), as Read's exclusion does.
+        var rolePrefix = RoleNotes.Root + "/";
+        var counted = facts
+            .Where(fact => fact.SubjectPath is not { } path || !path.StartsWith(rolePrefix, StringComparison.Ordinal))
+            .ToList();
         var topicCounts = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var fact in facts)
+        foreach (var fact in counted)
         {
             topicCounts[fact.Topic] = topicCounts.GetValueOrDefault(fact.Topic) + 1;
         }
 
         return new PrimerSummary(
-            facts.Count, topicCounts, facts, Directives: [],
+            counted.Count, topicCounts, counted, Directives: [],
             Role: RoleNotes.IsAddressable(role) ? role : null,
             RoleFacts: RoleNotes.IsAddressable(role) ? RoleNotes.SelectDelivered(facts, role!) : []);
     }
@@ -139,6 +144,7 @@ public sealed record PrimerSummary(
     /// same mechanism rather than a second one beside it: they are their own delivery channel
     /// (D-1), so they must not also inflate <see cref="PrimerSummary.FactCount"/>,
     /// <see cref="PrimerSummary.TopicCounts"/>, or appear a second time as an "Examples:" line.
+    /// Role memory likewise: it reaches only its own role's block (D100), never a count or example.
     /// </remarks>
     private static void BindExclusions(SqliteCommand command, string sessionPrefix, string directivePrefix)
     {
@@ -146,6 +152,8 @@ public sealed record PrimerSummary(
         command.Parameters.AddWithValue("$prefix", sessionPrefix);
         command.Parameters.AddWithValue("$dplen", directivePrefix.Length);
         command.Parameters.AddWithValue("$dprefix", directivePrefix);
+        command.Parameters.AddWithValue("$aplen", RoleNotes.Root.Length + 1);
+        command.Parameters.AddWithValue("$aprefix", RoleNotes.Root + "/");
     }
 
     private const string TopicHistogramSql =
@@ -156,6 +164,7 @@ public sealed record PrimerSummary(
          WHERE f.valid_to IS NULL
            AND substr(e.path, 1, $plen) <> $prefix
            AND substr(e.path, 1, $dplen) <> $dprefix
+           AND substr(e.path, 1, $aplen) <> $aprefix
          GROUP BY e.path;
         """;
 
@@ -190,6 +199,7 @@ public sealed record PrimerSummary(
                          WHERE sf.valid_to IS NULL
                            AND substr(se.path, 1, $plen) <> $prefix
                            AND substr(se.path, 1, $dplen) <> $dprefix
+                           AND substr(se.path, 1, $aplen) <> $aprefix
                          GROUP BY sf.scope
                         UNION
                         SELECT id
@@ -199,6 +209,7 @@ public sealed record PrimerSummary(
                                  WHERE nf.valid_to IS NULL
                                    AND substr(ne.path, 1, $plen) <> $prefix
                                    AND substr(ne.path, 1, $dplen) <> $dprefix
+                                   AND substr(ne.path, 1, $aplen) <> $aprefix
                                  ORDER BY nf.id
                                  LIMIT $limit))
          ORDER BY f.id;
