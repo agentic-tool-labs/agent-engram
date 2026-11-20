@@ -6754,11 +6754,15 @@ toplevel is its own, and a note from there reads as `not-indexed`.
 capture). The response gains one line naming why. The `remember` record's `project_unresolved`
 carries the same reason as a closed code (`no-dir`, `bad-dir`, `not-checkout`, `git-unknown`,
 `not-indexed`), so the adoption question can be split from the resolution one. `scope` is recorded
-only when a project note was actually written. `git-unknown` is reserved and not yet produced:
-when git cannot answer, `TryResolveIdentity` fails and the call reads as `not-indexed`. Producing
-it is a separate item. Until then, the `not-indexed` notice names `project_dir` as the call gave
-it, not a root git may have failed to find, so a subdirectory is never reported as unindexed on the
-strength of a failed lookup.
+only when a project note was actually written. When git cannot answer, `TryResolveIdentity` fails
+with its Unknown (D94) and the call reads as `git-unknown`, notice "could not ask git about
+<root> — kept as a session note"; a corrupt `.git/config` (exit 128) is the tested case. It was
+first mapped to `not-indexed` while the Unknown outcome was unreachable, and that was wrong in the
+direction that hides the cause: an identity nobody could read says nothing about whether the repo
+is indexed. A checkout with no `origin` is not an Unknown — its identity is the root path — so with
+no registry row it still reads as `not-indexed`. The `not-indexed` notice names `project_dir` as
+the call gave it, not a root git may have failed to find, so a subdirectory is never reported as
+unindexed on the strength of a failed lookup.
 
 A `scope` passed with `supersedes` is not applied, because a restatement keeps the capture's
 address. The response says so in one line ("scope ignored — a revision keeps the original's
