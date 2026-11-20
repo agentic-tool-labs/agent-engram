@@ -123,35 +123,69 @@ public class HookFileTouchedTests
     }
 
     [Fact]
-    public void FileTouched_CompletesInUnder100Milliseconds()
+    public void FileTouched_AddsUnder50MillisecondsOverANoOp()
     {
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
 
         using var home = new TestHome();
 
         const int totalRuns = 21;
-        var elapsedMs = new List<long>(totalRuns);
+        var hookMs = new List<double>(totalRuns);
+        var noOpMs = new List<double>(totalRuns);
 
+        // Relative to starting the binary to do nothing, never absolute (D4, D101). The absolute
+        // form failed in QA with medians of 110–300 ms while its own fastest run was 36–117 ms —
+        // four to twelve times the ~10 ms idle floor, so what it measured was the machine. Each
+        // pair alternates which arm goes first, because running the same arm first every time
+        // charges it whatever the first of a pair costs (D56).
         for (var i = 0; i < totalRuns; i++)
         {
-            var stopwatch = Stopwatch.StartNew();
-            var (exitCode, _, _) = EngramProcess.Run(home.Root, "hook", "file-touched");
-            stopwatch.Stop();
-
-            Assert.Equal(0, exitCode);
-            elapsedMs.Add(stopwatch.ElapsedMilliseconds);
+            if (i % 2 == 0)
+            {
+                hookMs.Add(TimeHook(home.Root));
+                noOpMs.Add(Time(home.Root, "home"));
+            }
+            else
+            {
+                noOpMs.Add(Time(home.Root, "home"));
+                hookMs.Add(TimeHook(home.Root));
+            }
         }
 
         var queueDir = Path.Combine(home.Root, "queue");
         var spoolFiles = Directory.GetFiles(queueDir);
         Assert.Equal(totalRuns, spoolFiles.Length);
 
-        var samples = elapsedMs.Skip(1).Order().ToList();
-        var min = samples[0];
-        var median = samples[samples.Count / 2];
-        var p95 = samples[(int)Math.Ceiling(samples.Count * 0.95) - 1];
+        var hookMedian = Median(hookMs.Skip(1));
+        var noOpMedian = Median(noOpMs.Skip(1));
+        var margin = hookMedian - noOpMedian;
 
-        Assert.True(median < 100,
-            $"file-touched median took {median}ms across {samples.Count} timed runs (min={min}ms, median={median}ms, p95={p95}ms), expected median < 100ms");
+        Assert.True(margin < 50,
+            $"file-touched median {hookMedian:0.0} ms against a no-op median of {noOpMedian:0.0} ms "
+                + $"across {totalRuns - 1} interleaved pairs: {margin:0.0} ms over starting the binary, expected < 50 ms");
+    }
+
+    private static double TimeHook(string home)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var (exitCode, _, _) = EngramProcess.Run(home, "hook", "file-touched");
+        stopwatch.Stop();
+
+        Assert.Equal(0, exitCode);
+        return stopwatch.Elapsed.TotalMilliseconds;
+    }
+
+    private static double Time(string home, params string[] args)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        EngramProcess.Run(home, args);
+        stopwatch.Stop();
+        return stopwatch.Elapsed.TotalMilliseconds;
+    }
+
+    private static double Median(IEnumerable<double> samples)
+    {
+        var sorted = samples.Order().ToList();
+        return sorted[sorted.Count / 2];
     }
 }
