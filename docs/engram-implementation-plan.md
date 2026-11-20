@@ -6041,3 +6041,78 @@ origin row. Detection on demand in doctor or a verb: it has no completed-scan ev
 requires before absence counts. Deleting at the end of the scan: destructive work is dry-run first, and
 compact's snapshot plus VACUUM do not belong in the maintenance child. Removal is a separate verb
 (eng-34 phase 3).
+## D92 — Compact's deletes are index-backed (schema v20)
+
+On the user's store (890,829 facts, 2.45 GB) the shipped `compact --apply` finished **0 of 46** calls. The
+first call ran 30 minutes at full CPU before it was killed, and it rolled back cleanly. With
+`foreign_keys = ON`, which `EngramDatabase.Open` sets, three checks scanned `fact` once for every deleted
+row:
+
+| Path | Cause | As shipped | Fix |
+|---|---|---|---|
+| P1: `DELETE FROM fact` | The foreign-key child check on `fact.superseded_by` had no index | 73 ms a fact | `ix_fact_superseded_by` |
+| P2: `EntitySql` | `subject_id = entity.id OR object_id = entity.id` | 1,340 entities in 76.8 s | Two `NOT EXISTS` probes |
+| P3: `DELETE FROM entity` | `ix_fact_object` is live-only, so it cannot serve the check on `fact.object_id` | 732 entities in 97.17 s | `ix_fact_object_ref` |
+
+**The partial form was enough.** Both new indexes are partial (`… IS NOT NULL`), because the check runs
+`col = ?` and that implies the column is not null. That was the expectation, not a proven fact. It held:
+on the bundled SQLite (tier 2) and on a copy of the real store, `superseded_by = ?` and `object_id = ?` seek
+the partial indexes, and every compact call completed. The full-index fallback the spec pre-decided was
+not used. Built on the real-store copy: 0.11 s and 0.21 s.
+
+**`ix_fact_object` is untouched.** Widening it would add every closed row to the index recall reads.
+`RecallRankerPlanTests` and `ForeignKeyIndexPlanTests` hold recall's plans. Most of the latter's
+statements are copies of private inline SQL, so an edit to one of those sites leaves the guard planning
+the old text. Only `BackfillBatchSql`, `PendingCountSql` and `PruneIneligibleSql` are read from
+production. On the real-store copy the
+statements C4 lists, and every other carrier of the regenerable-edge predicate, plan the same with and
+without v20, with one exception.
+
+**The exception is `VectorIndex.PruneIneligible`.** Under v20 its inner select
+(`regenerable IS 1 AND object_id IS NOT NULL`) moved from `SCAN fact` to a range seek on
+`ix_fact_object_ref`. The predicate matches 509,024 of 890,829 rows, so a seek plus a rowid lookup per row
+loses to one sequential pass. Medians of seven alternated warm runs on the real-store copy: inner select
+586.03 ms seeking against 210.08 ms scanning, and the whole `DELETE` 952.29 ms against 446.22 ms. A first
+run measured 530.96 against 198.37 and 806.62 against 404.04. A unary plus on that one term
+(`+object_id IS NOT NULL`) restores the v19 plan. `NOT INDEXED` was rejected because it would also refuse
+a better index a later schema adds. Its one caller is `engram embed --prune --apply`, which someone types,
+and which reaches the delete only when ineligible vectors were counted. One earlier measurement was
+invalid: 172.05 against 171.75 ms, taken after `backup take`, which opens the store without migrating
+it, so neither arm had the index. The 530.96/198.37 run above did differ by plan, and its "scan" arm
+was `NOT INDEXED` rather than the unary plus.
+
+**The split in P2 is no longer what removes the scan.** With `ix_fact_object_ref` present, the old `OR`
+form also seeks, as a `MULTI-INDEX OR` over `ix_fact_thread` and the new index. The split is kept because
+the spec named it and it reads plainly, and a plan assertion (no `MULTI-INDEX OR`) pins it.
+
+**Two guards change what is removed, and nothing else does.** An entity that carries an `entity_alias`
+row is kept even with no fact left. The `ON DELETE CASCADE` had deleted all 4,823 alias rows with no count,
+and no index run rebuilds rename history. The dry run and the apply report "entities kept for rename
+history". A regenerable fact that `fact_relation` (either end), `fact_review` or `fact_sync_request` names is
+kept too. None of those cascades, so deleting the fact used to fail the whole call on a foreign key. Both
+side-table checks and the authored supersession edge form one predicate, `StoreCompactor.AuthoredDependencySql`,
+which the backup journal filter is to reuse (the backup-slim stream cherry-picks 6b4e992).
+
+**Acceptance on a copy of the real store** (published binary, WAL mode):
+- All 46 calls complete. `foreign_key_check` is clean. A digest over authored facts, their supersessions,
+  `fact_relation`, `fact_review`, `fact_sync_request`, `entity_alias` and `session` is equal before and after.
+- Counts before and after: facts 890,829 → 68,613; entities 409,255 → 170,747; aliases 4,823 → 4,823;
+  registry rows 45 → 0.
+- The first call also migrated. Its D31 `pre-v20` snapshot took 6.30 s.
+- Summed over the calls: selection before each snapshot 16.13 s, snapshots 109.5 s, snapshot end to commit
+  44.52 s, checkpoints 2.17 s, VACUUM 365.0 s, wall 537.4 s. The median call takes 0.52 s from snapshot to
+  commit.
+- The spec's target was a summed transaction time under 30 s. That is **not shown**: 44.52 s is an upper
+  bound, because it includes `BackupStore.PruneAfterWrite`, which runs between the snapshot and the
+  transaction and cannot be separated from outside the process. Counting the selection before each
+  snapshot too, compaction work outside the snapshots and VACUUM is at most 60.65 s, against the
+  emulation's 19.28 s.
+- Re-index after a path compact (rocket, 65 aliases): 64 of 65 aliased entities are again the subject of a
+  live fact. No path is duplicated, so the indexer reuses the surviving entity. The 65th,
+  `engine/view/main.gd.uid` (renamed from `src/view/main.gd.uid`), is no longer on disk. No second
+  entity holds its path, and no fact references it, so nothing was left to re-index.
+
+**Not measured.** Where those 44.52 s go inside each call. The outlier is `agent-tools-2`, which took 7.31 s
+from snapshot to commit for 15,261 facts, against 3.33 s for 248,389 facts in `wrangl-3`. The real-store
+plan checks ran on Python's SQLite 3.54.1, not the bundled one, and tier 2 reproduced each switch on the
+bundled build. Snapshots and VACUUM are 88% of the wall time. Making them cheaper is a separate change.
