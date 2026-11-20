@@ -316,7 +316,15 @@ database copied with `cp` was measured here to yield not a stale file but an unu
 because a migration is the only thing Engram's own code does that rewrites structure rather than
 appending to it, and it runs unattended on open (D31). Session start spawns `backup take --if-due`
 detached, and the snapshot is skipped entirely unless the fingerprint of authored truth actually
-moved, so an idle day costs nothing.
+moved, so an idle day costs nothing. **What a snapshot holds is its caller's stated scope, never a
+default** (D93): `pre-vN` and `pre-restore` are full; `backup take`, `pre-compact`, `pre-repair` and
+`pre-reorganize` are *authored* — the copy, and only the copy, has `fact_vec` dropped and vacuumed
+away, and every live fact stays, code facts included, so a restore needs no re-index. Measured on
+the real store: 2,446,798,848 → 830,271,488 B. Slimming runs behind a guard that refuses
+`home.DatabasePath`, and a slimming failure **takes the copy again** rather than renaming what is
+there: `VectorIndex.Drop` commits before the stamp, so the copy on disk after a late failure is
+neither full nor marked. A restored store is told it is no longer a snapshot — restore deletes
+`backup_scope`/`backup_omitted` — or the next full snapshot of it would list as slim.
 
 **A detached child must not inherit the hook's stdout, and the redirection has to be on the shell
 rather than on the group.** `MaintenanceLauncher` runs several jobs, so it cannot `exec` them the
@@ -348,8 +356,13 @@ small — but it is no longer justified by a number, and the telemetry-collision
 forced (zero lost, zero torn across 160 session starts, because every caller but `file-touched`
 passes a 500 ms retry budget) stands on its own and still applies.
 
-**A snapshot restores; the journal survives.** `backups/facts.jsonl` is every fact in plain text,
-rewritten whole and atomically alongside each snapshot. A `.db` snapshot only restores into the
+**A snapshot restores; the journal survives.** `backups/facts.jsonl` is authored truth in plain
+text — every `regenerable = 0` fact plus any regenerable one authored truth depends on, by
+`StoreCompactor.AuthoredDependencySql`, the predicate compact protects with, so it is never written
+twice and every relation, review and sync line beside it resolves (D93). It is rewritten whole and
+atomically alongside each snapshot, **from that snapshot file, not the live store**, so the pair
+cannot disagree. Code facts are not in it — they are in every snapshot and an index run regenerates
+them — and that took it from ~531 MB to 39,944,804 B on the real store. `export` keeps all facts. A `.db` snapshot only restores into the
 schema version that wrote it — the journal is addressed by path and predicate, so it replays into
 any later one (D32). `backup replay` is additive and idempotent, matching on subject, predicate,
 body and `valid_from`: it never rewrites or closes a fact the target store already had, because a

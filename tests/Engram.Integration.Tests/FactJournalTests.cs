@@ -46,7 +46,7 @@ public sealed class FactJournalTests
         Write(connection, "/project/a", "the first thing", T0);
         Write(connection, "/project/b", "the second thing", T0);
 
-        var written = FactJournal.Write(connection, sandbox.Home, T0);
+        var written = FactJournal.Write(connection, sandbox.Home, T0, BackupScope.Full);
 
         Assert.Equal(2, written);
         var lines = File.ReadAllLines(FactJournal.PathIn(sandbox.Home));
@@ -61,7 +61,7 @@ public sealed class FactJournalTests
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Write(connection, "/project/a", "something", T0);
 
-        FactJournal.Write(connection, sandbox.Home, T0);
+        FactJournal.Write(connection, sandbox.Home, T0, BackupScope.Full);
 
         var header = JsonNode.Parse(File.ReadLines(FactJournal.PathIn(sandbox.Home)).First())!.AsObject();
         Assert.Equal(EngramDatabase.SchemaVersion, header["schema_version"]!.GetValue<int>());
@@ -79,7 +79,7 @@ public sealed class FactJournalTests
             new FactWrite("/project/a", "note", "depends-on", "the body", "project", "observed", "src/x.cs:12"),
             T0);
 
-        FactJournal.Write(connection, sandbox.Home, T0);
+        FactJournal.Write(connection, sandbox.Home, T0, BackupScope.Full);
 
         var fact = Assert.Single(Reread(sandbox.Home));
         Assert.Equal("/project/a", fact.Subject);
@@ -102,7 +102,7 @@ public sealed class FactJournalTests
         Write(connection, "/project/a", "the old belief", T0);
         Write(connection, "/project/a", "the new belief", T0.AddHours(1));
 
-        FactJournal.Write(connection, sandbox.Home, T0.AddHours(2));
+        FactJournal.Write(connection, sandbox.Home, T0.AddHours(2), BackupScope.Full);
 
         var facts = Reread(sandbox.Home);
         Assert.Equal(2, facts.Count);
@@ -119,7 +119,7 @@ public sealed class FactJournalTests
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Write(connection, "/project/a", "something", T0);
 
-        FactJournal.Write(connection, sandbox.Home, T0);
+        FactJournal.Write(connection, sandbox.Home, T0, BackupScope.Full);
 
         Assert.Empty(Directory.GetFiles(sandbox.Home.BackupDir, "*.partial"));
     }
@@ -131,10 +131,10 @@ public sealed class FactJournalTests
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
 
         Write(connection, "/project/a", "one", T0);
-        FactJournal.Write(connection, sandbox.Home, T0);
+        FactJournal.Write(connection, sandbox.Home, T0, BackupScope.Full);
 
         Write(connection, "/project/b", "two", T0.AddMinutes(1));
-        FactJournal.Write(connection, sandbox.Home, T0.AddMinutes(1));
+        FactJournal.Write(connection, sandbox.Home, T0.AddMinutes(1), BackupScope.Full);
 
         Assert.Equal(2, Reread(sandbox.Home).Count);
     }
@@ -147,7 +147,7 @@ public sealed class FactJournalTests
         {
             Write(connection, "/project/a", "the first thing", T0);
             Write(connection, "/project/b", "the second thing", T0.AddMinutes(1));
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(2));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
         }
 
         var facts = Reread(source.Home);
@@ -168,7 +168,7 @@ public sealed class FactJournalTests
         using (var connection = EngramDatabase.OpenInitialized(source.Home))
         {
             Write(connection, "/project/parsers", "the tokenizer keeps its own line counter", T0);
-            FactJournal.Write(connection, source.Home, T0);
+            FactJournal.Write(connection, source.Home, T0, BackupScope.Full);
         }
 
         using var target = new SandboxHome(initialize: false);
@@ -190,7 +190,7 @@ public sealed class FactJournalTests
         {
             Write(connection, "/project/a", "the old belief", T0);
             Write(connection, "/project/a", "the new belief", T0.AddHours(1));
-            FactJournal.Write(connection, source.Home, T0.AddHours(2));
+            FactJournal.Write(connection, source.Home, T0.AddHours(2), BackupScope.Full);
         }
 
         using var target = new SandboxHome(initialize: false);
@@ -222,7 +222,7 @@ public sealed class FactJournalTests
         {
             Write(connection, "/project/a", "the old belief", T0);
             Write(connection, "/project/a", "the new belief", T0.AddHours(1));
-            FactJournal.Write(connection, source.Home, T0.AddHours(2));
+            FactJournal.Write(connection, source.Home, T0.AddHours(2), BackupScope.Full);
         }
 
         using var target = new SandboxHome(initialize: false);
@@ -242,7 +242,7 @@ public sealed class FactJournalTests
         {
             Write(connection, "/project/a", "the old belief", T0);
             Write(connection, "/project/a", "the new belief", T0.AddHours(1));
-            FactJournal.Write(connection, source.Home, T0.AddHours(2));
+            FactJournal.Write(connection, source.Home, T0.AddHours(2), BackupScope.Full);
         }
 
         var facts = Reread(source.Home);
@@ -264,7 +264,7 @@ public sealed class FactJournalTests
         using (var connection = EngramDatabase.OpenInitialized(source.Home))
         {
             Write(connection, "/project/a", "something", T0);
-            FactJournal.Write(connection, source.Home, T0);
+            FactJournal.Write(connection, source.Home, T0, BackupScope.Full);
         }
 
         using var target = new SandboxHome(initialize: false);
@@ -283,7 +283,7 @@ public sealed class FactJournalTests
         {
             Write(connection, "/project/a", "shared", T0);
             Write(connection, "/project/b", "only in the journal", T0.AddMinutes(1));
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(2));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
         }
 
         using var target = new SandboxHome(initialize: false);
@@ -304,7 +304,7 @@ public sealed class FactJournalTests
         using (var connection = EngramDatabase.OpenInitialized(source.Home))
         {
             Write(connection, "/project/a", "something", T0);
-            FactJournal.Write(connection, source.Home, T0);
+            FactJournal.Write(connection, source.Home, T0, BackupScope.Full);
         }
 
         using var target = new SandboxHome(initialize: false);
@@ -323,7 +323,7 @@ public sealed class FactJournalTests
         using (var connection = EngramDatabase.OpenInitialized(source.Home))
         {
             Write(connection, "/project/a", "the short version", T0, details: "the long version, verbatim.");
-            FactJournal.Write(connection, source.Home, T0);
+            FactJournal.Write(connection, source.Home, T0, BackupScope.Full);
         }
 
         var facts = Reread(source.Home);
@@ -362,7 +362,7 @@ public sealed class FactJournalTests
         using (var connection = EngramDatabase.OpenInitialized(source.Home))
         {
             Write(connection, "/project/a", "shared body", T0, details: "the journal's details");
-            FactJournal.Write(connection, source.Home, T0);
+            FactJournal.Write(connection, source.Home, T0, BackupScope.Full);
         }
 
         using var target = new SandboxHome(initialize: false);
@@ -386,7 +386,7 @@ public sealed class FactJournalTests
         using var connection = EngramDatabase.OpenInitialized(sandbox.Home);
         Write(connection, "/project/a", "the first thing", T0);
         Write(connection, "/project/b", "the second thing", T0.AddMinutes(1));
-        FactJournal.Write(connection, sandbox.Home, T0.AddMinutes(2));
+        FactJournal.Write(connection, sandbox.Home, T0.AddMinutes(2), BackupScope.Full);
 
         var path = FactJournal.PathIn(sandbox.Home);
         var lines = File.ReadAllLines(path);
@@ -464,7 +464,7 @@ public sealed class FactJournalTests
         {
             Write(connection, "/project/a", "what the journal remembers", T0);
             Write(connection, "/project/b", "only in the journal", T0.AddMinutes(1));
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(2));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
         }
 
         using var target = new SandboxHome(initialize: false);
@@ -494,7 +494,7 @@ public sealed class FactJournalTests
         using (var connection = EngramDatabase.OpenInitialized(source.Home))
         {
             Write(connection, "/project/mine", "a fact only this store has", T0);
-            FactJournal.Write(connection, source.Home, T0);
+            FactJournal.Write(connection, source.Home, T0, BackupScope.Full);
         }
 
         // Initialised, so the store arrives holding the canned corpus rather than nothing.
@@ -529,7 +529,7 @@ public sealed class FactJournalTests
         {
             Write(connection, "/project/a", "what the journal remembers", T0);
             Write(connection, "/project/b", "only in the journal", T0.AddMinutes(1));
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(2));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
         }
 
         using var target = new SandboxHome(initialize: false);
@@ -557,7 +557,7 @@ public sealed class FactJournalTests
         {
             Write(connection, "/project/a", "what was believed first", T0);
             Write(connection, "/project/a", "what replaced it", T0.AddMinutes(1));
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(2));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
         }
 
         using var target = new SandboxHome(initialize: false);
@@ -590,7 +590,7 @@ public sealed class FactJournalTests
         using (var connection = EngramDatabase.OpenInitialized(source.Home))
         {
             Write(connection, "/project/a", "the one that arrived first", T0);
-            FactJournal.Write(connection, source.Home, T0);
+            FactJournal.Write(connection, source.Home, T0, BackupScope.Full);
         }
 
         var facts = Reread(source.Home);
@@ -920,7 +920,7 @@ public sealed class FactJournalTests
                 new FactWrite("/projects/x/code/a.cs", "file", "imports", "imports lodash", "code", "observed",
                     Regenerable: true, ObjectPath: CodePaths.ForSymbolName("lodash"), ObjectKind: "symbol-name"),
                 T0);
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(1));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(1), BackupScope.Full);
         }
 
         var facts = Reread(source.Home);
@@ -959,7 +959,7 @@ public sealed class FactJournalTests
                 new FactWrite("/projects/x/code/a.cs", "file", "imports", "imports lodash", "code", "observed",
                     Regenerable: true, ObjectPath: CodePaths.ForSymbolName("lodash"), ObjectKind: "symbol-name"),
                 T0);
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(1));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(1), BackupScope.Full);
         }
 
         var facts = Reread(source.Home);
@@ -1029,7 +1029,7 @@ public sealed class FactJournalTests
                 new FactWrite("/projects/x/code/a.cs", "file", "imports", "imports @angular/core", "code", "observed",
                     Regenerable: true, ObjectPath: objectPath, ObjectKind: "symbol-name"),
                 T0);
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(1));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(1), BackupScope.Full);
         }
 
         var facts = Reread(source.Home);

@@ -59,7 +59,7 @@ public sealed class RelationJournalTests
             transaction.Commit();
         }
 
-        var written = RelationJournal.Write(connection, sandbox.Home, T0);
+        var written = RelationJournal.Write(connection, sandbox.Home, T0, BackupScope.Full);
 
         Assert.Equal(1, written);
         var lines = File.ReadAllLines(RelationJournal.PathIn(sandbox.Home));
@@ -82,8 +82,8 @@ public sealed class RelationJournalTests
                 transaction.Commit();
             }
 
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(2));
-            RelationJournal.Write(connection, source.Home, T0.AddMinutes(2));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
+            RelationJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
         }
 
         var facts = RereadFacts(source.Home);
@@ -119,7 +119,7 @@ public sealed class RelationJournalTests
 
             // The journal is taken here, before `outsider` exists — standing in for a relation
             // whose other side lives in a different journal slice than the one being replayed.
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(1));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(1), BackupScope.Full);
 
             outsider = Write(connection, "/project/outsider", "never journalled", T0);
             using (var transaction = EngramDatabase.BeginWrite(connection))
@@ -168,8 +168,8 @@ public sealed class RelationJournalTests
                 transaction.Commit();
             }
 
-            FactJournal.Write(connection, source.Home, T0.AddMinutes(2));
-            RelationJournal.Write(connection, source.Home, T0.AddMinutes(2));
+            FactJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
+            RelationJournal.Write(connection, source.Home, T0.AddMinutes(2), BackupScope.Full);
         }
 
         var facts = RereadFacts(source.Home);

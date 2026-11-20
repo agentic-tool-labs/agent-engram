@@ -182,7 +182,7 @@ internal static partial class ReorganizeCommand
                 return false;
             }
 
-            if (BackupCommand.TakeNow(home, BackupSettings.Read(ConfigFile.Load(home.ConfigPath)), connection, stdout, stderr, "pre-reorganize") is null)
+            if (BackupCommand.TakeNow(home, BackupSettings.Read(ConfigFile.Load(home.ConfigPath)), connection, BackupScope.Authored, stdout, stderr, "pre-reorganize") is null)
             {
                 return false;
             }
