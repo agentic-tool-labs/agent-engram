@@ -81,7 +81,8 @@ public class TelemetryFeedTests
         public HangingSink()
         {
             listener.Start();
-            Url = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}/engram/";            _ = Task.Run(async () =>
+            Url = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}/engram/";
+            _ = Task.Run(async () =>
             {
                 while (true)
                 {
