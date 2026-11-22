@@ -77,11 +77,6 @@ public class HookSourceModTests
     private static void MarkClassic(SandboxHome sandbox, string sessionId = Session) =>
         Assert.True(SessionNudgeState.TryAppend(sandbox.Home.ClassicHooksStatePath, sessionId));
 
-    /// <summary>Every file in the home, the telemetry log and state files included, by size and mtime.</summary>
-    private static Dictionary<string, (long Length, DateTime Written)> Snapshot(SandboxHome sandbox) =>
-        Directory.EnumerateFiles(sandbox.Home.Root, "*", SearchOption.AllDirectories)
-            .ToDictionary(file => file, file => (new FileInfo(file).Length, File.GetLastWriteTimeUtc(file)));
-
     private static IReadOnlyList<TelemetryRecord> Records(SandboxHome sandbox, string kind)
     {
         var path = Telemetry.ResolvePath(sandbox.Home);
@@ -103,14 +98,14 @@ public class HookSourceModTests
         using var sandbox = new SandboxHome();
         MarkClassic(sandbox);
         var payload = Payload(sandbox, verb);
-        var before = Snapshot(sandbox);
+        var before = HomeSnapshot.Take(sandbox.Home.Root);
 
         var result = Run(sandbox, payload, verb, "--source", "mod");
 
         Assert.Equal(0, result.ExitCode);
         Assert.Equal(string.Empty, result.Stdout);
         Assert.Equal(string.Empty, result.Stderr);
-        Assert.Equal(before, Snapshot(sandbox));
+        Assert.Equal(before, HomeSnapshot.Take(sandbox.Home.Root));
     }
 
     [Fact]

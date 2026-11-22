@@ -121,17 +121,13 @@ public class ModApiLessonsTests
         Lesson(sandbox, "main", "Ask before deleting.");
         Telemetry.Append(sandbox.Home, new TelemetryRecord(DateTime.UtcNow.ToString("o"), "s0", TelemetryEventKind.SessionStart));
         Lessons(sandbox, new JsonObject { ["session_id"] = "s1" });
-        var before = Snapshot(sandbox.Home.Root);
+        var before = HomeSnapshot.Take(sandbox.Home.Root);
 
         for (var i = 0; i < 3; i++)
         {
             Assert.Equal(200, Lessons(sandbox, new JsonObject { ["session_id"] = "s1" }).Status);
         }
 
-        Assert.Equal(before, Snapshot(sandbox.Home.Root));
+        Assert.Equal(before, HomeSnapshot.Take(sandbox.Home.Root));
     }
-
-    private static Dictionary<string, (long Size, DateTime Modified)> Snapshot(string root) =>
-        Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-            .ToDictionary(path => path, path => (new FileInfo(path).Length, File.GetLastWriteTimeUtc(path)));
 }
