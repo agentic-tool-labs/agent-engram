@@ -230,6 +230,7 @@ for (const [verb, call] of [
 test('Read matches neither guard nor file-touched', async ($, on) => {
   const r = rig(on)
   await $.tool.call({ tool: 'Read', file_path: '/repo/a' } as never)
+  await r.settle()
   expect(r.router.processCalls.filter((c) => c.argv[1] === 'hook').length).toBe(0)
 })
 
