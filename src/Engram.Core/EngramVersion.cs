@@ -2,5 +2,5 @@ namespace Engram.Core;
 
 public static class EngramVersion
 {
-    public const string Current = "1.3.18";
+    public const string Current = "1.4.0";
 }
