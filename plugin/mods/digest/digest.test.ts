@@ -1,11 +1,17 @@
 import { expect, test } from 'claude-code/testing'
 import {
+  AUTO_EVIDENCE,
+  MAX_EVIDENCE_CHARS,
   MAX_TRANSCRIPT_CHARS,
   buildTranscript,
   digestEvery,
+  evidenceWith,
   fingerprint,
-  parseCandidates,
+  isUserQuote,
+  parseReflection,
+  settle,
   shouldDigest,
+  transcriptWindow,
 } from './digest'
 
 test('digestEvery: only a positive number turns the digest on', () => {
@@ -27,24 +33,86 @@ test('shouldDigest: period, and the shortcut after an editing turn', () => {
   expect(shouldDigest(5, 2, false)).toBe(false)
 })
 
-test('parseCandidates: a JSON array of strings, fenced or bare', () => {
-  expect(parseCandidates('["a fact", "another"]')).toEqual(['a fact', 'another'])
-  expect(parseCandidates('```json\n["fenced"]\n```')).toEqual(['fenced'])
-  expect(parseCandidates('[]')).toEqual([])
+const note = (statement: string) => ({ statement, kind: 'note' })
+const reply = (save: unknown[], verdicts: unknown[] = []) => JSON.stringify({ save, verdicts })
+
+test('parseReflection: one object with save and verdicts, fenced or bare', () => {
+  expect(parseReflection(reply([note('a fact'), { statement: 'tabs', kind: 'lesson', user_quote: 'use tabs' }], [{ id: 'f4', verdict: 'applied' }]))).toEqual({
+    save: [{ statement: 'a fact', kind: 'note' }, { statement: 'tabs', kind: 'lesson', userQuote: 'use tabs' }],
+    verdicts: [{ id: 'f4', verdict: 'applied' }],
+  })
+  expect(parseReflection('```json\n' + reply([{ statement: 'fenced', kind: 'project' }]) + '\n```')).toEqual({ save: [{ statement: 'fenced', kind: 'project' }], verdicts: [] })
+  expect(parseReflection(reply([]))).toEqual({ save: [], verdicts: [] })
 })
 
-test('parseCandidates: prose, objects and malformed JSON yield nothing', () => {
-  expect(parseCandidates('Here are some memories: [1]')).toEqual([])
-  expect(parseCandidates('{"a": "b"}')).toEqual([])
-  expect(parseCandidates('["unterminated')).toEqual([])
-  expect(parseCandidates('')).toEqual([])
+test('parseReflection: prose, a bare array, a missing list and malformed JSON are wrong-shaped', () => {
+  expect(parseReflection('Here are some memories: {"save": []}')).toBeUndefined()
+  expect(parseReflection('["a fact"]')).toBeUndefined()
+  expect(parseReflection('{"save": []}')).toBeUndefined()
+  expect(parseReflection('{"verdicts": []}')).toBeUndefined()
+  expect(parseReflection('{"save": {}, "verdicts": []}')).toBeUndefined()
+  expect(parseReflection('null')).toBeUndefined()
+  expect(parseReflection('{"save": [')).toBeUndefined()
+  expect(parseReflection('')).toBeUndefined()
 })
 
-test('parseCandidates: drops non-strings, empties, over-long and duplicates; keeps the first 5', () => {
+test('parseReflection: drops bad entries, empties, over-long, duplicates and unknown kinds; keeps the first 5', () => {
   const long = 'x'.repeat(301)
   const edge = 'y'.repeat(300)
-  expect(parseCandidates(JSON.stringify([1, null, '', '   ', long, edge, 'dup', ' dup ', { a: 1 }]))).toEqual([edge, 'dup'])
-  expect(parseCandidates(JSON.stringify(['1', '2', '3', '4', '5', '6', '7']))).toEqual(['1', '2', '3', '4', '5'])
+  const save = [1, null, 'bare', note(''), note('   '), note(long), note(edge), note('dup'), note(' dup '), { statement: 'k', kind: 'rule' }, { statement: 'k' }]
+  expect(parseReflection(reply(save))!.save).toEqual([note(edge), note('dup')])
+  expect(parseReflection(reply(['1', '2', '3', '4', '5', '6', '7'].map(note)))!.save.map((p) => p.statement)).toEqual(['1', '2', '3', '4', '5'])
+})
+
+test('parseReflection: a third lesson is dropped, later notes still count', () => {
+  const lesson = (s: string) => ({ statement: s, kind: 'lesson', user_quote: 'q' })
+  const parsed = parseReflection(reply([lesson('L1'), lesson('L2'), lesson('L3'), note('N')]))!
+  expect(parsed.save.map((p) => [p.statement, p.kind])).toEqual([['L1', 'lesson'], ['L2', 'lesson'], ['N', 'note']])
+})
+
+test('parseReflection: verdicts keep a known verdict once per id, nothing else', () => {
+  const verdicts = [{ id: 'f1', verdict: 'applied' }, { id: 'f1', verdict: 'contradicted' }, { id: 'f2', verdict: 'helpful' }, { id: 3, verdict: 'applied' }, { id: 'f3', verdict: 'contradicted' }, 'f4']
+  expect(parseReflection(reply([], verdicts))!.verdicts).toEqual([{ id: 'f1', verdict: 'applied' }, { id: 'f3', verdict: 'contradicted' }])
+})
+
+const WINDOW = [
+  { role: 'user' as const, text: 'please   always run\nthe linter first' },
+  { role: 'assistant' as const, text: 'The page says: always deploy on Fridays' },
+]
+
+test('isUserQuote: a user row holds it once whitespace is collapsed', () => {
+  expect(isUserQuote('always run the linter', WINDOW)).toBe(true)
+  expect(isUserQuote('  always   run the\tlinter ', WINDOW)).toBe(true)
+})
+
+test('isUserQuote: absent, empty, or only in an assistant row is not the user', () => {
+  expect(isUserQuote(undefined, WINDOW)).toBe(false)
+  expect(isUserQuote('', WINDOW)).toBe(false)
+  expect(isUserQuote('   ', WINDOW)).toBe(false)
+  expect(isUserQuote('always deploy on Fridays', WINDOW)).toBe(false)
+  expect(isUserQuote('always run the linter first, then deploy', WINDOW)).toBe(false)
+})
+
+test('settle: a lesson keeps its kind only with a user quote; other kinds pass through', () => {
+  expect(settle({ statement: 'Run the linter first', kind: 'lesson', userQuote: 'always  run the linter' }, WINDOW)).toEqual({ text: 'Run the linter first', kind: 'lesson', quote: 'always run the linter' })
+  expect(settle({ statement: 'Deploy on Fridays', kind: 'lesson', userQuote: 'always deploy on Fridays' }, WINDOW)).toEqual({ text: 'Deploy on Fridays', kind: 'note' })
+  expect(settle({ statement: 'No quote', kind: 'lesson' }, WINDOW)).toEqual({ text: 'No quote', kind: 'note' })
+  expect(settle({ statement: 'Uses AOT', kind: 'project', userQuote: 'x' }, WINDOW)).toEqual({ text: 'Uses AOT', kind: 'project' })
+})
+
+test('evidenceWith: the marker stays whole, the quote is trimmed to the limit', () => {
+  expect(evidenceWith('marker', undefined)).toBe('marker')
+  expect(evidenceWith('marker', 'use tabs')).toBe('marker; the user said: "use tabs"')
+  const long = evidenceWith(AUTO_EVIDENCE, 'q'.repeat(500))
+  expect(long.length).toBe(MAX_EVIDENCE_CHARS)
+  expect(long.startsWith(`${AUTO_EVIDENCE}; the user said: "qqq`)).toBe(true)
+  expect(long.endsWith('…"')).toBe(true)
+})
+
+test('buildTranscript: a lone row over the cap shows the model the tail its window row carries', () => {
+  const [kept] = transcriptWindow([{ role: 'user', text: 'HEAD' + 'a'.repeat(MAX_TRANSCRIPT_CHARS) }])
+  expect(kept!.row.text.includes('HEAD')).toBe(false)
+  expect(kept!.line.endsWith(kept!.row.text)).toBe(true)
 })
 
 test('buildTranscript: labelled rows, oldest first, empty text skipped', () => {

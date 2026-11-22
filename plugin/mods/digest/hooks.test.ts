@@ -19,7 +19,12 @@ type Rig = {
   clock: ReturnType<typeof mock.clock>
   reply: { text: string; isAnswered: boolean }
   selection: { text: string } | undefined
+  agentType: string | undefined
 }
+
+const reflection = (save: unknown[], verdicts: unknown[] = []) => JSON.stringify({ save, verdicts })
+const notes = (...statements: string[]) => statements.map((statement) => ({ statement, kind: 'note' }))
+const EMPTY = reflection([])
 
 const COMPLETE_USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
 
@@ -42,10 +47,12 @@ function rigUp(on: On, ops: Record<string, FetchHandler> = {}): Rig {
     filled: [],
     registered: [],
     clock,
-    reply: { text: '[]', isAnswered: true },
+    reply: { text: EMPTY, isAnswered: true },
     selection: undefined,
+    agentType: undefined,
   }
   on('session.messages', () => ({ value: rig.rows }))
+  on('session.info', () => ({ value: { transcriptPath: '', ...(rig.agentType === undefined ? {} : { agentType: rig.agentType }) } }) as never)
   on('model.complete', (_$, e) => {
     rig.completions.push({ prompt: e.prompt, system: e.system })
     return {
@@ -105,10 +112,19 @@ test('N = 0: turns complete, no model call, ever', async ($, on) => {
   for (let i = 0; i < 10; i++) await turn($)
   await rig.clock.advance(1000)
   expect(rig.completions.length).toBe(0)
+  expect(rig.fetches).toEqual([])
+})
+
+test('N = 0 with auto-save on and lessons to judge: no lessons call, no model call, no write', { options: { digest_every_n_turns: 0, digest_auto_save: true } }, async ($, on) => {
+  const rig = proposing(on, 'none', { lessons: () => ({ status: 200, json: { current: [{ id: 'f9', text: 'Run the linter' }] } }) })
+  for (let i = 0; i < 10; i++) await turn($)
+  await rig.clock.advance(1000)
+  expect(rig.completions.length).toBe(0)
+  expect(rig.fetches).toEqual([])
 })
 
 const ON = (n: number) => ({ options: { digest_every_n_turns: n } })
-const CANDIDATES = JSON.stringify(['Jim prefers tabs in Go files', 'The build uses Native AOT'])
+const CANDIDATES = reflection(notes('Jim prefers tabs in Go files', 'The build uses Native AOT'))
 
 /** A rig whose model proposes `CANDIDATES` and whose recall says `coverage` for every query. */
 function proposing(on: On, coverage = 'none', ops: Record<string, FetchHandler> = {}): Rig {
@@ -172,6 +188,7 @@ test('subagent, aborted and errored turns are not counted', ON(1), async ($, on)
   await turn($, { reason: 'error' })
   await rig.clock.advance(0)
   expect(rig.completions.length).toBe(0)
+  expect(rig.fetches).toEqual([])
   await turn($)
   await rig.clock.advance(0)
   expect(rig.completions.length).toBe(1)
@@ -202,7 +219,7 @@ test('the model sees the conversation text, not tool output, and the system prom
   await turn($)
   await rig.clock.advance(0)
   expect(rig.completions[0]!.prompt).toBe('User: we use tabs in Go\n\nAssistant: noted')
-  expect(rig.completions[0]!.system?.includes('JSON array')).toBe(true)
+  expect(rig.completions[0]!.system?.includes('JSON object')).toBe(true)
 })
 
 test('candidates open the pane unfocused and toast once; nothing is written', ON(1), async ($, on) => {
@@ -223,7 +240,7 @@ test('prose, an unanswered model and an empty array show nothing', ON(1), async 
   rig.rows.push(row('user', 'next'))
   await turn($)
   await rig.clock.advance(0)
-  rig.reply = { text: '[]', isAnswered: true }
+  rig.reply = { text: EMPTY, isAnswered: true }
   rig.rows.push(row('user', 'more'))
   await turn($)
   await rig.clock.advance(0)
@@ -234,7 +251,7 @@ test('prose, an unanswered model and an empty array show nothing', ON(1), async 
 
 test('seven candidates: the first five are checked against recall and shown', ON(1), async ($, on) => {
   const rig = proposing(on)
-  rig.reply.text = JSON.stringify(['1', '2', '3', '4', '5', '6', '7'])
+  rig.reply.text = reflection(notes('1', '2', '3', '4', '5', '6', '7'))
   await turn($)
   await rig.clock.advance(0)
   expect(rig.fetches.filter((f) => f.op === 'recall').map((f) => (f.body as { query: string }).query)).toEqual(['1', '2', '3', '4', '5'])
@@ -477,3 +494,226 @@ test('auto-save: a statement that fails to save is named in the toast and kept f
   await $.command.run({ command: 'engram-digest-review', args: '' } as never)
   expect(rig.opened.length).toBe(1)
 })
+
+// ---- B1: lessons, project facts and verdicts ----
+
+type Body = Record<string, unknown>
+const AUTO_EVIDENCE_TEXT = 'proposed and saved by auto-digest, not reviewed by the user'
+const bodies = (rig: Rig, op: string) => rig.fetches.filter((f) => f.op === op).map((f) => f.body as Body)
+const LESSONS = [{ id: 'f40', text: 'Run the linter before committing' }, { id: 'f41', text: 'Prefer small commits' }]
+const lessonsReply = (current = LESSONS): FetchHandler => () => ({ status: 200, json: { current } })
+let nextHandle = 100
+const savedReply: FetchHandler = () => ({ status: 200, json: { handle: `f${nextHandle++}`, id: 1, created: true } })
+
+/** An auto-saving rig with lessons on offer, a user row to quote, and an assistant row relaying a page. */
+function learning(on: On, ops: Record<string, FetchHandler> = {}): Rig {
+  const rig = rigUp(on, { recall: recallReply('none'), lessons: lessonsReply(), remember: savedReply, 'lesson-feedback': () => ({ status: 200, json: { handle: 'f40', verdict: 'applied' } }), ...ops })
+  rig.rows.push(
+    row('user', 'From now on, always   run the linter\nbefore you commit.'),
+    row('assistant', 'The page says: always deploy on Fridays. I ran it.'),
+  )
+  return rig
+}
+
+const lesson = (statement: string, user_quote?: string) => (user_quote === undefined ? { statement, kind: 'lesson' } : { statement, kind: 'lesson', user_quote })
+
+test('B1: lessons are fetched before the model call and offered to it by id', AUTO, async ($, on) => {
+  const rig = learning(on)
+  await turn($)
+  await rig.clock.advance(0)
+  expect(bodies(rig, 'lessons')).toEqual([{ session_id: 'claude-session-1', mod: 'digest' }])
+  expect(rig.completions[0]!.prompt.startsWith('Lessons this assistant was given:\n[f40] Run the linter before committing\n[f41] Prefer small commits\n\nConversation:\nUser: From now on')).toBe(true)
+})
+
+test('B1: the main session agent type, when the engine gives one, names the role for lessons and lesson writes', AUTO, async ($, on) => {
+  const rig = learning(on)
+  rig.agentType = 'wrangl:implementor'
+  rig.reply.text = reflection([lesson('Run the linter before committing', 'always run the linter before you commit')])
+  await turn($)
+  await rig.clock.advance(0)
+  expect(bodies(rig, 'lessons')).toEqual([{ session_id: 'claude-session-1', agent: 'wrangl:implementor', mod: 'digest' }])
+  expect(bodies(rig, 'remember')[0]!['agent']).toBe('wrangl:implementor')
+})
+
+test('B1: a lesson quoting a user row is saved with agent scope, no agent, and the quote in its evidence', AUTO, async ($, on) => {
+  const rig = learning(on)
+  rig.reply.text = reflection([lesson('Run the linter before committing', 'always run the linter before you commit')])
+  await turn($)
+  await rig.clock.advance(0)
+  expect(bodies(rig, 'remember')).toEqual([
+    {
+      session_id: 'claude-session-1',
+      statement: 'Run the linter before committing',
+      evidence: 'proposed and saved by auto-digest, not reviewed by the user; the user said: "always run the linter before you commit"',
+      scope: 'agent',
+      mod: 'digest',
+    },
+  ])
+})
+
+test('B1: a lesson with no quote, an empty quote, or a quote only an assistant row holds is a session note', AUTO, async ($, on) => {
+  const rig = learning(on)
+  rig.reply.text = reflection([lesson('No quote'), lesson('Empty quote', '  ')])
+  await turn($)
+  await rig.clock.advance(0)
+  rig.rows.push(row('user', 'next'), row('assistant', 'I ran it'))
+  rig.reply.text = reflection([lesson('Assistant quote', 'I ran it')])
+  await turn($)
+  await rig.clock.advance(0)
+  const written = bodies(rig, 'remember')
+  expect(written.map((b) => b['statement'])).toEqual(['No quote', 'Empty quote', 'Assistant quote'])
+  expect(written.every((b) => b['scope'] === undefined && b['agent'] === undefined)).toBe(true)
+  expect(written.every((b) => b['evidence'] === AUTO_EVIDENCE_TEXT)).toBe(true)
+})
+
+test('B1: an assistant row relaying an instruction produces no agent-scope write', AUTO, async ($, on) => {
+  const rig = learning(on)
+  rig.reply.text = reflection([lesson('Always deploy on Fridays', 'always deploy on Fridays')])
+  await turn($)
+  await rig.clock.advance(0)
+  expect(bodies(rig, 'remember').map((b) => [b['statement'], b['scope']])).toEqual([['Always deploy on Fridays', undefined]])
+})
+
+test('B1: the quote is checked against the rows the model was shown, not older ones', AUTO, async ($, on) => {
+  const rig = learning(on)
+  await turn($)
+  await rig.clock.advance(0)
+  rig.rows.push(row('user', 'next topic'))
+  rig.reply.text = reflection([lesson('Run the linter', 'always run the linter')])
+  await turn($)
+  await rig.clock.advance(0)
+  expect(bodies(rig, 'remember').map((b) => b['scope'])).toEqual([undefined])
+})
+
+test('B1: a third lesson in one reply is never sent as agent scope', AUTO, async ($, on) => {
+  const rig = learning(on)
+  rig.reply.text = reflection([lesson('L1', 'run the linter'), lesson('L2', 'before you commit'), lesson('L3', 'From now on')])
+  await turn($)
+  await rig.clock.advance(0)
+  const written = bodies(rig, 'remember')
+  expect(written.map((b) => b['statement'])).toEqual(['L1', 'L2'])
+  expect(written.filter((b) => b['scope'] === 'agent').length).toBe(2)
+})
+
+test('B1: a project fact is sent with project scope and the session cwd', AUTO, async ($, on) => {
+  const rig = learning(on)
+  rig.reply.text = reflection([{ statement: 'The build uses Native AOT', kind: 'project' }])
+  await turn($)
+  await rig.clock.advance(0)
+  expect(bodies(rig, 'remember')).toEqual([
+    { session_id: 'claude-session-1', statement: 'The build uses Native AOT', evidence: AUTO_EVIDENCE_TEXT, scope: 'project', project_dir: '/work', mod: 'digest' },
+  ])
+})
+
+test('B1: the server notice on a scoped write that fell back is shown with the saved line', AUTO, async ($, on) => {
+  const rig = learning(on, { remember: () => ({ status: 200, json: { handle: 'f7', id: 7, created: true, notice: 'project unresolved' } }) })
+  rig.reply.text = reflection([{ statement: 'The build uses Native AOT', kind: 'project' }])
+  await turn($)
+  await rig.clock.advance(0)
+  expect(rig.toasts).toEqual(['Auto-saved [f7] The build uses Native AOT (project unresolved)'])
+})
+
+test('B1: the duplicate check runs for every kind', AUTO, async ($, on) => {
+  const rig = learning(on, { recall: recallReply('high') })
+  rig.reply.text = reflection([{ statement: 'N', kind: 'note' }, { statement: 'P', kind: 'project' }, lesson('L', 'run the linter')])
+  await turn($)
+  await rig.clock.advance(0)
+  expect(bodies(rig, 'recall').map((b) => b['query'])).toEqual(['N', 'P', 'L'])
+  expect(bodies(rig, 'remember')).toEqual([])
+})
+
+test('B1: verdicts are sent for offered lessons, once per fact per session', AUTO, async ($, on) => {
+  const rig = learning(on)
+  rig.reply.text = reflection([], [{ id: 'f40', verdict: 'applied' }, { id: 'f41', verdict: 'contradicted' }])
+  await turn($)
+  await rig.clock.advance(0)
+  rig.rows.push(row('user', 'more'))
+  rig.reply.text = reflection([], [{ id: 'f40', verdict: 'contradicted' }])
+  await turn($)
+  await rig.clock.advance(0)
+  expect(bodies(rig, 'lesson-feedback')).toEqual([
+    { session_id: 'claude-session-1', fact_id: 'f40', verdict: 'applied', mod: 'digest' },
+    { session_id: 'claude-session-1', fact_id: 'f41', verdict: 'contradicted', mod: 'digest' },
+  ])
+})
+
+test('B1: a verdict for an id the lessons reply did not offer is dropped', AUTO, async ($, on) => {
+  const rig = learning(on)
+  rig.reply.text = reflection([], [{ id: 'f99', verdict: 'applied' }, { id: 'f40', verdict: 'applied' }])
+  await turn($)
+  await rig.clock.advance(0)
+  expect(bodies(rig, 'lesson-feedback').map((b) => b['fact_id'])).toEqual(['f40'])
+})
+
+test('B1: verdicts are not sent when auto-save is off', ON(1), async ($, on) => {
+  const rig = learning(on)
+  rig.reply.text = reflection(notes('A note'), [{ id: 'f40', verdict: 'applied' }])
+  await turn($)
+  await rig.clock.advance(0)
+  expect(bodies(rig, 'lesson-feedback')).toEqual([])
+  expect(rig.opened.length).toBe(1)
+})
+
+test('B1: wrong-shaped output saves nothing and sends no verdict', AUTO, async ($, on) => {
+  const rig = learning(on)
+  const replies = [
+    JSON.stringify(['A note']),
+    '{"save": [{"statement": "A note", "kind": "note"}]}',
+    'Sure! {"save": [{"statement": "A note", "kind": "note"}], "verdicts": [{"id": "f40", "verdict": "applied"}]}',
+  ]
+  for (const [i, text] of replies.entries()) {
+    rig.rows.push(row('user', `turn ${i}`))
+    rig.reply.text = text
+    await turn($)
+    await rig.clock.advance(0)
+  }
+  expect(rig.completions.length).toBe(3)
+  expect(bodies(rig, 'remember')).toEqual([])
+  expect(bodies(rig, 'lesson-feedback')).toEqual([])
+  expect(rig.toasts).toEqual([])
+})
+
+for (const [label, reply] of [
+  ['server down', { status: 500, json: { error: 'boom' } }],
+  ['a 4xx', { status: 400, json: { error: 'bad_request', detail: "'f40' is not a live role lesson" } }],
+] as const) {
+  test(`B1: ${label} on lessons and lesson-feedback never fails the turn, and the saves still happen`, AUTO, async ($, on) => {
+    let lessonsCalls = 0
+    const rig = learning(on, {
+      lessons: (call) => (lessonsCalls++ === 0 ? lessonsReply()(call) : reply),
+      'lesson-feedback': () => reply,
+    })
+    rig.reply.text = reflection(notes('First'), [{ id: 'f40', verdict: 'applied' }])
+    const first = await turn($)
+    await rig.clock.advance(0)
+    rig.rows.push(row('user', 'more'))
+    rig.reply.text = reflection(notes('Second'), [{ id: 'f41', verdict: 'applied' }])
+    const second = await turn($)
+    await rig.clock.advance(0)
+    expect(first).toEqual({ text: '' })
+    expect(second).toEqual({ text: '' })
+    expect(bodies(rig, 'remember').map((b) => b['statement'])).toEqual(['First', 'Second'])
+    expect(bodies(rig, 'lesson-feedback').map((b) => b['fact_id'])).toEqual(['f40'])
+  })
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  const pane = ($: Engine) => $.ui.mount({ plugin: 'engram', surface, component: 'Pane', requestId: 'engram-digest', props: {} } as never)
+
+  test(`[${surface}] B1: the review pane shows each kind and Save files each by the same scope rules`, ON(1), async ($, on) => {
+    const rig = learning(on)
+    rig.reply.text = reflection([{ statement: 'N', kind: 'note' }, { statement: 'P', kind: 'project' }, lesson('L', 'run the linter'), lesson('R', 'always deploy on Fridays')])
+    await turn($)
+    await rig.clock.advance(0)
+    const ui = await pane($)
+    for (const shown of [' note · N', ' project · P', ' lesson · L', ' note · R']) expect(await ui.find({ type: 'Text', text: shown })).toBeDefined()
+    for (let i = 0; i < 4; i++) await ui.press({ key: `tick${i}` })
+    await ui.press({ key: 'save' })
+    expect(bodies(rig, 'remember').map((b) => [b['statement'], b['scope'] ?? null, b['evidence']])).toEqual([
+      ['N', null, 'proposed by auto-digest, approved by the user'],
+      ['P', 'project', 'proposed by auto-digest, approved by the user'],
+      ['L', 'agent', 'proposed by auto-digest, approved by the user; the user said: "run the linter"'],
+      ['R', null, 'proposed by auto-digest, approved by the user'],
+    ])
+  })
+}

@@ -10,13 +10,18 @@ import {
   EVIDENCE,
   NO_SELECTION,
   PANE,
-  buildTranscript,
   digestAutoSave,
   digestEvery,
+  evidenceWith,
   fingerprint,
-  parseCandidates,
+  lessonsBlock,
+  parseReflection,
+  settle,
   shouldDigest,
+  transcriptWindow,
 } from './digest'
+import type { Lesson, Verdict } from './digest'
+import type { DigestCandidate } from '../shared/state'
 import { once } from '../shared/guard'
 
 const MOD = 'digest'
@@ -37,19 +42,43 @@ const bindIo = ($: EngineInterface): ModIo => ({
   updateShared: (fn) => update($, SHARED, fn),
 })
 
-/** One `remember` per statement; reports the saved handles and which statements failed, and why. */
-async function rememberAll($: EngineInterface, texts: string[], evidence: string) {
+/** The main session's agent type, when the engine gives one; otherwise the server files under `main`. */
+async function roleOf($: EngineInterface): Promise<string | undefined> {
+  try {
+    const { agentType } = await $.session.info()
+    return agentType === undefined || agentType.trim() === '' ? undefined : agentType
+  } catch {
+    return undefined
+  }
+}
+
+type RememberReply = { handle: string; id: number; created: boolean; notice?: string }
+
+/** One `remember` per statement, addressed by its kind; reports the saved handles and which statements failed, and why. */
+async function rememberAll($: EngineInterface, items: readonly DigestCandidate[], marker: string) {
   const io = bindIo($)
   const sessionId = await io.sessionId()
+  const role = await roleOf($)
   const saved: string[] = []
   const savedLines: string[] = []
   const failed: string[] = []
   const failedTexts = new Set<string>()
-  for (const text of texts) {
-    const res = await modApi(io, 'remember', { session_id: sessionId, statement: text, evidence }, { mod: MOD })
+  for (const { text, kind, quote } of items) {
+    // Agent scope needs the quote `settle` found in a user row; a lesson without one is a session note.
+    const isLesson = kind === 'lesson' && quote !== undefined
+    const body: Record<string, string> = { session_id: sessionId, statement: text, evidence: evidenceWith(marker, isLesson ? quote : undefined) }
+    if (isLesson) {
+      body['scope'] = 'agent'
+      if (role !== undefined) body['agent'] = role
+    } else if (kind === 'project') {
+      body['scope'] = 'project'
+      body['project_dir'] = await $.session.cwd()
+    }
+    const res = await modApi<RememberReply>(io, 'remember', body, { mod: MOD })
     if (res.ok) {
-      saved.push(`[${res.value.handle}]`)
-      savedLines.push(`[${res.value.handle}] ${text}`)
+      const notice = res.value.notice === undefined ? '' : ` (${res.value.notice})`
+      saved.push(`[${res.value.handle}]${notice}`)
+      savedLines.push(`[${res.value.handle}] ${text}${notice}`)
     } else {
       failed.push(`Not saved: "${text}" (${res.reason})`)
       failedTexts.add(text)
@@ -70,27 +99,75 @@ async function runDigest($: EngineInterface, autoSave: boolean): Promise<void> {
     const last = messages.at(-1)
     await update($, DIGEST, (s) => ({ ...s, seenMessages: messages.length, lastSeen: last === undefined ? '' : fingerprint(last) }))
 
-    const transcript = buildTranscript(fresh)
-    if (transcript === '') return
-
-    const reply = await $.model.complete({ model: 'haiku', system: DIGEST_SYSTEM, prompt: transcript, maxTokens: 600 })
-    if (!reply.isAnswered) return
-    const proposed = parseCandidates(reply.text)
-    if (proposed.length === 0) return
+    const window = transcriptWindow(fresh)
+    if (window.length === 0) return
+    const transcript = window.map((k) => k.line).join('\n\n')
 
     const io = bindIo($)
     const sessionId = await io.sessionId()
+    const lessons = await currentLessons($, sessionId)
+    const reply = await $.model.complete({ model: 'haiku', system: DIGEST_SYSTEM, prompt: lessonsBlock(lessons) + transcript, maxTokens: 600 })
+    if (!reply.isAnswered) return
+    const reflection = parseReflection(reply.text)
+    if (reflection === undefined) return
+
+    const rows = window.map((k) => k.row)
+    await proposeOrSave($, sessionId, reflection.save.map((p) => settle(p, rows)), autoSave)
+    if (autoSave) await sendVerdicts($, sessionId, reflection.verdicts, lessons)
+  } catch {
+    // A digest is a convenience; nothing it hits may surface.
+  }
+}
+
+/** The role's lessons as the server would deliver them now; none when the call fails. */
+async function currentLessons($: EngineInterface, sessionId: string): Promise<Lesson[]> {
+  const role = await roleOf($)
+  const body: Record<string, string> = role === undefined ? { session_id: sessionId } : { session_id: sessionId, agent: role }
+  const res = await modApi<{ current: Lesson[] }>(bindIo($), 'lessons', body, { mod: MOD })
+  return res.ok && Array.isArray(res.value.current) ? res.value.current : []
+}
+
+/** One `lesson-feedback` per lesson the reply judged, at most once per fact per session; a failure is dropped. */
+async function sendVerdicts($: EngineInterface, sessionId: string, verdicts: readonly Verdict[], lessons: readonly Lesson[]): Promise<void> {
+  try {
+    const offered = new Set(lessons.map((l) => l.id))
+    // ponytail: the judged set lives in mod state, so a mod reload may send one verdict twice; a store-side check if that matters.
+    let due: Verdict[] = []
+    await update($, DIGEST, (s) => {
+      const judged = s.judgedSession === sessionId ? (s.judged ?? []) : []
+      due = verdicts.filter((v) => offered.has(v.id) && !judged.includes(v.id))
+      return { ...s, judgedSession: sessionId, judged: [...judged, ...due.map((v) => v.id)] }
+    })
+    const io = bindIo($)
+    for (const { id, verdict } of due) {
+      await modApi(io, 'lesson-feedback', { session_id: sessionId, fact_id: id, verdict }, { mod: MOD })
+    }
+  } catch {
+    // A verdict is a judgement worth having, never one worth failing over.
+  }
+}
+
+/** Drops what recall already covers, then saves the rest or puts it in the review pane. */
+async function proposeOrSave(
+  $: EngineInterface,
+  sessionId: string,
+  proposed: readonly Omit<DigestCandidate, 'ticked'>[],
+  autoSave: boolean,
+): Promise<void> {
+  try {
+    if (proposed.length === 0) return
+    const io = bindIo($)
     const known = await Promise.all(
-      proposed.map(async (statement) => {
-        const found = await modApi(io, 'recall', { session_id: sessionId, query: statement, budget_tokens: 100 }, { mod: MOD })
+      proposed.map(async ({ text }) => {
+        const found = await modApi(io, 'recall', { session_id: sessionId, query: text, budget_tokens: 100 }, { mod: MOD })
         return found.ok && found.value.coverage === 'high'
       }),
     )
-    const candidates = proposed.filter((_, i) => !known[i]).map((text) => ({ text, ticked: false }))
+    const candidates: DigestCandidate[] = proposed.filter((_, i) => !known[i]).map((p) => ({ ...p, ticked: false }))
     if (candidates.length === 0) return
 
     if (autoSave) {
-      const { savedLines, failed, failedTexts } = await rememberAll($, candidates.map((c) => c.text), AUTO_EVIDENCE)
+      const { savedLines, failed, failedTexts } = await rememberAll($, candidates, AUTO_EVIDENCE)
       // A statement that did not save stays for /engram-digest-review; nothing retries on its own.
       const kept = candidates.filter((c) => failedTexts.has(c.text))
       if (kept.length > 0) await update($, DIGEST, (s) => ({ ...s, candidates: kept }))
@@ -114,7 +191,7 @@ async function saveTicked($: EngineInterface): Promise<void> {
   const ticked = candidates.filter((c) => c.ticked)
   if (ticked.length === 0) return
 
-  const { saved, failed, failedTexts } = await rememberAll($, ticked.map((c) => c.text), EVIDENCE)
+  const { saved, failed, failedTexts } = await rememberAll($, ticked, EVIDENCE)
   // Rows that did not save stay, unticked, so the user can press Save again; nothing retries on its own.
   const kept = candidates.filter((c) => failedTexts.has(c.text)).map((c) => ({ ...c, ticked: false }))
   await update($, DIGEST, (s) => ({ ...s, candidates: kept }))
@@ -238,7 +315,7 @@ export const register: Register = (on, options) => {
                   }))
                 }
               />
-              <Text> {c.text}</Text>
+              <Text>{` ${c.kind ?? 'note'} · ${c.text}`}</Text>
             </Box>
           ))}
           <Box>
