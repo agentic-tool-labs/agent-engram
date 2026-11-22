@@ -130,7 +130,11 @@ export type BeliefDiffState = {
   skipToastShown: boolean
 }
 
-export type DigestCandidate = { text: string; ticked: boolean }
+/** How a statement is filed: `note` a session note, `project` under the session's repository, `lesson` under the role. */
+export type DigestKind = 'note' | 'project' | 'lesson'
+
+/** `quote` is set only on a lesson whose quote was found in a user row; absent `kind` reads as `note`. */
+export type DigestCandidate = { text: string; ticked: boolean; kind?: DigestKind; quote?: string }
 
 export type DigestState = {
   /** Main-session turns completed since the last digest ran. */
@@ -143,6 +147,10 @@ export type DigestState = {
   lastSeen: string
   /** The latest batch awaiting Save or Skip, in display order. */
   candidates: DigestCandidate[]
+  /** The session id `judged` belongs to; a different current id resets it. */
+  judgedSession?: string
+  /** Lesson handles a verdict was already sent for in the session named by `judgedSession`. */
+  judged: string[]
 }
 
 /** The pane's toggles; a row belongs to exactly one, and a marker to none. */
