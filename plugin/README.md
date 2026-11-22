@@ -15,7 +15,7 @@ Memory lives in a SQLite store under `~/.engram`, and the server listens on `127
 
 - **The `engram` binary.** The plugin ships none. Its hooks look for `$ENGRAM_BIN`, then
   `$HOME/.local/bin/engram`, then `engram` on `PATH`.
-- **An initialised home.** Until `engram init` has run, every hook does nothing.
+- **An initialised home.** Until `engram init` has run, every `engram hook` command does nothing.
 - **A running server.** Session start runs `engram start`, which is idempotent; `/engram:start`
   starts it by hand.
 
