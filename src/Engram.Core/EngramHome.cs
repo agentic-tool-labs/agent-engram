@@ -119,6 +119,14 @@ public sealed class EngramHome
     public string LookupNudgeOutcomePath { get; }
 
     /// <summary>
+    /// Sessions whose classic <c>SessionStart</c> hook ran, one <c>session_id</c> per line, read and
+    /// written through <see cref="SessionNudgeState"/>. A hook verb called with <c>--source mod</c>
+    /// for one of these sessions stands down, so the bridge mod never doubles a classic hook (D107).
+    /// Its own file, as each nudge has its own, so no reader spends another's mark.
+    /// </summary>
+    public string ClassicHooksStatePath { get; }
+
+    /// <summary>
     /// Per-checkout enrollment and last-index events, one per line, for the <c>lookup-nudge</c>
     /// hook to read without opening the database. See <see cref="RepoIndexStamp"/>.
     /// </summary>
@@ -159,6 +167,7 @@ public sealed class EngramHome
         MemoryGuardStatePath = Path.Combine(root, "memory-guard.state");
         LookupNudgeStatePath = Path.Combine(root, "lookup-nudge.state");
         LookupNudgeOutcomePath = Path.Combine(root, "lookup-nudge-outcome.state");
+        ClassicHooksStatePath = Path.Combine(root, "classic-hooks.state");
         RepoIndexStampPath = Path.Combine(root, "repo-index.state");
         ClaudeSettingsPath = Path.Combine(userProfileDirectory, ".claude", "settings.json");
         ClaudeProjectsDir = Path.Combine(userProfileDirectory, ".claude", "projects");

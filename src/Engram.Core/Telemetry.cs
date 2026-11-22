@@ -420,7 +420,14 @@ public sealed record TelemetryRecord(
     /// <c>contradicted</c>: a reflection model's judgement, unreviewed (D106). Absent on every other kind.
     /// </summary>
     [property: JsonPropertyName("verdict"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? Verdict = null);
+    string? Verdict = null,
+
+    /// <summary>
+    /// <c>mod</c> on a record a hook verb wrote when the bridge mod called it with
+    /// <c>--source mod</c>; absent on a classic hook's record, so no existing record changes (D107).
+    /// </summary>
+    [property: JsonPropertyName("source"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Source = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

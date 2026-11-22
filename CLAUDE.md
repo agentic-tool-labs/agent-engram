@@ -925,6 +925,14 @@ any `Host` that is not loopback, on every route. Deleting any of those three gua
 of the suite green, which is why each has its own falsification row. Lookups (`fact`, `history`,
 `captures`, `path-facts`, `tail`, `lessons`) write nothing, and handlers log nothing from the request (D76).
 
+**The `bridge` mod is the one exception: it runs hook verbs, never `/mod/v1`.** On managed Claude Code
+classic hooks are skipped, so the bridge calls `engram hook <verb> --source mod`. Each verb already is one
+process per call, `file-touched` must work with the server down, and a second implementation would drift.
+Classic `session-start` writes its session id to `classic-hooks.state`, and a `--source mod` call for a
+session in that file exits 0 and writes nothing. That file is its own: shared with `memory-guard.state`, the
+mark would spend memory-guard's one deny. A mod-sourced `session-start` writes no mark, or the bridge would
+stand its own calls down. Without `--source` no verb reads the file (D107).
+
 **Background work yields to the model, and never for longer than its cap.** The server counts
 foreground work in `ForegroundWork`, entered in exactly two places: a call-tool filter for MCP and
 the `/mod/v1` route for every op that is not a lookup. Never per tool, so a new tool cannot forget

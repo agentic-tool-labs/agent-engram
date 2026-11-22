@@ -7276,3 +7276,62 @@ it aside changes only what the primer delivers.
 `fact_vec` (D93), and its rows cascade out with their fact. It is not in the journal, so `backup
 replay` returns facts with zero counts and selection falls back to recency for them. CLAUDE.md
 called `salience` regenerable; it no longer is, and `repair` may still delete only orphan rows.
+
+## D107 — On managed Claude Code a bridge mod runs the hook verbs, and stands down where classic hooks run
+
+**The problem.** Where an organization manages Claude Code, a user-installed plugin's classic hooks
+are skipped: every `hooks.json` entry and any mod's `classic.*` event. Mod events such as
+`session.start`, `prompt.submit`, `turn.step`, `tool.call` and `agent.spawn` still run. Only capture
+had moved to a mod (D83), so the primers, `memory-guard`, `lookup-nudge`, `file-touched`,
+`tool-observed` and the compaction digest were absent there. This comes from a read of the Claude
+Code binary and a sister project that runs this way; nothing here has been measured on a managed
+install.
+
+**The design.** One mod, `bridge`, runs the existing verbs as `engram hook <verb> --source mod`,
+with classic-shaped JSON on stdin, and parses the verb's classic-shaped stdout back. No verb is
+rewritten as a `/mod/v1` op. So mods reach Engram through `/mod/v1` (D76) *except* this bridge, for
+three reasons: each verb already is one process per call; `file-touched` must work with the server
+down and may never open the database (D4); and a second implementation of each verb would drift
+from the first, which is the D36 rule. `hooks.json` keeps its classic block, so an install with mods
+off works as before.
+
+**The stand-down is decided by the verb, not the mod.** Classic `session-start` appends its
+`session_id` to `classic-hooks.state` through `SessionNudgeState`, once per session. A verb called
+with `--source mod` for a session in that file exits 0, prints nothing and writes nothing: no
+telemetry, no spool file, no state. Where classic hooks run they win, and nothing fires twice.
+- The mark has its own file rather than sharing `memory-guard.state`. A shared file would make
+  `memory-guard` read the mark as its own once-per-session deny and never deny.
+- A `--source mod` `session-start` leaves no mark, or the bridge would stand its own later calls
+  down.
+- The mark is per session id, so a session the classic hook never saw is not stood down.
+- The classic path gains no read. Without `--source` the stand-down check is never reached, and
+  `file-touched` is today's path. `--source mod` `file-touched` reads the state file and still never
+  opens the database.
+- `--source` may follow the verb. An unknown value is treated as absent; a missing value or any
+  other argument prints usage and exits 1. A binary older than this one answers the flag the same
+  way, so the bridge is inert there.
+
+**Telemetry.** A record written by a verb called with `--source mod` carries `source: "mod"`. The
+field is omitted when null, so every classic record is byte-identical to what it was.
+
+**Doctor's `hook delivery` row** reports whether the newest `session-start` record came from
+`classic` or `mod`. It warns when the newest `mod-call` or `tool-observed` record names a session
+with no `session-start` in the log: hooks may be skipped on this install. A rule keyed on recency
+alone ("activity newer than any session start") would warn on every healthy install, because tool
+calls always follow their session's start. It is never `Broken` (D37), and an empty log is `Ok`. It
+reads the log and writes nothing.
+
+**The compaction digest is not bridged.** `session.compact` is itself skipped on managed installs.
+Where it is not skipped, the classic hooks run and the bridge stands down anyway. The digest mod's
+`turn.complete` reflection is what covers managed installs.
+
+**Known limits, accepted.**
+- A mod cannot see the main session's `agent_type`, so on a managed install an `--agent` main
+  session gets the role key `main` (D104).
+- A workflow agent's prompt rewrite is not applied on a run that keeps its script out of the
+  engine's events, so that agent gets no subagent primer.
+- The bridge's `subagent-start` record has no `agent_id`, which does not exist before the spawn.
+- A mid-turn compaction is re-primed at the next prompt, not inside the turn.
+- A rewind reads as a compaction and costs one extra primer at the next prompt.
+- Under `allowManagedHooksOnly` or `allowManagedModsOnly` nothing runs unless an administrator
+  installs Engram as a managed plugin.
