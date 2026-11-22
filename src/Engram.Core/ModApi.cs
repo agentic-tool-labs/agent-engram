@@ -278,22 +278,42 @@ public static class ModApi
             throw Bad(ceilingError);
         }
 
-        using var connection = EngramDatabase.OpenInitialized(home);
-        using var transaction = EngramDatabase.BeginWrite(connection);
-        var (factId, isRepeat) = SessionFacts.Append(
-            connection, transaction, sessionId, statement, request.Subject, evidence, null, DateTimeOffset.UtcNow, request.Details);
-
-        if (isRepeat)
+        var scope = request.Scope;
+        if (scope is not null && !MemoryScopes.Writable.Contains(scope))
         {
-            transaction.Rollback();
+            throw Bad($"unknown scope '{scope}'; valid scopes: {string.Join(", ", MemoryScopes.Writable)}");
         }
-        else
+
+        // A mod speaks for the main session unless it names a role (D105). Outside agent scope no
+        // agent is passed at all, so an omitted scope writes exactly what it wrote before.
+        var agent = scope == MemoryScopes.Agent ? request.Agent ?? RoleNotes.MainRole : null;
+
+        using var connection = EngramDatabase.OpenInitialized(home);
+        var resolution = ScopedRemember.Resolve(connection, scope, request.ProjectDir);
+
+        ScopedWrite write;
+        using (var transaction = EngramDatabase.BeginWrite(connection))
         {
-            transaction.Commit();
+            write = ScopedRemember.Append(
+                connection, transaction, sessionId, scope, resolution, agent, statement, request.Subject, evidence,
+                DateTimeOffset.UtcNow, request.Details);
+
+            if (write.IsRepeat)
+            {
+                transaction.Rollback();
+            }
+            else
+            {
+                transaction.Commit();
+            }
         }
 
         RecordCall(home, request, sessionId, "remember");
-        return Ok(JsonSerializer.Serialize(new ModRememberResponse(FactCatalog.HandleFor(factId), factId, !isRepeat), ModApiJsonContext.Default.ModRememberResponse));
+        var notices = ScopedRemember.Notices(write, scope, request.ProjectDir, agent);
+        var response = new ModRememberResponse(
+            FactCatalog.HandleFor(write.FactId), write.FactId, !write.IsRepeat,
+            notices.Count == 0 ? null : string.Join('\n', notices));
+        return Ok(JsonSerializer.Serialize(response, ModApiJsonContext.Default.ModRememberResponse));
     }
 
     private static ModApiResult Capture(EngramHome home, ModRequest request)

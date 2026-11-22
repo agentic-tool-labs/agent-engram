@@ -7186,3 +7186,28 @@ as two arms for calibration. Machine load average 9–12 on 18 cores during the 
 The calibration pair differs by 12.5 ms at p50, and the branch sits between the two main arms
 (−4.1 and +8.5 ms). The extra read is not separable from noise at this size: it is the same
 indexed path-range query D100 measured at +0.09 ms, over an empty `/agents/main/` subtree.
+
+## D105 — `/mod/v1/remember` takes a scope, through the routine `engram_remember` uses
+
+**What it is.** The mod API's `remember` accepts `scope` (`session`, `project` or `agent`; default
+`session`), `project_dir` and `agent`. Routing by scope is `ScopedRemember`: `Resolve` finds the
+project before the write lock, `Append` writes a role note (D100), a project note (D98) or a session
+note, and `Notices` says why a write was kept as a session note. `engram_remember` was rewritten onto
+the same three calls, so the branches exist once and a mod's reply uses the MCP tool's words: "no
+project_dir given …", "no usable agent key …", "role memory is for lessons every future <role>
+needs; kept as a session note".
+
+**The reply.** `{handle, id, created}` as before, plus `notice` only when the write was kept as a
+session note; several reasons join with a newline. A remember with no scope therefore answers byte
+for byte what it answered before.
+
+**Defaults.** `agent` scope with no `agent` field uses `main` (D104): a mod speaks for the main
+session unless it names a role. Outside `agent` scope the `agent` field is not passed on at all, so
+an omitted scope writes exactly the session note it wrote before even if a mod sends a stray
+`agent`. An unknown `scope` is a 400 and writes nothing; the match is exact, so `Agent` and `""` are
+unknown too.
+
+**The cap, accepted.** The role cap stays three live agent-scope writes per session row. MCP writes
+are keyed by `Mcp-Session-Id` and mod writes by Claude Code's session id, and the two cannot be
+joined (D43), so one Claude Code session can write three role notes through each channel, six in
+all. Nothing joins them, and nothing should try: the join is the thing D43 measured as impossible.
