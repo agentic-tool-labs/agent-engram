@@ -25,6 +25,12 @@ public static class RoleNotes
 {
     public const string Root = "/agents";
 
+    /// <summary>
+    /// The role key of an ordinary main session, whose payload names no <c>agent_type</c> (D104). An
+    /// agent whose <c>agent_type</c> slugs to <c>main</c> shares this memory.
+    /// </summary>
+    public const string MainRole = "main";
+
     /// <summary>Agent-scope writes one session may make per role before the rest stay session notes.</summary>
     public const int MaxWritesPerSession = 3;
 

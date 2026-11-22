@@ -7149,3 +7149,40 @@ the cost was accepted there. It is deferred until live `agent`-scope facts excee
 file-timed `subagent-start` attributes more than 5 ms to that arm. The fix then is a guard test that
 every live `agent` and `session` fact sits under its prefix, followed by excluding both scopes from
 the walk.
+
+## D104 — The ordinary main session takes the role key `main`
+
+**What it is.** `session-start` with neither `agent_type` nor `agent_id` in its payload builds the
+primer for the role `main` (`RoleNotes.MainRole`). It renders the role block exactly as any other
+role does (D100): the key line `Your role memory key: main.` always, and the header and delivered
+lessons when `/agents/main/` holds any. Before this, the ordinary main session had no role key, so
+nothing it learned about how to behave had a channel back into the next session's primer; only a
+`--agent` main session and subagents had one.
+
+**What is unchanged.** `session-start` with `agent_type` and no `agent_id` uses that type, as
+before. A `session-start` payload carrying `agent_id` gets no role block. `subagent-start` is
+untouched: a subagent payload with no `agent_type` still gets no role block and stays
+byte-identical.
+
+**What this supersedes.** D100's "a payload with no role stays byte-identical and makes no extra
+read", for `session-start` only. Every plain main session now pays the role read and, with an empty
+role, one key line of 8 tokens (`ceil(27 / 3.6)`). `role_fact_count` is therefore set on
+every `session-start` record, 0 when no lesson was delivered; `fact_count` stays null (D46).
+
+**Accepted.** An agent whose `agent_type` slugs to `main` shares this memory: the address is
+`/agents/<slug>`, and two keys that slug alike share a path (D100). Nothing distinguishes them, and
+nothing is built to.
+
+**Measured.** Published binaries, `session-start` on a `VACUUM INTO` copy of the 621,904-fact store,
+timed through a file, N=30 per arm after 3 warmups, arm order rotated each iteration, with main run
+as two arms for calibration. Machine load average 9–12 on 18 cores during the run.
+
+| arm | p50 ms | p90 ms |
+|---|---|---|
+| main | 259.58 | 558.55 |
+| main again (calibration) | 247.05 | 426.45 |
+| this branch | 255.52 | 539.33 |
+
+The calibration pair differs by 12.5 ms at p50, and the branch sits between the two main arms
+(−4.1 and +8.5 ms). The extra read is not separable from noise at this size: it is the same
+indexed path-range query D100 measured at +0.09 ms, over an empty `/agents/main/` subtree.

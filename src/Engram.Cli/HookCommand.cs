@@ -283,8 +283,11 @@ internal static class HookCommand
         }
 
         // A main session started with --agent: the payload carries agent_type and no agent_id, which
-        // a subagent's would have (D100). A plain session carries neither and gets no role block.
-        var role = payload is { AgentType: { Length: > 0 } agentType, AgentId: null or "" } ? agentType : null;
+        // a subagent's would have (D100). A plain session carries neither and takes the role key
+        // `main`, so the ordinary main session has a lesson channel too (D104).
+        var role = payload?.AgentId is { Length: > 0 }
+            ? null
+            : payload?.AgentType is { Length: > 0 } agentType ? agentType : RoleNotes.MainRole;
 
         var (summary, offerEnrollment) = SessionStartPrimerInputs(home, config, startDirectory, role);
         var primer = PrimerBuilder.Build(summary, Precedence(config), offerEnrollment, out var roleFactCount);
