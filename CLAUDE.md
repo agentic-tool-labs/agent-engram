@@ -40,9 +40,12 @@ predicate direction is the one that actually distinguishes this from an unrestri
 `UPDATE`.
 
 **Derived state is repairable; authored truth is not.** `compact` and `repair` may only
-touch what can be regenerated — the FTS index, salience, denormalized paths, indexed
-code facts. Neither may ever create, alter, or delete a fact body, predicate, validity
-window, or supersession row (D8). Two FTS facts to know before touching `repair`'s
+touch what can be regenerated — the FTS index, denormalized paths, indexed code facts.
+Neither may ever create, alter, or delete a fact body, predicate, validity window, or
+supersession row (D8). `salience` is **not** regenerable: `lesson-feedback` writes its
+`access_count`, `confirmations` and `last_accessed` as a recorded judgement nothing can
+recompute, and the role block is chosen by them, so `repair` may delete only orphan rows
+(D106). Two FTS facts to know before touching `repair`'s
 detector, both measured: on an external-content table every non-MATCH query — including
 `SELECT rowid FROM fact_fts` — is answered from the *content* table, so the obvious
 index-vs-fact set difference compares `fact` against itself and calls any desync healthy

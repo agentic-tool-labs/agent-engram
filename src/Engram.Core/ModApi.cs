@@ -41,7 +41,7 @@ public static class ModApi
     internal const int RetractionSlackSeconds = 10;
 
     private static readonly string[] Operations =
-        ["recall", "fact", "history", "forget", "remember", "capture", "captures", "path-facts", "tail", "embed-status", "lessons"];
+        ["recall", "fact", "history", "forget", "remember", "capture", "captures", "path-facts", "tail", "embed-status", "lessons", "lesson-feedback"];
 
     public static bool IsKnownOp(string op) => Array.IndexOf(Operations, op) >= 0;
 
@@ -120,6 +120,7 @@ public static class ModApi
                 "captures" => Captures(home, request),
                 "tail" => Tail(home, request, feed),
                 "lessons" => Lessons(home, request),
+                "lesson-feedback" => LessonFeedback(home, request),
                 "embed-status" => embedStatus is null
                     ? Error(404, "not_found", "embed status is served only by a running server")
                     : new ModApiResult(200, embedStatus()),
@@ -338,6 +339,46 @@ public static class ModApi
         var response = new ModLessonsResponse(
             current.Select(fact => new ModLesson(FactCatalog.HandleFor(fact.Id), fact.Body)).ToArray());
         return Ok(JsonSerializer.Serialize(response, ModApiJsonContext.Default.ModLessonsResponse));
+    }
+
+    /// <summary>
+    /// Records whether a delivered lesson held, as a reflection model judged it, unreviewed (D106).
+    /// Anything but a live <c>scope='agent'</c> fact is a 400 and writes nothing.
+    /// </summary>
+    private static ModApiResult LessonFeedback(EngramHome home, ModRequest request)
+    {
+        var sessionId = RequireSession(request);
+        var factId = RequireFact(request);
+        var held = request.Verdict switch
+        {
+            "applied" => true,
+            "contradicted" => false,
+            _ => throw Bad("verdict is required: applied or contradicted"),
+        };
+
+        var handle = FactCatalog.HandleFor(factId);
+        using (var connection = EngramDatabase.OpenInitialized(home))
+        using (var transaction = EngramDatabase.BeginWrite(connection))
+        {
+            if (!RoleNotes.RecordJudgement(connection, transaction, factId, held, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
+            {
+                transaction.Rollback();
+                throw Bad($"'{handle}' is not a live role lesson");
+            }
+
+            transaction.Commit();
+        }
+
+        Telemetry.Append(home, new TelemetryRecord(
+            Timestamp: DateTime.UtcNow.ToString("o"),
+            SessionId: sessionId,
+            Kind: TelemetryEventKind.LessonFeedback,
+            Mod: request.Mod,
+            FactId: handle,
+            Verdict: request.Verdict));
+
+        return Ok(JsonSerializer.Serialize(
+            new ModLessonFeedbackResponse(handle, request.Verdict!), ModApiJsonContext.Default.ModLessonFeedbackResponse));
     }
 
     private static ModApiResult Capture(EngramHome home, ModRequest request)

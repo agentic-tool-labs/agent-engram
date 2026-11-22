@@ -15,8 +15,13 @@ public sealed record ReviewEntry(long FactId, long ReviewAfter, long SetAt);
 public static class FactReview
 {
     /// <summary>Sets or replaces the review date for <paramref name="factId"/>.</summary>
+    /// <param name="keepEarlier">
+    /// Leave an existing date alone when it is already at or before <paramref name="reviewAfter"/>,
+    /// decided in the upsert itself rather than by a read first (D106).
+    /// </param>
     public static void Set(
-        SqliteConnection connection, SqliteTransaction? transaction, long factId, long reviewAfter, long setAt)
+        SqliteConnection connection, SqliteTransaction? transaction, long factId, long reviewAfter, long setAt,
+        bool keepEarlier = false)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
@@ -25,11 +30,13 @@ public static class FactReview
         command.CommandText =
             """
             INSERT INTO fact_review (fact_id, review_after, set_at) VALUES ($factId, $reviewAfter, $setAt)
-              ON CONFLICT(fact_id) DO UPDATE SET review_after = excluded.review_after, set_at = excluded.set_at;
+              ON CONFLICT(fact_id) DO UPDATE SET review_after = excluded.review_after, set_at = excluded.set_at
+              WHERE $keepEarlier = 0 OR fact_review.review_after > excluded.review_after;
             """;
         command.Parameters.AddWithValue("$factId", factId);
         command.Parameters.AddWithValue("$reviewAfter", reviewAfter);
         command.Parameters.AddWithValue("$setAt", setAt);
+        command.Parameters.AddWithValue("$keepEarlier", keepEarlier ? 1 : 0);
         command.ExecuteNonQuery();
     }
 

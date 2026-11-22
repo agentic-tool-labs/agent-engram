@@ -30,7 +30,8 @@ public sealed record ModRequest(
     [property: JsonPropertyName("limit")] int? Limit = null,
     [property: JsonPropertyName("types")] string[]? Types = null,
     [property: JsonPropertyName("project_dir")] string? ProjectDir = null,
-    [property: JsonPropertyName("agent")] string? Agent = null);
+    [property: JsonPropertyName("agent")] string? Agent = null,
+    [property: JsonPropertyName("verdict")] string? Verdict = null);
 
 public sealed record ModError(
     [property: JsonPropertyName("error")] string Error,
@@ -179,8 +180,13 @@ public sealed record ModLesson(
 public sealed record ModLessonsResponse(
     [property: JsonPropertyName("current")] IReadOnlyList<ModLesson> Current);
 
+public sealed record ModLessonFeedbackResponse(
+    [property: JsonPropertyName("handle")] string Handle,
+    [property: JsonPropertyName("verdict")] string Verdict);
+
 [JsonSerializable(typeof(ModRequest))]
 [JsonSerializable(typeof(ModLessonsResponse))]
+[JsonSerializable(typeof(ModLessonFeedbackResponse))]
 [JsonSerializable(typeof(ModError))]
 [JsonSerializable(typeof(ModRecallResponse))]
 [JsonSerializable(typeof(ModFactResponse))]

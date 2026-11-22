@@ -260,6 +260,7 @@ public class ModApiE2ETests
     // Content-Type and X-Engram-Mod below — so a route that skipped the middleware would show.
     [Theory]
     [InlineData("lessons")]
+    [InlineData("lesson-feedback")]
     public async Task NewOps_AreHostChecked(string op)
     {
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
@@ -270,7 +271,7 @@ public class ModApiE2ETests
 
         foreach (var (host, refused) in new[] { ("evil.example", true), ("127.0.0.1.evil.example", true), ("localhost", false) })
         {
-            using var request = JsonRequest(server.Port, HttpMethod.Post, "/mod/v1/" + op, NewOpBody().ToJsonString());
+            using var request = JsonRequest(server.Port, HttpMethod.Post, "/mod/v1/" + op, NewOpBody("f1").ToJsonString());
             request.Headers.Host = host;
             request.Headers.Add("X-Engram-Mod", "lens");
 
@@ -283,6 +284,8 @@ public class ModApiE2ETests
     [Theory]
     [InlineData("lessons", "text/plain")]
     [InlineData("lessons", null)]
+    [InlineData("lesson-feedback", "text/plain")]
+    [InlineData("lesson-feedback", null)]
     public async Task NewOps_RejectANonJsonContentType(string op, string? contentType)
     {
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
@@ -290,15 +293,19 @@ public class ModApiE2ETests
         using var home = new TestHome();
         using var server = StartedServer.Begin(home);
         using var http = new HttpClient();
+        var lesson = await SeedLesson(http, server.Port);
+        var callsBefore = KindCount(home, "mod-call");
 
-        var result = await Post(http, server.Port, op, NewOpBody(), contentType: contentType);
+        var result = await Post(http, server.Port, op, NewOpBody(lesson), contentType: contentType);
 
         Assert.Equal(HttpStatusCode.UnsupportedMediaType, result.Status);
-        Assert.Equal(0, KindCount(home, "mod-call"));
+        Assert.Equal(callsBefore, KindCount(home, "mod-call"));
+        Assert.Equal(0, KindCount(home, "lesson-feedback"));
     }
 
     [Theory]
     [InlineData("lessons")]
+    [InlineData("lesson-feedback")]
     public async Task NewOps_RequireTheModHeader(string op)
     {
         Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
@@ -306,16 +313,38 @@ public class ModApiE2ETests
         using var home = new TestHome();
         using var server = StartedServer.Begin(home);
         using var http = new HttpClient();
+        var lesson = await SeedLesson(http, server.Port);
+        var callsBefore = KindCount(home, "mod-call");
 
-        var missing = await Post(http, server.Port, op, NewOpBody(), mod: null, bodyMod: "lens");
-        var present = await Post(http, server.Port, op, NewOpBody());
+        // An empty body mod is what a missing header reads as, so only the header guard refuses it.
+        var headerless = NewOpBody(lesson);
+        headerless["mod"] = string.Empty;
+        var missing = await Post(http, server.Port, op, headerless, mod: null);
 
         Assert.Equal(HttpStatusCode.BadRequest, missing.Status);
-        Assert.NotEqual(HttpStatusCode.BadRequest, present.Status);
-        Assert.Equal(0, KindCount(home, "mod-call"));
+        Assert.Equal(callsBefore, KindCount(home, "mod-call"));
+        Assert.Equal(0, KindCount(home, "lesson-feedback"));
+
+        var present = await Post(http, server.Port, op, NewOpBody(lesson));
+        Assert.Equal(HttpStatusCode.OK, present.Status);
     }
 
-    private static JsonObject NewOpBody() => new() { ["session_id"] = Session };
+    // A body every new op accepts: lessons ignores fact_id and verdict.
+    private static JsonObject NewOpBody(string lesson) => new()
+    {
+        ["session_id"] = Session,
+        ["fact_id"] = lesson,
+        ["verdict"] = "applied",
+    };
+
+    private static async Task<string> SeedLesson(HttpClient http, int port)
+    {
+        var body = RememberBody();
+        body["scope"] = "agent";
+        var result = await Post(http, port, "remember", body);
+        Assert.Equal(HttpStatusCode.OK, result.Status);
+        return (string)result.Body["handle"]!;
+    }
 
     [Fact]
     public async Task Mcp_StillConnectsAndListsTools_AfterTheHostCheck()

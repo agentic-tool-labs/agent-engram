@@ -7228,3 +7228,49 @@ answers an empty list, as the primer reads it (D100). It is a lookup: it writes 
 telemetry and is not foreground work (D82). It answers for *now*, not for what a session start
 delivered — a lesson written or judged since then changes it — so the field is `current`, and the
 record of what was delivered is `role_fact_ids`.
+
+**Recording a judgement.** The mod op `lesson-feedback` takes `{session_id, mod, fact_id, verdict}`
+with `verdict` `applied` or `contradicted`, and answers `{handle, verdict}`. It is not a lookup, so
+it is foreground work (D82).
+- The fact must be live and `scope='agent'`. A session note, a project note, a closed fact or an
+  unknown id is a 400 and writes nothing, and so is any other verdict.
+- `RoleNotes.RecordJudgement` is one `INSERT … SELECT … ON CONFLICT DO UPDATE` into `salience`
+  inside `BEGIN IMMEDIATE`. The `SELECT` carries the live-and-agent guard, so an ineligible id
+  inserts nothing and there is no C# read-compare-write. Both verdicts add one to `access_count`
+  and stamp `last_accessed`; `applied` also adds one to `confirmations`. `score` is never written.
+- `contradicted` makes the lesson due for review now, through `FactReview.Set(…, keepEarlier:
+  true)`: the upsert's own `WHERE` leaves a review date already at or before now alone, so a
+  judgement never pushes a due date later.
+- The record is its own kind, `lesson-feedback`, with `session_id`, `mod`, `fact_id` (a handle) and
+  `verdict`. It is never `remember` or `judge`, which answer whether the model used memory (D43,
+  D56), and no `mod-call` is written beside it. The new fields are omitted when null, so every
+  other kind's record is unchanged.
+- Nothing here touches a fact body, predicate, validity window or supersession row (D8).
+
+**What the counts are.** A reflection model's judgement, unreviewed. `confirmations` counts
+`applied` verdicts and `access_count` counts verdicts of either kind; neither says the lesson was
+used or helpful, and no code or doc may call them that.
+
+**Selecting the role block.** `RoleNotes.Choose` is the one rule, over `(id, confirmations,
+access_count)`, and both `ReadDelivered` and `SelectDelivered` call it:
+1. *Set aside*: `confirmations = 0` and `access_count >= 2`, judged against twice and never for.
+2. *Proven*: up to three with `confirmations >= 1`, by confirmations descending, then id descending.
+3. *Newest*: fill to five from the rest by id descending; a fourth proven lesson competes here.
+4. If still fewer than five, fill from the set-aside ones by id descending.
+5. Render proven, then newest, then set aside.
+
+`ReadDelivered` therefore reads every live fact of the role with a `LEFT JOIN salience` and no
+`LIMIT`, since which five go out depends on the counts. The role subtree is small: the 621,904-fact
+store holds no live agent-scope fact at all. `SelectDelivered` takes the counts as an optional map
+by fact id, because a `CannedFact` carries none; with no map, every fact has zero of both. With no
+`salience` rows the rule is the five highest ids, which is what D100 delivered. Measured: on a home
+with seven role facts and no `salience` rows, the published binaries of main and this branch emit
+byte-identical `subagent-start` (1,066 bytes) and `--agent` `session-start` (1,015 bytes) output.
+
+A set-aside lesson stays recallable and, once contradicted, appears in `engram review list`; setting
+it aside changes only what the primer delivers.
+
+**No schema change.** `salience` already had every column. It is kept by snapshots, which drop only
+`fact_vec` (D93), and its rows cascade out with their fact. It is not in the journal, so `backup
+replay` returns facts with zero counts and selection falls back to recency for them. CLAUDE.md
+called `salience` regenerable; it no longer is, and `repair` may still delete only orphan rows.
