@@ -7304,9 +7304,14 @@ telemetry, no spool file, no state. Where classic hooks run they win, and nothin
 - A `--source mod` `session-start` leaves no mark, or the bridge would stand its own later calls
   down.
 - The mark is per session id, so a session the classic hook never saw is not stood down.
-- The classic path gains no read. Without `--source` the stand-down check is never reached, and
-  `file-touched` is today's path. `--source mod` `file-touched` reads the state file and still never
-  opens the database.
+- Without `--source` the stand-down check is never reached, and `file-touched` is today's path.
+  The one classic verb that touches the file is `session-start`, which reads it before appending so
+  that a resume, `/clear` or compaction of the same session adds no second line. `--source mod`
+  `file-touched` reads the state file and still never opens the database.
+- The file grows by one line per classic session, about 37 bytes, and is never pruned, so every
+  bridged call on an install where classic hooks run reads it linearly. That is about 1.8 MB at
+  50,000 sessions. It is unmeasured; if it ever shows in a guard's latency, rotate it by age, since a
+  mark only matters for the life of its session.
 - `--source` may follow the verb. An unknown value is treated as absent; a missing value or any
   other argument prints usage and exits 1. A binary older than this one answers the flag the same
   way, so the bridge is inert there.
@@ -7319,7 +7324,10 @@ field is omitted when null, so every classic record is byte-identical to what it
 with no `session-start` in the log: hooks may be skipped on this install. A rule keyed on recency
 alone ("activity newer than any session start") would warn on every healthy install, because tool
 calls always follow their session's start. It is never `Broken` (D37), and an empty log is `Ok`. It
-reads the log and writes nothing.
+reads the log and writes nothing. It can still warn falsely when that session's `session-start`
+record was lost: `DurableAppend` gives up silently after its 500 ms budget, and a hook that ran
+before `config.toml` existed recorded nothing. A false `Warn` costs a reader a look, which D37
+accepts.
 
 **The compaction digest is not bridged.** `session.compact` is itself skipped on managed installs.
 Where it is not skipped, the classic hooks run and the bridge stands down anyway. The digest mod's

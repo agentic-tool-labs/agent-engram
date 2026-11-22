@@ -931,7 +931,8 @@ process per call, `file-touched` must work with the server down, and a second im
 Classic `session-start` writes its session id to `classic-hooks.state`, and a `--source mod` call for a
 session in that file exits 0 and writes nothing. That file is its own: shared with `memory-guard.state`, the
 mark would spend memory-guard's one deny. A mod-sourced `session-start` writes no mark, or the bridge would
-stand its own calls down. Without `--source` no verb reads the file (D107).
+stand its own calls down. Without `--source` only classic `session-start` reads the file, to skip a
+duplicate line on resume, `/clear` or compaction; `file-touched`'s classic path is untouched (D107).
 
 **Background work yields to the model, and never for longer than its cap.** The server counts
 foreground work in `ForegroundWork`, entered in exactly two places: a call-tool filter for MCP and
