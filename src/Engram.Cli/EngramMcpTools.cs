@@ -100,8 +100,6 @@ public sealed class EngramMcpTools
             return "Engram home is not initialised (run 'engram init'); this statement was not saved.";
         }
 
-        var wantsProject = scope == MemoryScopes.Project;
-        var wantsAgent = scope == MemoryScopes.Agent;
         if (scope is not null && !MemoryScopes.Writable.Contains(scope))
         {
             return $"Unknown scope '{scope}'; valid scopes: {string.Join(", ", MemoryScopes.Writable)}. Nothing was saved.";
@@ -162,36 +160,21 @@ public sealed class EngramMcpTools
         }
 
         long factId;
-        ProjectResolution? resolution = null;
-        RoleWrite? roleOutcome = null;
+        ScopedWrite write;
         using (var connection = EngramDatabase.OpenInitialized(home))
         {
             // Resolved before the write lock is taken: it can run git, bounded by
             // GitFileLister.Timeout, and nothing else should wait on that (D98).
-            if (wantsProject)
-            {
-                resolution = ProjectNotes.Resolve(connection, project_dir);
-            }
+            var resolution = ScopedRemember.Resolve(connection, scope, project_dir);
 
             var rememberNow = DateTimeOffset.UtcNow;
             using var rememberTransaction = EngramDatabase.BeginWrite(connection);
-            bool isRepeat;
-            if (wantsAgent && RoleNotes.IsAddressable(agent))
-            {
-                (factId, roleOutcome) = RoleNotes.Append(
-                    connection, rememberTransaction, session.Value, agent!, statement, subject, evidence, rememberNow, details, sync);
-                isRepeat = roleOutcome == RoleWrite.Repeat;
-            }
-            else
-            {
-                (factId, isRepeat) = resolution?.Project is { } project
-                    ? ProjectNotes.Append(
-                        connection, rememberTransaction, session.Value, project, statement, subject, evidence, rememberNow, details, sync)
-                    : SessionFacts.Append(
-                        connection, rememberTransaction, session.Value, statement, subject, evidence, agent, rememberNow, details, sync);
-            }
+            write = ScopedRemember.Append(
+                connection, rememberTransaction, session.Value, scope, resolution, agent, statement, subject, evidence,
+                rememberNow, details, sync);
+            factId = write.FactId;
 
-            if (isRepeat)
+            if (write.IsRepeat)
             {
                 // Nothing new was written, so there is no fresh row for a review marker to be
                 // atomic with — set it as its own statement, same as before this fix.
@@ -213,15 +196,14 @@ public sealed class EngramMcpTools
             }
         }
 
-        var writtenProject = resolution?.Project;
-        var writtenRole = roleOutcome is RoleWrite.Written or RoleWrite.Repeat;
+        var writtenProject = write.Resolution?.Project;
 
         Telemetry.Append(home, new TelemetryRecord(
             Timestamp: DateTime.UtcNow.ToString("o"),
             SessionId: session.Value,
             Kind: TelemetryEventKind.Remember,
-            Scope: writtenProject is not null ? MemoryScopes.Project : writtenRole ? MemoryScopes.Agent : null,
-            ProjectUnresolved: resolution?.Reason is { } reason ? ProjectNotes.Code(reason) : null));
+            Scope: write.WrittenScope,
+            ProjectUnresolved: write.Resolution?.Reason is { } reason ? ProjectNotes.Code(reason) : null));
 
         var subjectText = string.IsNullOrWhiteSpace(subject) ? "(unspecified subject)" : subject;
         var evidenceText = string.IsNullOrWhiteSpace(evidence) ? string.Empty : $" (evidence: {evidence})";
@@ -230,18 +212,9 @@ public sealed class EngramMcpTools
 
         var response = $"[{FactCatalog.HandleFor(factId)}] remembered: {subjectText} — \"{statement}\"{evidenceText}{agentText}{projectText}";
 
-        if (resolution is { Reason: not null })
+        foreach (var notice in ScopedRemember.Notices(write, scope, project_dir, agent))
         {
-            response += "\n" + ProjectNotes.Notice(resolution, project_dir);
-        }
-
-        if (wantsAgent && roleOutcome is null)
-        {
-            response += "\nno usable agent key — kept as a session note; pass your role key from the primer as agent";
-        }
-        else if (roleOutcome == RoleWrite.Capped)
-        {
-            response += $"\nrole memory is for lessons every future {agent} needs; kept as a session note";
+            response += "\n" + notice;
         }
 
         var config = ConfigFile.Load(home.ConfigPath);

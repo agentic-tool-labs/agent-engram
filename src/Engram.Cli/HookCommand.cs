@@ -8,15 +8,21 @@ namespace Engram.Cli;
 
 internal static class HookCommand
 {
+    /// <summary>The <c>--source</c> value the bridge mod passes; any other value is treated as absent (D107).</summary>
+    internal const string ModSource = "mod";
+
     public static int Run(string? homePath, string[] rest, TextWriter stdout, TextWriter stderr)
     {
-        if (rest.Length != 1)
+        // The verb, then optionally `--source <value>`. A binary older than this printed usage for
+        // the flag, which is what leaves the bridge inert against it.
+        if (rest.Length is not (1 or 3) || (rest.Length == 3 && rest[1] != "--source"))
         {
             CliApp.PrintUsage(stderr);
             return 1;
         }
 
         var eventName = rest[0];
+        var source = rest.Length == 3 && rest[2] == ModSource ? ModSource : null;
         if (eventName is not ("session-start" or "subagent-start" or "pre-compact" or "post-compact"
             or "user-prompt" or "file-touched" or "memory-guard" or "lookup-nudge" or "tool-observed"))
         {
@@ -38,25 +44,48 @@ internal static class HookCommand
             return 0;
         }
 
-        return eventName switch
+        if (source is null)
+        {
+            return Dispatch(eventName, home, stdout, ReadPayload, source);
+        }
+
+        // The bridge mod's call. Where the classic SessionStart hook already ran for this session the
+        // classic hooks are live, and this one stands down before it prints, records or spools
+        // anything (D107). The classic path above reads nothing new.
+        var payload = ReadPayload();
+        if (payload?.SessionId is { Length: > 0 } sessionId
+            && SessionNudgeState.Contains(home.ClassicHooksStatePath, sessionId))
+        {
+            return 0;
+        }
+
+        return Dispatch(eventName, home, stdout, () => payload, source);
+    }
+
+    private static int Dispatch(
+        string eventName, EngramHome home, TextWriter stdout, Func<HookStdinInput?> payload, string? source) =>
+        eventName switch
         {
             // Switch arms evaluate lazily, so file-touched never pays to drain stdin —
             // its payload carries the whole tool_input, which for a Write is an entire
             // file, and its budget is 10ms unconditionally.
-            "session-start" => RunSessionStart(home, stdout, ReadPayload()),
-            "subagent-start" => RunSubagentStart(home, stdout, ReadPayload()),
-            "pre-compact" => RunPreCompact(home, stdout, ReadPayload()),
-            "post-compact" => RunPostCompact(home, ReadPayload()),
+            "session-start" => RunSessionStart(home, stdout, payload(), source),
+            "subagent-start" => RunSubagentStart(home, stdout, payload(), source),
+            "pre-compact" => RunPreCompact(home, stdout, payload(), source),
+            "post-compact" => RunPostCompact(home, payload(), source),
             // Capture moved to the capture mod and the /mod/v1 capture op (D83). A plugin older than this
             // binary still registers this verb, and an unknown verb would print usage on every prompt.
             "user-prompt" => 0,
-            "file-touched" => RunFileTouched(home, ReadPayload()),
-            "memory-guard" => RunMemoryGuard(home, stdout, ReadPayload()),
-            "lookup-nudge" => RunLookupNudge(home, stdout, ReadPayload()),
-            "tool-observed" => RunToolObserved(home, ReadPayload()),
+            "file-touched" => RunFileTouched(home, payload(), source),
+            "memory-guard" => RunMemoryGuard(home, stdout, payload(), source),
+            "lookup-nudge" => RunLookupNudge(home, stdout, payload(), source),
+            "tool-observed" => RunToolObserved(home, payload(), source),
             _ => 0,
         };
-    }
+
+    // A record written for the bridge mod says so; a classic hook's record is unchanged (D107).
+    private static TelemetryRecord Sourced(TelemetryRecord record, string? source) =>
+        source is null ? record : record with { Source = source };
 
     private static int Usage(TextWriter stderr)
     {
@@ -195,6 +224,11 @@ internal static class HookCommand
     /// <c>TokensReturned</c> is what was injected, both well-defined for a primer and both directly
     /// comparable to the same fields on a recall.</para>
     /// </remarks>
+    // Which lessons a primer delivered, so a later judgement can be tied to them (D106); absent
+    // rather than empty when there were none.
+    private static IReadOnlyList<string>? RoleFactHandles(IReadOnlyList<long> ids) =>
+        ids.Count == 0 ? null : ids.Select(FactCatalog.HandleFor).ToList();
+
     private static TelemetryRecord PrimerRecord(
         string sessionId,
         string kind,
@@ -250,9 +284,26 @@ internal static class HookCommand
         }
     }
 
-    private static int RunSessionStart(EngramHome home, TextWriter stdout, HookStdinInput? payload)
+    private static int RunSessionStart(EngramHome home, TextWriter stdout, HookStdinInput? payload, string? source)
     {
         var sessionId = ResolveSessionId(payload);
+
+        // The classic hook leaves its mark, so the bridge mod's calls for this session stand down
+        // (D107). Only for a session id Claude Code sent — a minted one matches no later call — and
+        // never from the bridge itself, whose mark would stand its own later calls down.
+        if (source is null && payload?.SessionId is { Length: > 0 } classicSession)
+        {
+            try
+            {
+                if (!SessionNudgeState.Contains(home.ClassicHooksStatePath, classicSession))
+                {
+                    SessionNudgeState.TryAppend(home.ClassicHooksStatePath, classicSession);
+                }
+            }
+            catch
+            {
+            }
+        }
 
         // Fire and forget, and swallowing everything is deliberate: a session must start even if
         // no housekeeping can run. The child decides for itself whether each job is due, so this
@@ -283,21 +334,27 @@ internal static class HookCommand
         }
 
         // A main session started with --agent: the payload carries agent_type and no agent_id, which
-        // a subagent's would have (D100). A plain session carries neither and gets no role block.
-        var role = payload is { AgentType: { Length: > 0 } agentType, AgentId: null or "" } ? agentType : null;
+        // a subagent's would have (D100). A plain session carries neither and takes the role key
+        // `main`, so the ordinary main session has a lesson channel too (D104).
+        var role = payload?.AgentId is { Length: > 0 }
+            ? null
+            : payload?.AgentType is { Length: > 0 } agentType ? agentType : RoleNotes.MainRole;
 
         var (summary, offerEnrollment) = SessionStartPrimerInputs(home, config, startDirectory, role);
-        var primer = PrimerBuilder.Build(summary, Precedence(config), offerEnrollment, out var roleFactCount);
+        var primer = PrimerBuilder.Build(summary, Precedence(config), offerEnrollment, out var roleFactIds);
 
         try
         {
             Telemetry.Append(
                 home,
-                PrimerRecord(
-                    sessionId, TelemetryEventKind.SessionStart, summary.FactCount, summary.Directives.Count, primer) with
-                {
-                    RoleFactCount = summary.Role is null ? null : roleFactCount,
-                });
+                Sourced(
+                    PrimerRecord(
+                        sessionId, TelemetryEventKind.SessionStart, summary.FactCount, summary.Directives.Count, primer) with
+                    {
+                        RoleFactCount = summary.Role is null ? null : roleFactIds.Count,
+                        RoleFactIds = RoleFactHandles(roleFactIds),
+                    },
+                    source));
         }
         catch
         {
@@ -325,10 +382,10 @@ internal static class HookCommand
     // habit formed there actively misleads here; all three keys below are load-bearing and
     // hookEventName must match the event. There is no error when this is wrong — the
     // primer simply never arrives, which is indistinguishable from a subagent ignoring it.
-    private static int RunSubagentStart(EngramHome home, TextWriter stdout, HookStdinInput? payload)
+    private static int RunSubagentStart(EngramHome home, TextWriter stdout, HookStdinInput? payload, string? source)
     {
         var summary = LongTermFacts(home, payload?.AgentType);
-        var primer = PrimerBuilder.BuildForSubagent(summary, Precedence(home), out var roleFactCount);
+        var primer = PrimerBuilder.BuildForSubagent(summary, Precedence(home), out var roleFactIds);
 
         try
         {
@@ -336,14 +393,17 @@ internal static class HookCommand
             // probe run, whether it matches its parent's. If it does, session facts are
             // shared across the spawn with no further work; if not, D11's sharing needs a
             // parent id threaded through instead of being assumed.
-            Telemetry.Append(home, PrimerRecord(
-                ResolveSessionId(payload), TelemetryEventKind.SubagentStart, summary.FactCount,
-                summary.Directives.Count, primer) with
-            {
-                AgentId = payload?.AgentId,
-                AgentType = payload?.AgentType,
-                RoleFactCount = summary.Role is null ? null : roleFactCount,
-            });
+            Telemetry.Append(home, Sourced(
+                PrimerRecord(
+                    ResolveSessionId(payload), TelemetryEventKind.SubagentStart, summary.FactCount,
+                    summary.Directives.Count, primer) with
+                {
+                    AgentId = payload?.AgentId,
+                    AgentType = payload?.AgentType,
+                    RoleFactCount = summary.Role is null ? null : roleFactIds.Count,
+                    RoleFactIds = RoleFactHandles(roleFactIds),
+                },
+                source));
         }
         catch
         {
@@ -364,16 +424,18 @@ internal static class HookCommand
     // stdout write throws, the record of the attempt has already landed. FactCount stays null
     // on this record — the instruction's length and its item cap are not facts returned
     // (D43/D46).
-    private static int RunPreCompact(EngramHome home, TextWriter stdout, HookStdinInput? payload)
+    private static int RunPreCompact(EngramHome home, TextWriter stdout, HookStdinInput? payload, string? source)
     {
         var sessionId = ResolveSessionId(payload);
 
         try
         {
-            Telemetry.Append(home, new TelemetryRecord(
-                Timestamp: DateTime.UtcNow.ToString("o"),
-                SessionId: sessionId,
-                Kind: TelemetryEventKind.PreCompact));
+            Telemetry.Append(home, Sourced(
+                new TelemetryRecord(
+                    Timestamp: DateTime.UtcNow.ToString("o"),
+                    SessionId: sessionId,
+                    Kind: TelemetryEventKind.PreCompact),
+                source));
         }
         catch
         {
@@ -395,7 +457,7 @@ internal static class HookCommand
     // free if this hook ever fires twice for the same compaction. Telemetry is recorded
     // only when something was actually written, matching user-prompt's rule that the event
     // means a fact landed, not that the hook merely ran.
-    private static int RunPostCompact(EngramHome home, HookStdinInput? payload)
+    private static int RunPostCompact(EngramHome home, HookStdinInput? payload, string? source)
     {
         if (payload?.CompactSummary is not { Length: > 0 } summary)
         {
@@ -427,10 +489,12 @@ internal static class HookCommand
                     now);
             }
 
-            Telemetry.Append(home, new TelemetryRecord(
-                Timestamp: now.UtcDateTime.ToString("o"),
-                SessionId: sessionId,
-                Kind: TelemetryEventKind.PostCompact));
+            Telemetry.Append(home, Sourced(
+                new TelemetryRecord(
+                    Timestamp: now.UtcDateTime.ToString("o"),
+                    SessionId: sessionId,
+                    Kind: TelemetryEventKind.PostCompact),
+                source));
         }
         catch
         {
@@ -481,7 +545,7 @@ internal static class HookCommand
     /// 0.67 ms more than this hook spent doing none of it. Parsing is not what threatens this
     /// budget; opening the database is, and this still does not.
     /// </remarks>
-    private static int RunFileTouched(EngramHome home, HookStdinInput? payload)
+    private static int RunFileTouched(EngramHome home, HookStdinInput? payload, string? source)
     {
         try
         {
@@ -521,11 +585,13 @@ internal static class HookCommand
             {
                 Telemetry.Append(
                     home,
-                    new TelemetryRecord(
-                        Timestamp: now.ToString("o"),
-                        SessionId: ResolveSessionId(payload),
-                        Kind: TelemetryEventKind.FileTouched,
-                        Path: touched),
+                    Sourced(
+                        new TelemetryRecord(
+                            Timestamp: now.ToString("o"),
+                            SessionId: ResolveSessionId(payload),
+                            Kind: TelemetryEventKind.FileTouched,
+                            Path: touched),
+                        source),
                     TimeSpan.Zero);
             }
         }
@@ -542,7 +608,7 @@ internal static class HookCommand
     // may precede the path-match check below; the shared File.Exists(home.ConfigPath) gate this
     // switch already sits behind is the one exception, priced into file-touched's own measured
     // budget already (Amendment 1 to the memory-guard spec).
-    private static int RunMemoryGuard(EngramHome home, TextWriter stdout, HookStdinInput? payload)
+    private static int RunMemoryGuard(EngramHome home, TextWriter stdout, HookStdinInput? payload, string? source)
     {
         if (payload?.ToolInput?.FilePath is not { Length: > 0 } filePath)
         {
@@ -578,11 +644,13 @@ internal static class HookCommand
 
         try
         {
-            Telemetry.Append(home, new TelemetryRecord(
-                Timestamp: DateTimeOffset.UtcNow.ToString("o"),
-                SessionId: sessionId,
-                Kind: TelemetryEventKind.MemoryGuard,
-                Path: filePath));
+            Telemetry.Append(home, Sourced(
+                new TelemetryRecord(
+                    Timestamp: DateTimeOffset.UtcNow.ToString("o"),
+                    SessionId: sessionId,
+                    Kind: TelemetryEventKind.MemoryGuard,
+                    Path: filePath),
+                source));
         }
         catch
         {
@@ -624,7 +692,7 @@ internal static class HookCommand
     /// the defect this record exists to remove. The default retry budget applies — this fires once
     /// per Engram tool call, not per edit, so it is not in <c>file-touched</c>'s frequency class.
     /// </remarks>
-    private static int RunToolObserved(EngramHome home, HookStdinInput? payload)
+    private static int RunToolObserved(EngramHome home, HookStdinInput? payload, string? source)
     {
         if (payload?.SessionId is not { Length: > 0 } sessionId)
         {
@@ -642,13 +710,15 @@ internal static class HookCommand
         {
             Telemetry.Append(
                 home,
-                new TelemetryRecord(
-                    Timestamp: DateTime.UtcNow.ToString("o"),
-                    SessionId: sessionId,
-                    Kind: TelemetryEventKind.ToolObserved,
-                    AgentId: payload.AgentId,
-                    AgentType: payload.AgentType,
-                    Tool: toolName[EngramToolPrefix.Length..]));
+                Sourced(
+                    new TelemetryRecord(
+                        Timestamp: DateTime.UtcNow.ToString("o"),
+                        SessionId: sessionId,
+                        Kind: TelemetryEventKind.ToolObserved,
+                        AgentId: payload.AgentId,
+                        AgentType: payload.AgentType,
+                        Tool: toolName[EngramToolPrefix.Length..]),
+                    source));
         }
         catch
         {
@@ -657,7 +727,7 @@ internal static class HookCommand
         return 0;
     }
 
-    private static int RunLookupNudge(EngramHome home, TextWriter stdout, HookStdinInput? payload)
+    private static int RunLookupNudge(EngramHome home, TextWriter stdout, HookStdinInput? payload, string? source)
     {
         if (payload?.ToolInput is not { } toolInput)
         {
@@ -732,13 +802,15 @@ internal static class HookCommand
 
             try
             {
-                Telemetry.Append(home, new TelemetryRecord(
-                    Timestamp: DateTimeOffset.UtcNow.ToString("o"),
-                    SessionId: sessionId,
-                    Kind: TelemetryEventKind.LookupNudge,
-                    Query: query,
-                    Phase: LookupNudgePhaseOverridden,
-                    Repo: stamp.Identity));
+                Telemetry.Append(home, Sourced(
+                    new TelemetryRecord(
+                        Timestamp: DateTimeOffset.UtcNow.ToString("o"),
+                        SessionId: sessionId,
+                        Kind: TelemetryEventKind.LookupNudge,
+                        Query: query,
+                        Phase: LookupNudgePhaseOverridden,
+                        Repo: stamp.Identity),
+                    source));
             }
             catch
             {
@@ -761,13 +833,15 @@ internal static class HookCommand
 
         try
         {
-            Telemetry.Append(home, new TelemetryRecord(
-                Timestamp: DateTimeOffset.UtcNow.ToString("o"),
-                SessionId: sessionId,
-                Kind: TelemetryEventKind.LookupNudge,
-                Query: query,
-                Phase: LookupNudgePhaseNudged,
-                Repo: stamp.Identity));
+            Telemetry.Append(home, Sourced(
+                new TelemetryRecord(
+                    Timestamp: DateTimeOffset.UtcNow.ToString("o"),
+                    SessionId: sessionId,
+                    Kind: TelemetryEventKind.LookupNudge,
+                    Query: query,
+                    Phase: LookupNudgePhaseNudged,
+                    Repo: stamp.Identity),
+                source));
         }
         catch
         {

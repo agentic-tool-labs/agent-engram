@@ -43,9 +43,29 @@ internal static class ProbeReportFormatter
         // and this pair does not admit it — the ids come from different issuers and never match.
         stdout.WriteLine("          (disjoint id spaces: an MCP session is recorded only when a memory tool is called;");
         stdout.WriteLine("           per-hook-session tool use is in tool-observed records, not in these percentages)");
+        stdout.WriteLine("  of MCP sessions (Mcp-Session-Id, which only a tool call records):");
         stdout.WriteLine($"  recall    {report.SessionsWithRecall.Count}/{report.McpSessions}  ({FormatPercent(report.SessionsWithRecall.Percent)})");
         stdout.WriteLine($"  remember  {report.SessionsWithRemember.Count}/{report.McpSessions}  ({FormatPercent(report.SessionsWithRemember.Percent)})");
         stdout.WriteLine($"  digest    {report.SessionsWithDigest.Count}/{report.McpSessions}  ({FormatPercent(report.SessionsWithDigest.Percent)})");
+
+        // D73: tool-observed carries Claude Code's session id, so this one is per hook session.
+        if (report.HookToolUse is { } toolUse)
+        {
+            if (!toolUse.Joinable)
+            {
+                stdout.WriteLine(
+                    $"  of Claude Code sessions: {toolUse.ToolObservedRecords} tool-observed record(s), none sharing a " +
+                    "session_id with a session-start — the two cannot be joined, so no share is given");
+            }
+            else
+            {
+                stdout.WriteLine("  of Claude Code sessions (session-start ids with a tool-observed record):");
+                stdout.WriteLine($"  any tool  {toolUse.AnyTool!.Count}/{report.HookSessions}  ({FormatPercent(toolUse.AnyTool.Percent)})");
+                stdout.WriteLine($"  recall    {toolUse.Recall!.Count}/{report.HookSessions}  ({FormatPercent(toolUse.Recall.Percent)})");
+                stdout.WriteLine($"  remember  {toolUse.Remember!.Count}/{report.HookSessions}  ({FormatPercent(toolUse.Remember.Percent)})");
+                stdout.WriteLine($"  other     {toolUse.Other!.Count}/{report.HookSessions}  ({FormatPercent(toolUse.Other.Percent)})");
+            }
+        }
 
         if (report.MemoryNeverReached)
         {

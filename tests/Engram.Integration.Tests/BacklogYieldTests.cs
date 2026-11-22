@@ -95,6 +95,7 @@ public class BacklogYieldTests
     [InlineData("history")]
     [InlineData("captures")]
     [InlineData("path-facts")]
+    [InlineData("lessons")]
     public async Task ALookup_IsNotForegroundWork(string op)
     {
         var foreground = new ForegroundWork();
@@ -114,6 +115,7 @@ public class BacklogYieldTests
     [InlineData("remember")]
     [InlineData("capture")]
     [InlineData("forget")]
+    [InlineData("lesson-feedback")]
     public async Task AnOpThatActsForTheModel_IsForegroundWork_UntilItReturns(string op)
     {
         var foreground = new ForegroundWork();

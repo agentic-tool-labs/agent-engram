@@ -41,11 +41,11 @@ public static class ModApi
     internal const int RetractionSlackSeconds = 10;
 
     private static readonly string[] Operations =
-        ["recall", "fact", "history", "forget", "remember", "capture", "captures", "path-facts", "tail", "embed-status"];
+        ["recall", "fact", "history", "forget", "remember", "capture", "captures", "path-facts", "tail", "embed-status", "lessons", "lesson-feedback"];
 
     public static bool IsKnownOp(string op) => Array.IndexOf(Operations, op) >= 0;
 
-    private static readonly string[] Lookups = ["fact", "history", "captures", "path-facts", "tail", "embed-status"];
+    private static readonly string[] Lookups = ["fact", "history", "captures", "path-facts", "tail", "embed-status", "lessons"];
 
     /// <summary>
     /// Whether an op only reads. Lookups write no telemetry and are not foreground work: mods poll
@@ -119,6 +119,8 @@ public static class ModApi
                 "capture" => Capture(home, request),
                 "captures" => Captures(home, request),
                 "tail" => Tail(home, request, feed),
+                "lessons" => Lessons(home, request),
+                "lesson-feedback" => LessonFeedback(home, request),
                 "embed-status" => embedStatus is null
                     ? Error(404, "not_found", "embed status is served only by a running server")
                     : new ModApiResult(200, embedStatus()),
@@ -278,22 +280,105 @@ public static class ModApi
             throw Bad(ceilingError);
         }
 
-        using var connection = EngramDatabase.OpenInitialized(home);
-        using var transaction = EngramDatabase.BeginWrite(connection);
-        var (factId, isRepeat) = SessionFacts.Append(
-            connection, transaction, sessionId, statement, request.Subject, evidence, null, DateTimeOffset.UtcNow, request.Details);
-
-        if (isRepeat)
+        var scope = request.Scope;
+        if (scope is not null && !MemoryScopes.Writable.Contains(scope))
         {
-            transaction.Rollback();
+            throw Bad($"unknown scope '{scope}'; valid scopes: {string.Join(", ", MemoryScopes.Writable)}");
         }
-        else
+
+        // A mod speaks for the main session unless it names a role (D105). Outside agent scope no
+        // agent is passed at all, so an omitted scope writes exactly what it wrote before.
+        var agent = scope == MemoryScopes.Agent ? RoleOrMain(request.Agent) : null;
+
+        using var connection = EngramDatabase.OpenInitialized(home);
+        var resolution = ScopedRemember.Resolve(connection, scope, request.ProjectDir);
+
+        ScopedWrite write;
+        using (var transaction = EngramDatabase.BeginWrite(connection))
         {
-            transaction.Commit();
+            write = ScopedRemember.Append(
+                connection, transaction, sessionId, scope, resolution, agent, statement, request.Subject, evidence,
+                DateTimeOffset.UtcNow, request.Details);
+
+            if (write.IsRepeat)
+            {
+                transaction.Rollback();
+            }
+            else
+            {
+                transaction.Commit();
+            }
         }
 
         RecordCall(home, request, sessionId, "remember");
-        return Ok(JsonSerializer.Serialize(new ModRememberResponse(FactCatalog.HandleFor(factId), factId, !isRepeat), ModApiJsonContext.Default.ModRememberResponse));
+        var notices = ScopedRemember.Notices(write, scope, request.ProjectDir, agent);
+        var response = new ModRememberResponse(
+            FactCatalog.HandleFor(write.FactId), write.FactId, !write.IsRepeat,
+            notices.Count == 0 ? null : string.Join('\n', notices));
+        return Ok(JsonSerializer.Serialize(response, ModApiJsonContext.Default.ModRememberResponse));
+    }
+
+    /// <summary>
+    /// The role's delivery set as it stands now, chosen by the function the primer uses (D106). It
+    /// answers for now, not for what a session start delivered, which is why the field is
+    /// <c>current</c>; what was delivered is the primer record's <c>role_fact_ids</c>.
+    /// </summary>
+    private static ModApiResult Lessons(EngramHome home, ModRequest request)
+    {
+        RequireSession(request);
+        var role = RoleOrMain(request.Agent);
+
+        // An unaddressable key has no role memory, as the primer reads it (D100).
+        IReadOnlyList<RoleFact> current = [];
+        if (RoleNotes.IsAddressable(role))
+        {
+            using var connection = EngramDatabase.OpenInitialized(home);
+            current = RoleNotes.ReadDelivered(connection, role);
+        }
+
+        var response = new ModLessonsResponse(
+            current.Select(fact => new ModLesson(FactCatalog.HandleFor(fact.Id), fact.Body)).ToArray());
+        return Ok(JsonSerializer.Serialize(response, ModApiJsonContext.Default.ModLessonsResponse));
+    }
+
+    /// <summary>
+    /// Records whether a delivered lesson held, as a reflection model judged it, unreviewed (D106).
+    /// Anything but a live <c>scope='agent'</c> fact is a 400 and writes nothing.
+    /// </summary>
+    private static ModApiResult LessonFeedback(EngramHome home, ModRequest request)
+    {
+        var sessionId = RequireSession(request);
+        var factId = RequireFact(request);
+        var held = request.Verdict switch
+        {
+            "applied" => true,
+            "contradicted" => false,
+            _ => throw Bad("verdict is required: applied or contradicted"),
+        };
+
+        var handle = FactCatalog.HandleFor(factId);
+        using (var connection = EngramDatabase.OpenInitialized(home))
+        using (var transaction = EngramDatabase.BeginWrite(connection))
+        {
+            if (!RoleNotes.RecordJudgement(connection, transaction, factId, held, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
+            {
+                transaction.Rollback();
+                throw Bad($"'{handle}' is not a live role lesson");
+            }
+
+            transaction.Commit();
+        }
+
+        Telemetry.Append(home, new TelemetryRecord(
+            Timestamp: DateTime.UtcNow.ToString("o"),
+            SessionId: sessionId,
+            Kind: TelemetryEventKind.LessonFeedback,
+            Mod: request.Mod,
+            FactId: handle,
+            Verdict: request.Verdict));
+
+        return Ok(JsonSerializer.Serialize(
+            new ModLessonFeedbackResponse(handle, request.Verdict!), ModApiJsonContext.Default.ModLessonFeedbackResponse));
     }
 
     private static ModApiResult Capture(EngramHome home, ModRequest request)
@@ -669,6 +754,9 @@ public static class ModApi
         request.FactId is { } handle && FactCatalog.TryParseHandle(handle, out var id)
             ? id
             : throw Bad("fact_id is required and looks like 'f42'");
+
+    // An empty or whitespace agent is an absent one (D105); "???" is a key, just not an addressable one.
+    private static string RoleOrMain(string? agent) => string.IsNullOrWhiteSpace(agent) ? RoleNotes.MainRole : agent;
 
     private static ModApiResult Ok(string json) => new(200, json);
 

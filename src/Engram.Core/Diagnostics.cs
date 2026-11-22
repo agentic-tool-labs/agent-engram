@@ -129,6 +129,7 @@ public static class Diagnostics
         Try(checks, "backups", list => list.Add(CheckBackups(home, connection, config)));
         Try(checks, "sync", list => list.Add(CheckSync(home, connection, config)));
         Try(checks, "edit queue", list => list.Add(CheckQueue(home)));
+        Try(checks, "hook delivery", list => list.Add(CheckHookDelivery(home)));
         Try(checks, "webhook", list => CheckWebhook(config, list));
         Try(checks, "code analysis", list => list.Add(CheckRoslyn(environment)));
         Try(checks, "tree-sitter", list => list.Add(CheckTreeSitter(environment, home)));
@@ -1042,6 +1043,47 @@ public static class Diagnostics
             DiagnosisState.Off,
             $"{Plural(spooled, "edit")} spooled by file-touched, waiting for an indexer to drain them",
             spooled > SpoolCompactor.Threshold ? "engram queue compact --apply" : null);
+    }
+
+    /// <summary>Which channel delivered the newest <c>session-start</c>: the classic hook or the
+    /// bridge mod (D107).</summary>
+    /// <remarks>
+    /// <para>The warning keys on a session, not on recency. Tool calls always follow a session's
+    /// start, so "a <c>mod-call</c> or <c>tool-observed</c> newer than any <c>session-start</c>"
+    /// holds on every healthy install. What only a skipped hook produces is the newest such record
+    /// naming a session that has no <c>session-start</c> in the log at all.</para>
+    /// <para>Never <c>Broken</c> (D37): Engram still serves recall and remember without its hooks,
+    /// and an install that skips them is a managed one, not a faulty one. It reads the log and
+    /// writes nothing.</para>
+    /// </remarks>
+    private static Diagnosis CheckHookDelivery(EngramHome home)
+    {
+        const string name = "hook delivery";
+        var records = TelemetryProbeReader.Read(home, since: null).Records;
+        var started = records
+            .Where(record => record.Kind == TelemetryEventKind.SessionStart)
+            .ToList();
+        var lastActivity = records.LastOrDefault(record =>
+            record.Kind is TelemetryEventKind.ModCall or TelemetryEventKind.ToolObserved);
+
+        if (lastActivity?.SessionId is { Length: > 0 } activeSession
+            && !started.Any(record => record.SessionId == activeSession))
+        {
+            return new Diagnosis(
+                name,
+                DiagnosisState.Warn,
+                "session-start was never recorded for the newest active session; hooks may be skipped on this install");
+        }
+
+        if (started.Count == 0)
+        {
+            return new Diagnosis(name, DiagnosisState.Ok, "no session-start recorded yet");
+        }
+
+        return new Diagnosis(
+            name,
+            DiagnosisState.Ok,
+            $"newest session-start from {(started[^1].Source == "mod" ? "mod" : "classic")}");
     }
 
     private static void CheckIndexingConfig(IndexingSettings settings, List<Diagnosis> checks)

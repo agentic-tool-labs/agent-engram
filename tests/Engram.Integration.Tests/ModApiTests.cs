@@ -391,6 +391,7 @@ public class ModApiTests
     [InlineData("captures")]
     [InlineData("path-facts")]
     [InlineData("tail")]
+    [InlineData("lessons")]
     public void HomeWithoutConfig_Is503NotInitialisedOnEveryOp(string op)
     {
         using var sandbox = new SandboxHome(initialize: false);

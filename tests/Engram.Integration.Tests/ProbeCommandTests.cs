@@ -127,6 +127,81 @@ public class ProbeCommandTests
         Assert.Equal(3, topQueries[0].GetProperty("count").GetInt32());
     }
 
+    private static string ProbeText(SandboxHome sandbox, IEnumerable<string> lines)
+    {
+        WriteFixture(sandbox, lines);
+        var stdout = new StringWriter();
+        Assert.Equal(0, CliApp.Run(["--home", sandbox.Home.Root, "probe"], stdout, new StringWriter()));
+        return stdout.ToString();
+    }
+
+    private static JsonElement ProbeJson(SandboxHome sandbox, IEnumerable<string> lines)
+    {
+        WriteFixture(sandbox, lines);
+        var stdout = new StringWriter();
+        Assert.Equal(0, CliApp.Run(["--home", sandbox.Home.Root, "probe", "--json"], stdout, new StringWriter()));
+        return JsonDocument.Parse(stdout.ToString()).RootElement;
+    }
+
+    private static string ToolObserved(string session, string tool, string minute = "30") =>
+        $$"""{"timestamp":"2026-07-25T09:{{minute}}:00Z","session_id":"{{session}}","kind":"tool-observed","tool":"{{tool}}"}""";
+
+    // h1..h6 are the fixture's six session-start ids; "stray" has no session-start, so it must not
+    // count towards any share, and h1's two recalls count once.
+    [Fact]
+    public void Probe_ToolObservedJoinedOnSessionStart_ReportsSharesPerClaudeCodeSession()
+    {
+        using var sandbox = new SandboxHome();
+        var lines = FixtureLines.Concat(
+        [
+            ToolObserved("h1", "recall"), ToolObserved("h1", "recall", "31"), ToolObserved("h2", "remember"),
+            ToolObserved("h3", "navigate"), ToolObserved("stray", "recall"),
+        ]).ToList();
+
+        var text = ProbeText(sandbox, lines);
+        var json = ProbeJson(sandbox, lines).GetProperty("hook_tool_use");
+
+        Assert.Contains("of Claude Code sessions (session-start ids with a tool-observed record):", text);
+        Assert.Matches(new Regex(@"any tool\s+3/6\s+\(50\.0%\)"), text);
+        Assert.Matches(new Regex(@"recall\s+1/6\s+\(16\.7%\)"), text);
+        Assert.Matches(new Regex(@"remember\s+1/6\s+\(16\.7%\)"), text);
+        Assert.Matches(new Regex(@"other\s+1/6\s+\(16\.7%\)"), text);
+        Assert.Contains("of MCP sessions (Mcp-Session-Id", text);
+        Assert.Contains("80.0% of MCP sessions called recall (4/5)", text);
+        Assert.True(json.GetProperty("joinable").GetBoolean());
+        Assert.Equal(5, json.GetProperty("tool_observed_records").GetInt32());
+        Assert.Equal(3, json.GetProperty("any_tool").GetProperty("count").GetInt32());
+    }
+
+    [Fact]
+    public void Probe_ToolObservedSharingNoSessionWithASessionStart_SaysTheyCannotBeJoined_NeverZeroPercent()
+    {
+        using var sandbox = new SandboxHome();
+        var lines = FixtureLines.Concat([ToolObserved("x1", "recall"), ToolObserved("x2", "remember")]).ToList();
+
+        var text = ProbeText(sandbox, lines);
+        var json = ProbeJson(sandbox, lines).GetProperty("hook_tool_use");
+
+        Assert.Contains("the two cannot be joined", text);
+        Assert.DoesNotContain("any tool", text);
+        Assert.DoesNotContain("/6  (0.0%)", text);
+        Assert.False(json.GetProperty("joinable").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("any_tool").ValueKind);
+    }
+
+    [Fact]
+    public void Probe_NoToolObservedRecords_PrintsNoClaudeCodeSessionShare()
+    {
+        using var sandbox = new SandboxHome();
+
+        var text = ProbeText(sandbox, FixtureLines);
+        var json = ProbeJson(sandbox, FixtureLines);
+
+        Assert.DoesNotContain("of Claude Code sessions", text);
+        Assert.DoesNotContain("any tool", text);
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("hook_tool_use").ValueKind);
+    }
+
     [Fact]
     public void Probe_MissingTelemetryFile_ExitsZeroWithClearMessage()
     {

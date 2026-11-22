@@ -6,7 +6,7 @@ namespace Engram.Core.Tests;
 public class RoleBlockTests
 {
     private static PrimerSummary WithRole(params string[] facts) =>
-        PrimerSummary.From([]) with { Role = "wrangl:architect", RoleFacts = facts };
+        PrimerSummary.From([]) with { Role = "wrangl:architect", RoleFacts = facts.Select((body, i) => new RoleFact(i + 1, body)).ToList() };
 
     [Fact]
     public void RoleFactsBeyondTheBudget_AreDropped_AndThePrecedenceLineStays()
@@ -18,7 +18,9 @@ public class RoleBlockTests
         Assert.Contains(MemorySettings.PrimerLine(MemoryPrecedence.EngramFirst)!, primer, StringComparison.Ordinal);
         Assert.DoesNotContain(huge, primer, StringComparison.Ordinal);
         Assert.Contains("- Short lesson.", primer, StringComparison.Ordinal);
-        Assert.Equal(1, delivered);
+
+        // D106: the ids are what was rendered, so a skipped fact's id is not among them.
+        Assert.Equal([2L], delivered);
     }
 
     [Fact]
@@ -28,7 +30,7 @@ public class RoleBlockTests
 
         var primer = PrimerBuilder.BuildForSubagent(WithRole(huge), MemoryPrecedence.EngramFirst, out var delivered);
 
-        Assert.Equal(0, delivered);
+        Assert.Empty(delivered);
         const string key = "Your role memory key: wrangl:architect.";
         var plain = PrimerBuilder.BuildForSubagent(PrimerSummary.From([]), MemoryPrecedence.EngramFirst).Split('\n');
         var lines = primer.Split('\n');
@@ -41,7 +43,7 @@ public class RoleBlockTests
     {
         var primer = PrimerBuilder.BuildForSubagent(WithRole(), MemoryPrecedence.EngramFirst, out var delivered);
 
-        Assert.Equal(0, delivered);
+        Assert.Empty(delivered);
         Assert.Contains("Your role memory key: wrangl:architect.", primer, StringComparison.Ordinal);
         Assert.DoesNotContain("Role memory for", primer, StringComparison.Ordinal);
     }
