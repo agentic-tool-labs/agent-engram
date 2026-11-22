@@ -95,7 +95,10 @@ export function installFakeEngine(on: On, table: RoutingTable = {}): Router {
     return r instanceof Promise ? r.then(done) : done(r)
   })
   on('http.fetch', async (_$, e) => {
-    const r = await router.fetch(e.url, { headers: e.init?.headers, body: e.init?.body })
+    const body = e.init?.body
+    // Every mod sends JSON text; a byte body would be a new kind of request this table cannot route.
+    if (typeof body === 'object') throw new Error(`fake engine: a base64 body to ${e.url} is not routed`)
+    const r = await router.fetch(e.url, { headers: e.init?.headers, body })
     return { value: { ...r, headers: {} } }
   })
   on('session.id', () => ({ value: router.sessionId() }))
