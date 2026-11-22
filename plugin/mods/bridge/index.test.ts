@@ -142,6 +142,25 @@ test('a subagent step carrying fewer messages never re-primes', async ($, on) =>
   expect(primersIn(await $.prompt.submit(prompt()))).toBe(0)
 })
 
+test('a stream that fails beneath reaches the caller as it failed, after what it yielded', async ($, on) => {
+  installFakeEngine(on, { binary: BIN })
+  mock.clock(on)
+  on('turn.step', async function* () {
+    yield { kind: 'text', index: 0, text: 'partial' } as never
+    throw new Error('overloaded')
+  })
+  const seen: unknown[] = []
+  let failure: unknown
+  try {
+    for await (const chunk of $.turn.step({ turnId: 't', index: 0, model: 'opus', messageCount: 3 } as never)) seen.push(chunk)
+  } catch (err) {
+    failure = err
+  }
+  expect(seen).toEqual([expect.objectContaining({ kind: 'text', text: 'partial' })])
+  // The kit reports the failure beneath as its own error; what matters is that one arrives.
+  expect(failure).toBeDefined()
+})
+
 test('a session end other than /clear does not re-prime', async ($, on) => {
   rig(on)
   await $.prompt.submit(prompt())

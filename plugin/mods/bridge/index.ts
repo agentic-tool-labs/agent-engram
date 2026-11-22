@@ -129,14 +129,17 @@ export const register: Register = (on) => {
   // A main-loop request carrying fewer messages than the one before it follows a compaction.
   on('turn.step', async function* ($, e, next) {
     const go = once(next)
+    let started = false
     try {
       if (e.agentId === undefined) {
         if (lastMainCount !== undefined && e.messageCount < lastMainCount) pending = true
         lastMainCount = e.messageCount
       }
+      started = true
       return yield* go(e)
-    } catch {
-      // The stream beneath is the one `go` already started; what it yielded stays.
+    } catch (err) {
+      // A failure of the stream beneath is the core's, and reaches the caller as it was.
+      if (started) throw err
       return yield* go.fallback(e)
     }
   })
