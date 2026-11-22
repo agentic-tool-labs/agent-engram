@@ -7211,3 +7211,20 @@ unknown too.
 are keyed by `Mcp-Session-Id` and mod writes by Claude Code's session id, and the two cannot be
 joined (D43), so one Claude Code session can write three role notes through each channel, six in
 all. Nothing joins them, and nothing should try: the join is the thing D43 measured as impossible.
+
+## D106 — Delivered lessons are named, and the delivery set is chosen by recorded judgement
+
+**Which lessons a primer delivered.** `session-start` and `subagent-start` records carry
+`role_fact_ids`: the handles of the role facts the role block rendered, in the order rendered. It is
+what was rendered, not what was selected, so a fact skipped for the 300-token budget is not in it.
+The field is absent when no lesson was delivered, not an empty list; `role_fact_count` keeps its
+meaning and `fact_count` stays null on a primer (D46). Handles rather than numeric ids, so a reader
+can pass one straight to `fact`, `history` or `engram_expand`.
+
+**What a role would get now.** The mod op `lessons` takes `{session_id, mod, agent?}` and answers
+`{"current": [{"id": "f42", "text": …}]}`: the role's delivery set chosen by the same function the
+primer uses. `agent` defaults to `main` (D104); a key that slugs to nothing has no role memory and
+answers an empty list, as the primer reads it (D100). It is a lookup: it writes nothing, records no
+telemetry and is not foreground work (D82). It answers for *now*, not for what a session start
+delivered — a lesson written or judged since then changes it — so the field is `current`, and the
+record of what was delivered is `role_fact_ids`.

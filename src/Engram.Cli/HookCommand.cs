@@ -195,6 +195,11 @@ internal static class HookCommand
     /// <c>TokensReturned</c> is what was injected, both well-defined for a primer and both directly
     /// comparable to the same fields on a recall.</para>
     /// </remarks>
+    // Which lessons a primer delivered, so a later judgement can be tied to them (D106); absent
+    // rather than empty when there were none.
+    private static IReadOnlyList<string>? RoleFactHandles(IReadOnlyList<long> ids) =>
+        ids.Count == 0 ? null : ids.Select(FactCatalog.HandleFor).ToList();
+
     private static TelemetryRecord PrimerRecord(
         string sessionId,
         string kind,
@@ -290,7 +295,7 @@ internal static class HookCommand
             : payload?.AgentType is { Length: > 0 } agentType ? agentType : RoleNotes.MainRole;
 
         var (summary, offerEnrollment) = SessionStartPrimerInputs(home, config, startDirectory, role);
-        var primer = PrimerBuilder.Build(summary, Precedence(config), offerEnrollment, out var roleFactCount);
+        var primer = PrimerBuilder.Build(summary, Precedence(config), offerEnrollment, out var roleFactIds);
 
         try
         {
@@ -299,7 +304,8 @@ internal static class HookCommand
                 PrimerRecord(
                     sessionId, TelemetryEventKind.SessionStart, summary.FactCount, summary.Directives.Count, primer) with
                 {
-                    RoleFactCount = summary.Role is null ? null : roleFactCount,
+                    RoleFactCount = summary.Role is null ? null : roleFactIds.Count,
+                    RoleFactIds = RoleFactHandles(roleFactIds),
                 });
         }
         catch
@@ -331,7 +337,7 @@ internal static class HookCommand
     private static int RunSubagentStart(EngramHome home, TextWriter stdout, HookStdinInput? payload)
     {
         var summary = LongTermFacts(home, payload?.AgentType);
-        var primer = PrimerBuilder.BuildForSubagent(summary, Precedence(home), out var roleFactCount);
+        var primer = PrimerBuilder.BuildForSubagent(summary, Precedence(home), out var roleFactIds);
 
         try
         {
@@ -345,7 +351,8 @@ internal static class HookCommand
             {
                 AgentId = payload?.AgentId,
                 AgentType = payload?.AgentType,
-                RoleFactCount = summary.Role is null ? null : roleFactCount,
+                RoleFactCount = summary.Role is null ? null : roleFactIds.Count,
+                RoleFactIds = RoleFactHandles(roleFactIds),
             });
         }
         catch

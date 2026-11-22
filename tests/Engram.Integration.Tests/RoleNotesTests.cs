@@ -160,7 +160,7 @@ public sealed class RoleNotesTests
         using var connection = Open(sandbox);
         var primer = PrimerBuilder.BuildForSubagent(PrimerSummary.Read(connection, Now, Role), MemoryPrecedence.EngramFirst, out var delivered);
 
-        Assert.Equal(5, delivered);
+        Assert.Equal(5, delivered.Count);
         var block = primer[primer.IndexOf($"Role memory for {Role}:", StringComparison.Ordinal)..].Split('\n');
         Assert.Equal($"Your role memory key: {Role}.", block[1]);
         Assert.Equal(["- Role lesson 6.", "- Role lesson 5.", "- Role lesson 4.", "- Role lesson 3.", "- Role lesson 2."], block[2..7]);

@@ -172,7 +172,15 @@ public sealed record ModTailResponse(
     [property: JsonPropertyName("retractions")] ModTailRetractions Retractions,
     [property: JsonPropertyName("events")] ModTailEvents? Events);
 
+public sealed record ModLesson(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("text")] string Text);
+
+public sealed record ModLessonsResponse(
+    [property: JsonPropertyName("current")] IReadOnlyList<ModLesson> Current);
+
 [JsonSerializable(typeof(ModRequest))]
+[JsonSerializable(typeof(ModLessonsResponse))]
 [JsonSerializable(typeof(ModError))]
 [JsonSerializable(typeof(ModRecallResponse))]
 [JsonSerializable(typeof(ModFactResponse))]

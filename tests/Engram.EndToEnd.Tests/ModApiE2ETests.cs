@@ -256,6 +256,67 @@ public class ModApiE2ETests
         Assert.Equal(expected == HttpStatusCode.Forbidden, mcpResponse.StatusCode == HttpStatusCode.Forbidden);
     }
 
+    // D106: every op added after the guards were written gets a row in each of them — Host here,
+    // Content-Type and X-Engram-Mod below — so a route that skipped the middleware would show.
+    [Theory]
+    [InlineData("lessons")]
+    public async Task NewOps_AreHostChecked(string op)
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        using var server = StartedServer.Begin(home);
+        using var http = new HttpClient();
+
+        foreach (var (host, refused) in new[] { ("evil.example", true), ("127.0.0.1.evil.example", true), ("localhost", false) })
+        {
+            using var request = JsonRequest(server.Port, HttpMethod.Post, "/mod/v1/" + op, NewOpBody().ToJsonString());
+            request.Headers.Host = host;
+            request.Headers.Add("X-Engram-Mod", "lens");
+
+            var response = await http.SendAsync(request, TestContext.Current.CancellationToken);
+
+            Assert.Equal(refused, response.StatusCode == HttpStatusCode.Forbidden);
+        }
+    }
+
+    [Theory]
+    [InlineData("lessons", "text/plain")]
+    [InlineData("lessons", null)]
+    public async Task NewOps_RejectANonJsonContentType(string op, string? contentType)
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        using var server = StartedServer.Begin(home);
+        using var http = new HttpClient();
+
+        var result = await Post(http, server.Port, op, NewOpBody(), contentType: contentType);
+
+        Assert.Equal(HttpStatusCode.UnsupportedMediaType, result.Status);
+        Assert.Equal(0, KindCount(home, "mod-call"));
+    }
+
+    [Theory]
+    [InlineData("lessons")]
+    public async Task NewOps_RequireTheModHeader(string op)
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+        using var server = StartedServer.Begin(home);
+        using var http = new HttpClient();
+
+        var missing = await Post(http, server.Port, op, NewOpBody(), mod: null, bodyMod: "lens");
+        var present = await Post(http, server.Port, op, NewOpBody());
+
+        Assert.Equal(HttpStatusCode.BadRequest, missing.Status);
+        Assert.NotEqual(HttpStatusCode.BadRequest, present.Status);
+        Assert.Equal(0, KindCount(home, "mod-call"));
+    }
+
+    private static JsonObject NewOpBody() => new() { ["session_id"] = Session };
+
     [Fact]
     public async Task Mcp_StillConnectsAndListsTools_AfterTheHostCheck()
     {

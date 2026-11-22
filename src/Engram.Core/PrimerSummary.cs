@@ -38,7 +38,7 @@ namespace Engram.Core;
 /// payload carried none (D100).
 /// </param>
 /// <param name="RoleFacts">
-/// Up to <see cref="RoleNotes.MaxDelivered"/> live role-fact bodies, newest first; empty without a
+/// Up to <see cref="RoleNotes.MaxDelivered"/> live role facts in delivery order; empty without a
 /// role.
 /// </param>
 public sealed record PrimerSummary(
@@ -48,7 +48,7 @@ public sealed record PrimerSummary(
     IReadOnlyList<string> Directives,
     int ReviewDueCount = 0,
     string? Role = null,
-    IReadOnlyList<string>? RoleFacts = null)
+    IReadOnlyList<RoleFact>? RoleFacts = null)
 {
     /// <summary>
     /// Counts a catalog already in memory — the shape every existing caller and test hands over.

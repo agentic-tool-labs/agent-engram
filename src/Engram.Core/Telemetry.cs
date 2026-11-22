@@ -393,7 +393,15 @@ public sealed record TelemetryRecord(
     /// <c>session-start</c> record whenever the payload named a role (D100). Its own field;
     /// <c>fact_count</c> stays null on a primer (D46).
     /// </summary>
-    [property: JsonPropertyName("role_fact_count")] int? RoleFactCount = null);
+    [property: JsonPropertyName("role_fact_count")] int? RoleFactCount = null,
+
+    /// <summary>
+    /// Handles of the role facts a primer delivered, in the order rendered, on a
+    /// <c>session-start</c> or <c>subagent-start</c> record. Absent when no lesson was delivered
+    /// (D106). <c>fact_count</c> stays null on a primer (D46).
+    /// </summary>
+    [property: JsonPropertyName("role_fact_ids"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? RoleFactIds = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

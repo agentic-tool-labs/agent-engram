@@ -920,14 +920,14 @@ whether the model used memory. Every request needs `Content-Type: application/js
 `X-Engram-Mod` header equal to the body's `mod`, and the middleware that 403s any `Origin` also 403s
 any `Host` that is not loopback, on every route. Deleting any of those three guards leaves the rest
 of the suite green, which is why each has its own falsification row. Lookups (`fact`, `history`,
-`captures`, `path-facts`, `tail`) write nothing, and handlers log nothing from the request (D76).
+`captures`, `path-facts`, `tail`, `lessons`) write nothing, and handlers log nothing from the request (D76).
 
 **Background work yields to the model, and never for longer than its cap.** The server counts
 foreground work in `ForegroundWork`, entered in exactly two places: a call-tool filter for MCP and
 the `/mod/v1` route for every op that is not a lookup. Never per tool, so a new tool cannot forget
 it; never as endpoint middleware, because the MCP endpoint also carries each session's long-lived
 GET stream, which would count as foreground for the whole session. **Lookups — `tail`, `fact`,
-`history`, `captures`, `path-facts`, `embed-status` — are excluded on purpose**: mods poll them on
+`history`, `captures`, `path-facts`, `embed-status`, `lessons` — are excluded on purpose**: mods poll them on
 timers, and a 2 s tail per open pane would hold the backlog paused for as long as anyone looks at
 memory. The backlog waits while the count is non-zero before each batch, **capped at 10 s per
 batch**, then proceeds anyway. The cap is load-bearing twice: without it an MCP session left

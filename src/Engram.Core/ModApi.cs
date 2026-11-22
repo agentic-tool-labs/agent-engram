@@ -41,11 +41,11 @@ public static class ModApi
     internal const int RetractionSlackSeconds = 10;
 
     private static readonly string[] Operations =
-        ["recall", "fact", "history", "forget", "remember", "capture", "captures", "path-facts", "tail", "embed-status"];
+        ["recall", "fact", "history", "forget", "remember", "capture", "captures", "path-facts", "tail", "embed-status", "lessons"];
 
     public static bool IsKnownOp(string op) => Array.IndexOf(Operations, op) >= 0;
 
-    private static readonly string[] Lookups = ["fact", "history", "captures", "path-facts", "tail", "embed-status"];
+    private static readonly string[] Lookups = ["fact", "history", "captures", "path-facts", "tail", "embed-status", "lessons"];
 
     /// <summary>
     /// Whether an op only reads. Lookups write no telemetry and are not foreground work: mods poll
@@ -119,6 +119,7 @@ public static class ModApi
                 "capture" => Capture(home, request),
                 "captures" => Captures(home, request),
                 "tail" => Tail(home, request, feed),
+                "lessons" => Lessons(home, request),
                 "embed-status" => embedStatus is null
                     ? Error(404, "not_found", "embed status is served only by a running server")
                     : new ModApiResult(200, embedStatus()),
@@ -314,6 +315,29 @@ public static class ModApi
             FactCatalog.HandleFor(write.FactId), write.FactId, !write.IsRepeat,
             notices.Count == 0 ? null : string.Join('\n', notices));
         return Ok(JsonSerializer.Serialize(response, ModApiJsonContext.Default.ModRememberResponse));
+    }
+
+    /// <summary>
+    /// The role's delivery set as it stands now, chosen by the function the primer uses (D106). It
+    /// answers for now, not for what a session start delivered, which is why the field is
+    /// <c>current</c>; what was delivered is the primer record's <c>role_fact_ids</c>.
+    /// </summary>
+    private static ModApiResult Lessons(EngramHome home, ModRequest request)
+    {
+        RequireSession(request);
+        var role = request.Agent ?? RoleNotes.MainRole;
+
+        // An unaddressable key has no role memory, as the primer reads it (D100).
+        IReadOnlyList<RoleFact> current = [];
+        if (RoleNotes.IsAddressable(role))
+        {
+            using var connection = EngramDatabase.OpenInitialized(home);
+            current = RoleNotes.ReadDelivered(connection, role);
+        }
+
+        var response = new ModLessonsResponse(
+            current.Select(fact => new ModLesson(FactCatalog.HandleFor(fact.Id), fact.Body)).ToArray());
+        return Ok(JsonSerializer.Serialize(response, ModApiJsonContext.Default.ModLessonsResponse));
     }
 
     private static ModApiResult Capture(EngramHome home, ModRequest request)

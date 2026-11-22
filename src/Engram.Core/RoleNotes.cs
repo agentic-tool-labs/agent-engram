@@ -3,6 +3,9 @@ using Microsoft.Data.Sqlite;
 
 namespace Engram.Core;
 
+/// <summary>A role fact the primer can deliver: its id and its body (D100, D106).</summary>
+public sealed record RoleFact(long Id, string Body);
+
 /// <summary>How an agent-scope write landed (D100).</summary>
 public enum RoleWrite
 {
@@ -131,7 +134,7 @@ public static class RoleNotes
     /// Up to <see cref="MaxDelivered"/> live role facts, newest first. Newest is the highest fact
     /// id, the one ordering the in-memory path (<see cref="PrimerSummary.From"/>) can also apply.
     /// </summary>
-    public static IReadOnlyList<string> ReadDelivered(SqliteConnection connection, string role)
+    public static IReadOnlyList<RoleFact> ReadDelivered(SqliteConnection connection, string role)
     {
         if (ReadCounter.Value is { } counter)
         {
@@ -141,7 +144,7 @@ public static class RoleNotes
         using var command = connection.CreateCommand();
         command.CommandText =
             """
-            SELECT f.body
+            SELECT f.id, f.body
               FROM entity e
               JOIN fact f ON f.subject_id = e.id
              WHERE e.path >= $lo AND e.path < $hi
@@ -153,28 +156,27 @@ public static class RoleNotes
         command.Parameters.AddWithValue("$scope", MemoryScopes.Agent);
         command.Parameters.AddWithValue("$limit", MaxDelivered);
 
-        var bodies = new List<string>();
+        var delivered = new List<RoleFact>();
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            bodies.Add(reader.GetString(0));
+            delivered.Add(new RoleFact(reader.GetInt64(0), reader.GetString(1)));
         }
 
-        return bodies;
+        return delivered;
     }
 
     /// <summary>The in-memory twin of <see cref="ReadDelivered"/> over a catalog already read.</summary>
-    public static IReadOnlyList<string> SelectDelivered(IReadOnlyList<CannedFact> facts, string role)
+    public static IReadOnlyList<RoleFact> SelectDelivered(IReadOnlyList<CannedFact> facts, string role)
     {
         var prefix = RolePath(role) + "/";
         return facts
             .Where(fact => fact.Scope == MemoryScopes.Agent
                 && fact.SubjectPath is { } path
                 && path.StartsWith(prefix, StringComparison.Ordinal))
-            .Select(fact => (Id: FactCatalog.TryParseHandle(fact.Id, out var id) ? id : 0, fact.Body))
+            .Select(fact => new RoleFact(FactCatalog.TryParseHandle(fact.Id, out var id) ? id : 0, fact.Body))
             .OrderByDescending(entry => entry.Id)
             .Take(MaxDelivered)
-            .Select(entry => entry.Body)
             .ToList();
     }
 

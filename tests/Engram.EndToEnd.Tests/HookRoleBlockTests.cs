@@ -23,6 +23,24 @@ public class HookRoleBlockTests
 
         Assert.Contains(Block + "\nYour role memory key: explorer.\n- Grep the spec before the code.", context, StringComparison.Ordinal);
         Assert.Equal(1, Record(home.Root, "subagent-start").GetProperty("role_fact_count").GetInt32());
+
+        // D106: which lesson was delivered, by handle, so a later judgement can be tied to it.
+        var ids = Record(home.Root, "subagent-start").GetProperty("role_fact_ids").EnumerateArray().Select(id => id.GetString());
+        Assert.Equal(["f" + SeededFactId(home.Root)], ids);
+        Assert.Equal(JsonValueKind.Null, Record(home.Root, "subagent-start").GetProperty("fact_count").ValueKind);
+    }
+
+    [Fact]
+    public void SessionStart_WithAMainLesson_RecordsItsId()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+        using var home = new TestHome();
+        SeedRoleFact(home.Root, "main");
+
+        Primer(home.Root, """{"session_id":"s1"}""", "session-start", "SessionStart");
+
+        var ids = Record(home.Root, "session-start").GetProperty("role_fact_ids").EnumerateArray().Select(id => id.GetString());
+        Assert.Equal(["f" + SeededFactId(home.Root)], ids);
     }
 
     [Fact]
@@ -50,6 +68,7 @@ public class HookRoleBlockTests
         Assert.DoesNotContain("Role memory for", context, StringComparison.Ordinal);
         Assert.DoesNotContain("role memory key", context, StringComparison.Ordinal);
         Assert.Equal(JsonValueKind.Null, Record(home.Root, "subagent-start").GetProperty("role_fact_count").ValueKind);
+        Assert.False(Record(home.Root, "subagent-start").TryGetProperty("role_fact_ids", out _));
     }
 
     [Fact]
@@ -108,6 +127,9 @@ public class HookRoleBlockTests
         Assert.Contains("Your role memory key: main.", context, StringComparison.Ordinal);
         Assert.DoesNotContain("Role memory for", context, StringComparison.Ordinal);
         Assert.Equal(0, Record(home.Root, "session-start").GetProperty("role_fact_count").GetInt32());
+
+        // A role with no lesson delivered: the ids are absent, not an empty list (D106).
+        Assert.False(Record(home.Root, "session-start").TryGetProperty("role_fact_ids", out _));
     }
 
     private static string Primer(string home, string payload, string hook, string eventName)
@@ -124,6 +146,15 @@ public class HookRoleBlockTests
         File.ReadAllLines(Path.Combine(home, "telemetry.jsonl"))
             .Select(line => JsonDocument.Parse(line).RootElement)
             .First(record => record.GetProperty("kind").GetString() == kind);
+
+    private static long SeededFactId(string home)
+    {
+        using var connection = new SqliteConnection($"Data Source={Path.Combine(home, "engram.db")}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id FROM fact WHERE body = 'Grep the spec before the code.';";
+        return (long)command.ExecuteScalar()!;
+    }
 
     // Engram.EndToEnd.Tests has no reference to Engram.Core, so the role fact is written with raw
     // SQL in the shape RoleNotes.Append leaves: a role entity of kind agent, a note entity beneath
