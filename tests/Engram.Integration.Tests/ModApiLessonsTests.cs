@@ -74,6 +74,19 @@ public class ModApiLessonsTests
         Assert.Equal(summary.RoleFacts!.Select(f => (FactCatalog.HandleFor(f.Id), f.Body)), Current(body));
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("  ")]
+    public void AnEmptyAgent_IsTheAbsentOne_AndAnswersForMain(string agent)
+    {
+        using var sandbox = new SandboxHome();
+        var lesson = Lesson(sandbox, "main", "Ask before deleting.");
+
+        var (_, body) = Lessons(sandbox, new JsonObject { ["session_id"] = "s1", ["agent"] = agent });
+
+        Assert.Equal([(FactCatalog.HandleFor(lesson), "Ask before deleting.")], Current(body));
+    }
+
     [Fact]
     public void AnUnaddressableAgent_HasNoLessons()
     {

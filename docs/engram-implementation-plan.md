@@ -7202,7 +7202,8 @@ session note; several reasons join with a newline. A remember with no scope ther
 for byte what it answered before.
 
 **Defaults.** `agent` scope with no `agent` field uses `main` (D104): a mod speaks for the main
-session unless it names a role. Outside `agent` scope the `agent` field is not passed on at all, so
+session unless it names a role. An empty or whitespace `agent` is an absent one and uses `main`
+too; `???` is a key that slugs to nothing and still falls back to a session note with its notice. Outside `agent` scope the `agent` field is not passed on at all, so
 an omitted scope writes exactly the session note it wrote before even if a mod sends a stray
 `agent`. An unknown `scope` is a 400 and writes nothing; the match is exact, so `Agent` and `""` are
 unknown too.
@@ -7223,7 +7224,8 @@ can pass one straight to `fact`, `history` or `engram_expand`.
 
 **What a role would get now.** The mod op `lessons` takes `{session_id, mod, agent?}` and answers
 `{"current": [{"id": "f42", "text": …}]}`: the role's delivery set chosen by the same function the
-primer uses. `agent` defaults to `main` (D104); a key that slugs to nothing has no role memory and
+primer uses. `agent` defaults to `main` (D104), and an empty or whitespace one counts as absent; a
+key that slugs to nothing has no role memory and
 answers an empty list, as the primer reads it (D100). It is a lookup: it writes nothing, records no
 telemetry and is not foreground work (D82). It answers for *now*, not for what a session start
 delivered — a lesson written or judged since then changes it — so the field is `current`, and the

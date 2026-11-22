@@ -77,6 +77,19 @@ public sealed class ModApiScopedRememberTests : IDisposable
         Assert.Null(body["notice"]);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AgentScope_WithAnEmptyAgent_IsTheAbsentOne_AndWritesForMain(string agent)
+    {
+        using var sandbox = new SandboxHome();
+
+        var (_, body) = Remember(sandbox, new JsonObject { ["statement"] = "Read the spec first.", ["scope"] = "agent", ["agent"] = agent });
+
+        Assert.StartsWith("/agents/main/", Row(sandbox, body).Path, StringComparison.Ordinal);
+        Assert.Null(body["notice"]);
+    }
+
     [Fact]
     public void AgentScope_WithANamedAgent_WritesUnderThatRole()
     {

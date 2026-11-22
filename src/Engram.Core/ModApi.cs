@@ -288,7 +288,7 @@ public static class ModApi
 
         // A mod speaks for the main session unless it names a role (D105). Outside agent scope no
         // agent is passed at all, so an omitted scope writes exactly what it wrote before.
-        var agent = scope == MemoryScopes.Agent ? request.Agent ?? RoleNotes.MainRole : null;
+        var agent = scope == MemoryScopes.Agent ? RoleOrMain(request.Agent) : null;
 
         using var connection = EngramDatabase.OpenInitialized(home);
         var resolution = ScopedRemember.Resolve(connection, scope, request.ProjectDir);
@@ -326,7 +326,7 @@ public static class ModApi
     private static ModApiResult Lessons(EngramHome home, ModRequest request)
     {
         RequireSession(request);
-        var role = request.Agent ?? RoleNotes.MainRole;
+        var role = RoleOrMain(request.Agent);
 
         // An unaddressable key has no role memory, as the primer reads it (D100).
         IReadOnlyList<RoleFact> current = [];
@@ -754,6 +754,9 @@ public static class ModApi
         request.FactId is { } handle && FactCatalog.TryParseHandle(handle, out var id)
             ? id
             : throw Bad("fact_id is required and looks like 'f42'");
+
+    // An empty or whitespace agent is an absent one (D105); "???" is a key, just not an addressable one.
+    private static string RoleOrMain(string? agent) => string.IsNullOrWhiteSpace(agent) ? RoleNotes.MainRole : agent;
 
     private static ModApiResult Ok(string json) => new(200, json);
 
