@@ -283,6 +283,7 @@ public class PluginSourceTests
     {
         using var tree = new TempTree();
         tree.Write("mods/a/index.ts", CompliantHandler + "on('tool.call', { tool: 'Edit' }, async ($, e, next) => {\n  const go = once(next)\n  try {\n    if (next.signal.aborted) return go(e)\n    return go(e)\n  } catch { return go.fallback(e) }\n})\n");
+        tree.Write("mods/b/index.ts", "on('turn.step', async function* ($, e, next) {\n  const go = once(next)\n  try {\n    return yield* go(e)\n  } catch {\n    return yield* go.fallback(e)\n  }\n})\n");
         tree.Write("mods/shared/guard.ts", "next(e)\n");
         tree.Write("mods/a/a.test.ts", "on('x', (_$, e) => next(e))\n");
 
@@ -294,6 +295,8 @@ public class PluginSourceTests
     [InlineData("on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  const go = once(next)\n  return go(e)\n})\n", "go.fallback(e)")]
     [InlineData("on('turn.start', ANY_TURN_START, async ($, e, next) => {\n  const go = once(next)\n  try { return next(e) } catch { return go.fallback(e) }\n})\n", "next directly")]
     [InlineData("on('command.run', { command: 'x' }, async ($) => {\n  return { text: 'x' }\n})\n", "once(next)")]
+    [InlineData("on('turn.step', async function* ($, e, next) {\n  return yield* next(e)\n})\n", "once(next)")]
+    [InlineData("on('turn.step', async function* ($, e, next) {\n  const go = once(next)\n  const n = next\n  try { return yield* go(e) } catch { return yield* go.fallback(e) }\n})\n", "stop passing or aliasing next")]
     public void AHandlerOutsideTheGuard_IsReportedNamingTheFileAndWhatIsMissing(string source, string expected)
     {
         using var tree = new TempTree();
@@ -607,7 +610,8 @@ public class PluginSourceTests
     // `next` as a value (an alias, an argument) rather than a property read or the one wrapped form.
     private static readonly Regex BareNextPattern = new(@"(?<![\w.$'""`-])next\b(?!\s*\.)", RegexOptions.Compiled);
 
-    private static readonly Regex SignatureNextPattern = new(@",\s*next\s*\)\s*=>", RegexOptions.Compiled);
+    // The parameter itself, in an arrow or in a streaming event's generator (`async function* ($, e, next) {`).
+    private static readonly Regex SignatureNextPattern = new(@",\s*next\s*\)\s*=>|\bfunction\s*\*\s*\(\s*[\w$]+\s*,\s*[\w$]+\s*,\s*next\s*\)\s*(?=\{)", RegexOptions.Compiled);
 
     // The engine's own `.catch` runs when a hook outruns its budget, which no try/catch in the hook
     // can see; its `next(e)` replays what an earlier call settled to rather than calling again.

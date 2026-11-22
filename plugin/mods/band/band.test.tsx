@@ -90,7 +90,7 @@ function world(on: On, lens: LensState | undefined, table: RoutingTable = { bina
   }
 }
 
-const PROPS = { hasSurvey: false, isWorking: false, maxRows: 5, bodyColumns: 80, scroll: { offset: 0, bodyRows: 5 }, view: {} }
+const PROPS = { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 5, bodyColumns: 80, scroll: { offset: 0, bodyRows: 5 }, view: {} }
 
 async function draw(eng: Engine, surface: (typeof SURFACES)[number], props: Partial<typeof PROPS> = {}) {
   return eng.ui.mount({ plugin: 'engram', surface, component: 'AbovePrompt', props: { ...PROPS, ...props } })
