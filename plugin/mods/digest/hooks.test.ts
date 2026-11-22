@@ -126,7 +126,7 @@ const edit = ($: Engine) => $.tool.call({ tool: 'Edit', file_path: '/x', old_str
 
 const recallReply = (coverage: string): FetchHandler => () => ({ status: 200, json: { coverage, fact_count: 0, notes: [], gaps: null, text: '', facts: [] } })
 
-test('N = 0: turns complete, no model call, ever', async ($, on) => {
+test('N = 0: turns complete, no model call, ever', { options: { digest_every_n_turns: 0 } }, async ($, on) => {
   const rig = rigUp(on)
   rig.rows.push(row('user', 'we use tabs'))
   for (let i = 0; i < 10; i++) await turn($)
@@ -143,7 +143,7 @@ test('N = 0 with auto-save on and lessons to judge: no lessons call, no model ca
   expect(rig.fetches).toEqual([])
 })
 
-const ON = (n: number) => ({ options: { digest_every_n_turns: n } })
+const ON = (n: number) => ({ options: { digest_every_n_turns: n, digest_auto_save: false } })
 const CANDIDATES = reflection(notes('Jim prefers tabs in Go files', 'The build uses Native AOT'))
 
 /** A rig whose model proposes `CANDIDATES` and whose recall says `coverage` for every query. */
@@ -486,6 +486,18 @@ test('session start registers both commands', async ($, on) => {
 })
 
 const AUTO = { options: { digest_every_n_turns: 1, digest_auto_save: true } }
+
+test('the manifest defaults: nine plain turns do nothing, the tenth digests and saves without review', async ($, on) => {
+  const rig = proposing(on, 'none', { remember: () => ({ status: 200, json: { handle: 'f1', id: 1, created: true } }) })
+  for (let i = 0; i < 9; i++) await turn($)
+  await rig.clock.advance(0)
+  expect(rig.completions.length).toBe(0)
+  await turn($)
+  await rig.clock.advance(0)
+  expect(rig.completions.length).toBe(1)
+  expect(rig.fetches.filter((f) => f.op === 'remember').length).toBe(2)
+  expect(rig.opened).toEqual([])
+})
 
 test('auto-save: survivors are remembered as unreviewed, no pane opens, and one toast shows each statement', AUTO, async ($, on) => {
   let next = 1

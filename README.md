@@ -704,13 +704,15 @@ dialog cannot be shown, the revision goes ahead and one toast says it was applie
 
 #### Digest
 
-Options: `digest_every_n_turns` (default `0`, off), `digest_auto_save` (default `false`).
+Options: `digest_every_n_turns` (default `10`; `0` turns it off), `digest_auto_save` (default `true`).
+The reflection runs after the turn has been handed back, so it never delays one and spends none of
+the conversation's context.
 Commands: `/engram-digest-review`, `/engram-remember-selection`.
 
 Every N turns — or sooner, from the second turn, when the model edited files — the mod reads what has
 been said since the last digest and asks Claude Code for a small Haiku completion that proposes
-durable statements. Anything recall already covers with `high` coverage is dropped. What is left
-appears in a **Memory candidates** pane with a tick box each and **Save** and **Skip**; nothing is
+durable statements. Anything recall already covers with `high` coverage is dropped. With `digest_auto_save`
+off, what is left appears in a **Memory candidates** pane with a tick box each and **Save** and **Skip**; nothing is
 saved until you press Save, and those facts record "proposed by auto-digest, approved by the user" as
 their evidence. This is separate from `/engram:digest`, which has the model flush its own session notes.
 
@@ -728,7 +730,7 @@ with auto-save on it sends the first call's judgement of each one that came up (
 model's, unreviewed, and it reads the assistant's text as well as yours, so an instruction the
 assistant relayed can sway it — at worst one verdict per lesson per session.
 
-**`digest_auto_save` removes the review step.** The candidates are saved at once and listed in a
+**`digest_auto_save`, on by default, removes the review step.** The candidates are saved at once and listed in a
 toast, and their evidence reads "proposed and saved by auto-digest, not reviewed by the user", so the
 facts are marked as unreviewed. A candidate that fails to save stays
 for `/engram-digest-review`. `/engram-remember-selection` puts the text you selected in the prompt as
