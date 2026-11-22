@@ -769,11 +769,15 @@ back.
 |---|---|
 | server start | `session.start`, not waited for |
 | session primer | the first prompt of the process, as model-only context |
-| re-prime after `/clear` | the next prompt after `session.end` with reason `clear` |
+| re-prime after `/clear` or a resume | the next prompt after `session.end` with reason `clear` or `resume` |
 | re-prime after a compaction | the next prompt after a main-loop request carries fewer messages than the one before |
-| subagent primer | `agent.spawn`, put ahead of the subagent's prompt |
+| subagent primer | `agent.spawn`, put ahead of the subagent's prompt; not on a resumed subagent |
 | `memory-guard`, `lookup-nudge` | `tool.call`, before the tool runs; a deny becomes the call's deny |
-| `file-touched`, `tool-observed` | `tool.call`, after the tool ran, not waited for |
+| `file-touched`, `tool-observed` | `tool.call`, after the tool ran, not waited for; `file-touched` only when the call was not denied and did not fail |
+
+A slash command does not use up a pending primer: the first one carries it and the first prompt that
+is not a slash command carries it again, since a command such as `/model` may never reach the model.
+So at most two copies of one primer are sent.
 
 The compaction digest is not bridged: its events are skipped on a managed install, and where they are
 not, the classic hooks run it.
@@ -795,6 +799,8 @@ exit or output that is not JSON passes the prompt, the spawn or the tool call th
   prompt, so it gets no subagent primer.
 - The subagent primer's telemetry record has no `agent_id`, which does not exist before the spawn.
 - A compaction in the middle of a turn is re-primed at the next prompt, not inside the turn.
+- A compaction is detected as a main-loop request carrying fewer messages than the one before, so a
+  rewind reads as one too and costs one extra primer at the next prompt.
 - Under `allowManagedHooksOnly` or `allowManagedModsOnly` nothing runs unless an administrator installs
   Engram as a managed plugin.
 - None of this has been measured on a managed install.

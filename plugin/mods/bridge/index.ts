@@ -76,10 +76,21 @@ export function toolInputOf(e: ToolCallInput): Json {
   return input
 }
 
+/** `agent_id` for a call made in a subagent's loop, as a classic hook's payload carries it; nothing on main. */
+export function agentOf(e: ToolCallInput): { agent_id?: string } {
+  return e.agentId === undefined ? {} : { agent_id: e.agentId }
+}
+
 export const register: Register = (on) => {
   // Module memory, so a process start (and a plugin reload) primes once.
-  let primed = false
-  let pending = false
+  // A primer is pending from the start, and again after /clear, a resume or a compaction.
+  let pending = true
+  // A pending primer rides along with at most one slash command, which may never reach the model.
+  let carriedBySlash = false
+  const arm = () => {
+    pending = true
+    carriedBySlash = false
+  }
   let lastMainCount: number | undefined
 
   on('session.start', ANY_SESSION_START, async ($, e, next) => {
@@ -96,10 +107,15 @@ export const register: Register = (on) => {
   on('prompt.submit', ANY_PROMPT_SUBMIT, async ($, e, next) => {
     const go = once(next)
     try {
-      if (primed && !pending) return go(e)
-      // Claimed before the await, so a second prompt in flight does not run the verb again.
-      primed = true
-      pending = false
+      if (!pending) return go(e)
+      // Claimed before the await, so a second prompt in flight does not run the verb again. A slash
+      // command carries the primer without using it up; the first prompt that is not one uses it up.
+      if (e.command !== undefined) {
+        if (carriedBySlash) return go(e)
+        carriedBySlash = true
+      } else {
+        pending = false
+      }
       let primer: string | undefined
       try {
         const io = bindIo($)
@@ -114,11 +130,12 @@ export const register: Register = (on) => {
     }
   })
 
-  // `/clear` goes on under a new session id with no session.start, so the next prompt re-primes.
-  on('session.end', { reason: 'clear' }, async ($, e, next) => {
+  // `/clear` and a resume go on under another session id with no session.start, so the next prompt
+  // re-primes, and the other conversation's length is no baseline for detecting a compaction.
+  on('session.end', { reason: /^(clear|resume)$/ }, async ($, e, next) => {
     const go = once(next)
     try {
-      pending = true
+      arm()
       lastMainCount = undefined
       return go(e)
     } catch {
@@ -132,7 +149,7 @@ export const register: Register = (on) => {
     let started = false
     try {
       if (e.agentId === undefined) {
-        if (lastMainCount !== undefined && e.messageCount < lastMainCount) pending = true
+        if (lastMainCount !== undefined && e.messageCount < lastMainCount) arm()
         lastMainCount = e.messageCount
       }
       started = true
@@ -147,6 +164,8 @@ export const register: Register = (on) => {
   on('agent.spawn', async ($, e, next) => {
     const go = once(next)
     try {
+      // A resume ignores a rewritten prompt, so it would only write a primer record for nothing.
+      if (e.resume !== undefined) return go(e)
       let primer: string | undefined
       try {
         const io = bindIo($)
@@ -183,9 +202,11 @@ export const register: Register = (on) => {
         if (reason !== undefined) return { deny: reason }
       }
       const ran = await go(e)
-      if (io !== undefined && base !== undefined && ran.deny === undefined) {
+      // As classic PostToolUse: only a call that ran and succeeded.
+      if (io !== undefined && base !== undefined && ran.deny === undefined && ran.isError !== true) {
         // Not awaited: the spool write must never hold the tool's result.
-        runVerb(io, 'file-touched', { ...base, ...tool, hook_event_name: 'PostToolUse' }).catch(() => {})
+        const payload = { ...base, ...tool, ...agentOf(e), hook_event_name: 'PostToolUse' }
+        runVerb(io, 'file-touched', payload).catch(() => {})
       }
       return ran
     } catch {
@@ -229,6 +250,7 @@ export const register: Register = (on) => {
           hook_event_name: 'PostToolUse',
           tool_name: e.tool,
           tool_input: toolInputOf(e),
+          ...agentOf(e),
         }
         await runVerb(io, 'tool-observed', payload)
       }

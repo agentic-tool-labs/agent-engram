@@ -71,10 +71,12 @@ function rig(on: On, verbs: Partial<Record<Verb, Answer>> = LIVE, table: Partial
     return { model: 'opus', agentId: 'a1' }
   })
   const tools: Record<string, unknown>[] = []
-  const toolControl: { deny?: string } = {}
+  const toolControl: { deny?: string; error?: string } = {}
   on('tool.call', (_$, e) => {
     tools.push({ ...e })
-    return toolControl.deny !== undefined ? { deny: toolControl.deny } : ({ result: {}, text: 'done', ref: 0 } as never)
+    if (toolControl.deny !== undefined) return { deny: toolControl.deny }
+    if (toolControl.error !== undefined) return { isError: true, result: toolControl.error, text: toolControl.error } as never
+    return { result: {}, text: 'done', ref: 0 } as never
   })
   on('turn.step', async function* (_$, e) {
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null } as never
@@ -161,6 +163,46 @@ test('a stream that fails beneath reaches the caller as it failed, after what it
   expect(failure).toBeDefined()
 })
 
+const slash = (name: string) => prompt('/' + name, { command: { name, args: '' } })
+
+test('two slash commands then a plain prompt: the primer rides the first slash command and the plain prompt only', async ($, on) => {
+  const r = rig(on)
+  const seen: number[] = []
+  for (const p of [slash('model'), slash('config'), prompt(), prompt()]) seen.push(primersIn(await $.prompt.submit(p)))
+  expect(seen).toEqual([1, 0, 1, 0])
+  expect(r.calls('session-start').length).toBe(2)
+})
+
+test('a plain first prompt uses the primer up: a slash command after it carries none', async ($, on) => {
+  rig(on)
+  const seen: number[] = []
+  for (const p of [prompt(), slash('model'), prompt()]) seen.push(primersIn(await $.prompt.submit(p)))
+  expect(seen).toEqual([1, 0, 0])
+})
+
+test('after /clear, a slash command carries the re-armed primer once more and the plain prompt uses it up', async ($, on) => {
+  rig(on)
+  await $.prompt.submit(slash('model'))
+  await $.prompt.submit(prompt())
+  await clear($)
+  const seen: number[] = []
+  for (const p of [slash('model'), slash('model'), prompt(), prompt()]) seen.push(primersIn(await $.prompt.submit(p)))
+  expect(seen).toEqual([1, 0, 1, 0])
+})
+
+test('a resume re-primes the next prompt and resets the compaction baseline', async ($, on) => {
+  const r = rig(on)
+  await $.prompt.submit(prompt())
+  await step($, 30)
+  await $.session.end({ reason: 'resume', sessionId: SESSION, resume: { sessionId: SESSION } } as never)
+  const seen: number[] = []
+  seen.push(primersIn(await $.prompt.submit(prompt())))
+  await step($, 4) // the resumed conversation is shorter than the one left; that is not a compaction
+  seen.push(primersIn(await $.prompt.submit(prompt())))
+  expect(seen).toEqual([1, 0])
+  expect(r.calls('session-start').length).toBe(2)
+})
+
 test('a session end other than /clear does not re-prime', async ($, on) => {
   rig(on)
   await $.prompt.submit(prompt())
@@ -182,6 +224,13 @@ test('a spawn gets the subagent primer and a blank line before its prompt, typed
     hook_event_name: 'SubagentStart',
     agent_type: 'Explore',
   })
+})
+
+test('a resumed spawn runs no verb and its prompt passes as given', async ($, on) => {
+  const r = rig(on)
+  await $.agent.spawn({ ...(spawnInput('carry on') as object), resume: { agentId: 'a0' } } as never)
+  expect(r.spawns).toEqual(['carry on'])
+  expect(r.calls('subagent-start').length).toBe(0)
 })
 
 // --- stood down: byte-identical ---------------------------------------------------------------
@@ -292,6 +341,25 @@ test('a call denied beneath the bridge triggers no file-touched', async ($, on) 
   expect(out.deny).toBe('refused below')
   await r.settle()
   expect(r.calls('file-touched').length).toBe(0)
+})
+
+test('an edit that errored triggers no file-touched', async ($, on) => {
+  const r = rig(on)
+  r.toolControl.error = 'old_string not found'
+  const out = await $.tool.call(EDIT as never)
+  expect(out.isError).toBe(true)
+  await r.settle()
+  expect(r.calls('file-touched').length).toBe(0)
+})
+
+test("a subagent's calls carry its agent_id to file-touched and tool-observed, and not to the guard", async ($, on) => {
+  const r = rig(on)
+  await $.tool.call({ ...EDIT, agentId: 'agent-7' } as never)
+  await $.tool.call({ ...RECALL, agentId: 'agent-7' } as never)
+  await r.settle()
+  expect(JSON.parse(r.calls('file-touched')[0]!.stdin!).agent_id).toBe('agent-7')
+  expect(JSON.parse(r.calls('tool-observed')[0]!.stdin!).agent_id).toBe('agent-7')
+  expect('agent_id' in JSON.parse(r.calls('memory-guard')[0]!.stdin!)).toBe(false)
 })
 
 test('an Engram tool call is reported to tool-observed', async ($, on) => {
