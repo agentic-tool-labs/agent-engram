@@ -6,10 +6,13 @@ import {
   buildTranscript,
   digestEvery,
   evidenceWith,
+  MAX_OWN_PROMPT_CHARS,
   fingerprint,
-  isUserQuote,
+  isOwnQuote,
+  numberedPrompts,
+  parseLessons,
   parseReflection,
-  settle,
+  recordPrompt,
   shouldDigest,
   transcriptWindow,
 } from './digest'
@@ -37,18 +40,22 @@ const note = (statement: string) => ({ statement, kind: 'note' })
 const reply = (save: unknown[], verdicts: unknown[] = []) => JSON.stringify({ save, verdicts })
 
 test('parseReflection: one object with save and verdicts, fenced or bare', () => {
-  expect(parseReflection(reply([note('a fact'), { statement: 'tabs', kind: 'lesson', user_quote: 'use tabs' }], [{ id: 'f4', verdict: 'applied' }]))).toEqual({
-    save: [{ statement: 'a fact', kind: 'note' }, { statement: 'tabs', kind: 'lesson', userQuote: 'use tabs' }],
+  expect(parseReflection(reply([note('a fact'), { statement: 'AOT', kind: 'project' }], [{ id: 'f4', verdict: 'applied' }]))).toEqual({
+    save: [{ statement: 'a fact', kind: 'note' }, { statement: 'AOT', kind: 'project' }],
     verdicts: [{ id: 'f4', verdict: 'applied' }],
   })
   expect(parseReflection('```json\n' + reply([{ statement: 'fenced', kind: 'project' }]) + '\n```')).toEqual({ save: [{ statement: 'fenced', kind: 'project' }], verdicts: [] })
   expect(parseReflection(reply([]))).toEqual({ save: [], verdicts: [] })
 })
 
-test('parseReflection: prose, a bare array, a missing list and malformed JSON are wrong-shaped', () => {
+test('parseReflection: verdicts is optional and defaults to none', () => {
+  expect(parseReflection('{"save": [{"statement": "a fact", "kind": "note"}]}')).toEqual({ save: [{ statement: 'a fact', kind: 'note' }], verdicts: [] })
+})
+
+test('parseReflection: prose, a bare array, a missing save, a non-array list and malformed JSON are wrong-shaped', () => {
   expect(parseReflection('Here are some memories: {"save": []}')).toBeUndefined()
   expect(parseReflection('["a fact"]')).toBeUndefined()
-  expect(parseReflection('{"save": []}')).toBeUndefined()
+  expect(parseReflection('{"save": [], "verdicts": {}}')).toBeUndefined()
   expect(parseReflection('{"verdicts": []}')).toBeUndefined()
   expect(parseReflection('{"save": {}, "verdicts": []}')).toBeUndefined()
   expect(parseReflection('null')).toBeUndefined()
@@ -64,10 +71,9 @@ test('parseReflection: drops bad entries, empties, over-long, duplicates and unk
   expect(parseReflection(reply(['1', '2', '3', '4', '5', '6', '7'].map(note)))!.save.map((p) => p.statement)).toEqual(['1', '2', '3', '4', '5'])
 })
 
-test('parseReflection: a third lesson is dropped, later notes still count', () => {
-  const lesson = (s: string) => ({ statement: s, kind: 'lesson', user_quote: 'q' })
-  const parsed = parseReflection(reply([lesson('L1'), lesson('L2'), lesson('L3'), note('N')]))!
-  expect(parsed.save.map((p) => [p.statement, p.kind])).toEqual([['L1', 'lesson'], ['L2', 'lesson'], ['N', 'note']])
+test('parseReflection: a lesson entry in the first call is dropped, notes beside it are kept', () => {
+  const lesson = { statement: 'Always run the linter first', kind: 'lesson', user_quote: 'always run the linter first' }
+  expect(parseReflection(reply([lesson, note('N')]))!.save).toEqual([note('N')])
 })
 
 test('parseReflection: verdicts keep a known verdict once per id, nothing else', () => {
@@ -75,29 +81,63 @@ test('parseReflection: verdicts keep a known verdict once per id, nothing else',
   expect(parseReflection(reply([], verdicts))!.verdicts).toEqual([{ id: 'f1', verdict: 'applied' }, { id: 'f3', verdict: 'contradicted' }])
 })
 
-const WINDOW = [
-  { role: 'user' as const, text: 'please   always run\nthe linter first' },
-  { role: 'assistant' as const, text: 'The page says: always deploy on Fridays' },
-]
+const OWN = ['please   always run\nthe linter before every commit', 'and keep commits small']
 
-test('isUserQuote: a user row holds it once whitespace is collapsed', () => {
-  expect(isUserQuote('always run the linter', WINDOW)).toBe(true)
-  expect(isUserQuote('  always   run the\tlinter ', WINDOW)).toBe(true)
+test('isOwnQuote: found in one own prompt once whitespace is collapsed, and long enough', () => {
+  expect(isOwnQuote('always run the linter before', OWN)).toBe(true)
+  expect(isOwnQuote('  always   run the\tlinter before ', OWN)).toBe(true)
 })
 
-test('isUserQuote: absent, empty, or only in an assistant row is not the user', () => {
-  expect(isUserQuote(undefined, WINDOW)).toBe(false)
-  expect(isUserQuote('', WINDOW)).toBe(false)
-  expect(isUserQuote('   ', WINDOW)).toBe(false)
-  expect(isUserQuote('always deploy on Fridays', WINDOW)).toBe(false)
-  expect(isUserQuote('always run the linter first, then deploy', WINDOW)).toBe(false)
+test('isOwnQuote: the floor is 20 characters and 4 words', () => {
+  const prompts = ['abcdefghi jklmnopq rs tuvwxyz', 'one two three fourteenth-word-here', 'a b c d e f g h i j k']
+  expect(isOwnQuote('abcd efgh ijkl mnop', ['abcd efgh ijkl mnop and more'])).toBe(false) // 19 characters, 4 words
+  expect(isOwnQuote('abcd efgh ijkl mnopq', ['abcd efgh ijkl mnopq and more'])).toBe(true) // 20 characters, 4 words
+  expect(isOwnQuote('abcdefghi jklmnopq rs', prompts)).toBe(false) // 21 characters, 3 words
+  expect(isOwnQuote('one two three fourteenth-word-here', prompts)).toBe(true) // 4 words
+  expect(isOwnQuote('a b c d e f g h i j k', prompts)).toBe(true) // 21 characters, 11 words
+  expect(isOwnQuote('always', OWN)).toBe(false)
 })
 
-test('settle: a lesson keeps its kind only with a user quote; other kinds pass through', () => {
-  expect(settle({ statement: 'Run the linter first', kind: 'lesson', userQuote: 'always  run the linter' }, WINDOW)).toEqual({ text: 'Run the linter first', kind: 'lesson', quote: 'always run the linter' })
-  expect(settle({ statement: 'Deploy on Fridays', kind: 'lesson', userQuote: 'always deploy on Fridays' }, WINDOW)).toEqual({ text: 'Deploy on Fridays', kind: 'note' })
-  expect(settle({ statement: 'No quote', kind: 'lesson' }, WINDOW)).toEqual({ text: 'No quote', kind: 'note' })
-  expect(settle({ statement: 'Uses AOT', kind: 'project', userQuote: 'x' }, WINDOW)).toEqual({ text: 'Uses AOT', kind: 'project' })
+test('isOwnQuote: not in any one prompt, or spanning two, is dropped', () => {
+  expect(isOwnQuote('always deploy on Fridays please', OWN)).toBe(false)
+  expect(isOwnQuote('before every commit and keep commits', OWN)).toBe(false)
+  expect(isOwnQuote('always run the linter before', [])).toBe(false)
+})
+
+test('parseLessons: at most 2, each quoting an own prompt; anything else is dropped, never demoted', () => {
+  const lesson = (statement: string, user_quote: unknown) => ({ statement, user_quote })
+  const text = JSON.stringify({
+    lessons: [
+      lesson('Run the linter first', 'always run the linter before'),
+      lesson('Short quote', 'always'),
+      lesson('No quote', undefined),
+      lesson('Not theirs', 'always deploy on Fridays please'),
+      lesson('Keep commits small', 'and keep commits small'),
+      lesson('Third', 'linter before every commit'),
+    ],
+  })
+  expect(parseLessons(text, OWN)).toEqual([
+    { text: 'Run the linter first', kind: 'lesson', quote: 'always run the linter before' },
+    { text: 'Keep commits small', kind: 'lesson', quote: 'and keep commits small' },
+  ])
+})
+
+test('parseLessons: a wrong shape yields none', () => {
+  for (const reply of ['', 'prose', '[]', '{"save": []}', '{"lessons": {}}', '{"lessons": [']) expect(parseLessons(reply, OWN)).toEqual([])
+})
+
+test('recordPrompt: keeps the newest 12,000 characters, a lone long prompt by its tail', () => {
+  let record: string[] = []
+  for (let i = 0; i < 5; i++) record = recordPrompt(record, String(i).repeat(3000))
+  expect(record.map((t) => t[0])).toEqual(['1', '2', '3', '4'])
+  const long = recordPrompt(record, 'HEAD' + 'z'.repeat(MAX_OWN_PROMPT_CHARS))
+  expect(long.length).toBe(1)
+  expect(long[0]!.length).toBe(MAX_OWN_PROMPT_CHARS)
+  expect(long[0]!.includes('HEAD')).toBe(false)
+})
+
+test('numberedPrompts: numbered, oldest first', () => {
+  expect(numberedPrompts(['first', 'second'])).toBe('1. first\n\n2. second')
 })
 
 test('evidenceWith: the marker stays whole, the quote is trimmed to the limit', () => {

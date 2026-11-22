@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { EDIT_TOOLS, SHARED_INITIAL, modApi } from '../shared/client'
 import type { ModIo } from '../shared/client'
-import { ANY_SESSION_START, ANY_TURN_COMPLETE } from '../shared/events'
+import { ANY_PROMPT_SUBMIT, ANY_SESSION_START, ANY_TURN_COMPLETE, isOwnPrompt } from '../shared/events'
 import {
   AUTO_EVIDENCE,
   DIGEST_INITIAL,
@@ -14,9 +14,12 @@ import {
   digestEvery,
   evidenceWith,
   fingerprint,
+  LESSON_SYSTEM,
   lessonsBlock,
+  numberedPrompts,
+  parseLessons,
   parseReflection,
-  settle,
+  recordPrompt,
   shouldDigest,
   transcriptWindow,
 } from './digest'
@@ -63,16 +66,21 @@ async function rememberAll($: EngineInterface, items: readonly DigestCandidate[]
   const savedLines: string[] = []
   const failed: string[] = []
   const failedTexts = new Set<string>()
+  // undefined until asked; null when asking threw, and then a project entry is filed as a session note.
+  let cwd: string | null | undefined
   for (const { text, kind, quote } of items) {
-    // Agent scope needs the quote `settle` found in a user row; a lesson without one is a session note.
+    // Agent scope needs the quote `parseLessons` found in an own prompt; a lesson without one is never sent as one.
     const isLesson = kind === 'lesson' && quote !== undefined
     const body: Record<string, string> = { session_id: sessionId, statement: text, evidence: evidenceWith(marker, isLesson ? quote : undefined) }
     if (isLesson) {
       body['scope'] = 'agent'
       if (role !== undefined) body['agent'] = role
     } else if (kind === 'project') {
-      body['scope'] = 'project'
-      body['project_dir'] = await $.session.cwd()
+      if (cwd === undefined) cwd = await $.session.cwd().catch(() => null)
+      if (cwd !== null) {
+        body['scope'] = 'project'
+        body['project_dir'] = cwd
+      }
     }
     const res = await modApi<RememberReply>(io, 'remember', body, { mod: MOD })
     if (res.ok) {
@@ -87,8 +95,11 @@ async function rememberAll($: EngineInterface, items: readonly DigestCandidate[]
   return { saved, savedLines, failed, failedTexts }
 }
 
-/** Reads what was said since the last digest, asks for statements, drops the ones recall already covers. */
-async function runDigest($: EngineInterface, autoSave: boolean): Promise<void> {
+/**
+ * Reads what was said since the last digest, asks for statements, drops the ones recall already covers.
+ * `takeOwnPrompts` hands over the own prompts recorded since the last mark and clears the record.
+ */
+async function runDigest($: EngineInterface, autoSave: boolean, takeOwnPrompts: () => string[]): Promise<void> {
   try {
     const messages = await $.session.messages()
     const { seenMessages, lastSeen } = await read($, DIGEST)
@@ -98,6 +109,7 @@ async function runDigest($: EngineInterface, autoSave: boolean): Promise<void> {
     const fresh = isMarkValid ? messages.slice(seenMessages) : messages
     const last = messages.at(-1)
     await update($, DIGEST, (s) => ({ ...s, seenMessages: messages.length, lastSeen: last === undefined ? '' : fingerprint(last) }))
+    const ownPrompts = takeOwnPrompts()
 
     const window = transcriptWindow(fresh)
     if (window.length === 0) return
@@ -107,15 +119,28 @@ async function runDigest($: EngineInterface, autoSave: boolean): Promise<void> {
     const sessionId = await io.sessionId()
     const lessons = await currentLessons($, sessionId)
     const reply = await $.model.complete({ model: 'haiku', system: DIGEST_SYSTEM, prompt: lessonsBlock(lessons) + transcript, maxTokens: 600 })
-    if (!reply.isAnswered) return
-    const reflection = parseReflection(reply.text)
-    if (reflection === undefined) return
+    const reflection = reply.isAnswered ? parseReflection(reply.text) : undefined
+    const learned = await lessonCall($, ownPrompts)
 
-    const rows = window.map((k) => k.row)
-    await proposeOrSave($, sessionId, reflection.save.map((p) => settle(p, rows)), autoSave)
-    if (autoSave) await sendVerdicts($, sessionId, reflection.verdicts, lessons)
+    const saves = [...(reflection?.save ?? []).map((p) => ({ text: p.statement, kind: p.kind })), ...learned]
+    await proposeOrSave($, sessionId, saves, autoSave)
+    if (autoSave && reflection !== undefined) await sendVerdicts($, sessionId, reflection.verdicts, lessons)
   } catch {
     // A digest is a convenience; nothing it hits may surface.
+  }
+}
+
+/**
+ * The lesson call: its only input is the own prompts, so nothing the assistant, a tool, a peer or a
+ * plugin wrote can become a role lesson. Not made when none was recorded; a failure yields none.
+ */
+async function lessonCall($: EngineInterface, ownPrompts: readonly string[]) {
+  if (ownPrompts.length === 0) return []
+  try {
+    const reply = await $.model.complete({ model: 'haiku', system: LESSON_SYSTEM, prompt: numberedPrompts(ownPrompts), maxTokens: 300 })
+    return reply.isAnswered ? parseLessons(reply.text, ownPrompts) : []
+  } catch {
+    return []
   }
 }
 
@@ -208,6 +233,29 @@ async function skipAll($: EngineInterface): Promise<void> {
 export const register: Register = (on, options) => {
   const every = digestEvery(options)
   const autoSave = digestAutoSave(options)
+  // The person's own prompts since the last digest mark, the lesson call's only input.
+  // ponytail: in memory only, so a mod reload loses the window and it yields no lessons; atom state if that matters.
+  let ownPrompts: string[] = []
+  const takeOwnPrompts = () => {
+    const taken = ownPrompts
+    ownPrompts = []
+    return taken
+  }
+
+  // Records and passes on: the prompt reaches the engine exactly as it arrived, with nothing attached.
+  on('prompt.submit', ANY_PROMPT_SUBMIT, async ($, e, next) => {
+    const go = once(next)
+    try {
+      try {
+        if (every > 0 && isOwnPrompt(e)) ownPrompts = recordPrompt(ownPrompts, e.text)
+      } catch {
+        // Not recorded; the prompt is unaffected.
+      }
+      return go(e)
+    } catch {
+      return go.fallback(e)
+    }
+  })
 
   on('session.start', ANY_SESSION_START, async ($, e, next) => {
     const go = once(next)
@@ -255,7 +303,7 @@ export const register: Register = (on, options) => {
           isDue = shouldDigest(every, turns, s.editedThisTurn)
           return { ...s, turnsSinceDigest: isDue ? 0 : turns, editedThisTurn: false }
         })
-        if (isDue) $.clock.after(0, () => runDigest($, autoSave))
+        if (isDue) $.clock.after(0, () => runDigest($, autoSave, takeOwnPrompts))
       } catch {
         // This turn is not counted.
       }

@@ -716,12 +716,17 @@ their evidence. This is separate from `/engram:digest`, which has the model flus
 
 **Each statement has a kind.** A `note` is a session note, as before. A `project` fact is filed under
 the session's repository. A `lesson` — how the assistant should behave next time — is filed under the
-session's role (its `--agent` type, or `main`), but only when the model quotes words the user wrote
-and those words are found in a user message the model was shown; the check is code, the quote goes
-into the evidence, and any other lesson is kept as a session note. The pane shows the kind beside
-each statement. Before reflecting, the mod fetches the role's current lessons, and with auto-save on
-it sends the model's judgement of each one that came up (`applied` or `contradicted`) to the server,
-once per lesson per session. That judgement is the reflection model's, unreviewed.
+session's role (its `--agent` type, or `main`), and comes from a second, separate model call whose
+only input is the prompts you typed since the last digest: not the assistant's replies, tool output,
+messages from other agents, plugin prompts or slash commands, so none of those can become a lesson.
+A lesson is kept only when it quotes one of those prompts, at least 20 characters and four words,
+checked in code; the quote goes into the evidence and any other lesson is dropped. The prompts are
+held in memory, so a reload of the mod loses them and that stretch yields no lessons. The pane shows
+the kind beside each statement. Before reflecting, the mod fetches the role's current lessons, and
+with auto-save on it sends the first call's judgement of each one that came up (`applied` or
+`contradicted`) to the server, once per lesson per session. That judgement is the reflection
+model's, unreviewed, and it reads the assistant's text as well as yours, so an instruction the
+assistant relayed can sway it — at worst one verdict per lesson per session.
 
 **`digest_auto_save` removes the review step.** The candidates are saved at once and listed in a
 toast, and their evidence reads "proposed and saved by auto-digest, not reviewed by the user", so the
