@@ -112,6 +112,14 @@ public static class TelemetryEventKind
     /// </remarks>
     public const string ToolObserved = "tool-observed";
 
+    /// <summary>
+    /// A reflection model's unreviewed judgement of a delivered lesson, sent by a mod (D106). Its own
+    /// kind, never <c>remember</c> or <c>judge</c>: those answer whether the model used memory
+    /// (D43, D56). Carries <see cref="TelemetryRecord.Mod"/>, <see cref="TelemetryRecord.FactId"/>
+    /// and <see cref="TelemetryRecord.Verdict"/>.
+    /// </summary>
+    public const string LessonFeedback = "lesson-feedback";
+
     /// <summary>A run of <c>engram index</c>, which had recorded nothing at all until now.</summary>
     public const string Index = "index";
 
@@ -187,7 +195,7 @@ public static class TelemetryEventKind
         Recall, Remember, Digest, Browse, Expand, Revise, Timeline, Judge,
         SessionStart, ServerStart, ServerStop, SessionOpen, SubagentStart, PreCompact, PostCompact,
         FileTouched, UserPrompt, MemoryGuard, LookupNudge, ToolObserved, Index, Embedding, Enrollment,
-        Sync, Navigate, Report, ModCall, RetiredRemoval,
+        Sync, Navigate, Report, ModCall, RetiredRemoval, LessonFeedback,
     ];
 }
 
@@ -393,7 +401,33 @@ public sealed record TelemetryRecord(
     /// <c>session-start</c> record whenever the payload named a role (D100). Its own field;
     /// <c>fact_count</c> stays null on a primer (D46).
     /// </summary>
-    [property: JsonPropertyName("role_fact_count")] int? RoleFactCount = null);
+    [property: JsonPropertyName("role_fact_count")] int? RoleFactCount = null,
+
+    /// <summary>
+    /// Handles of the role facts a primer delivered, in the order rendered, on a
+    /// <c>session-start</c> or <c>subagent-start</c> record. Absent when no lesson was delivered
+    /// (D106). <c>fact_count</c> stays null on a primer (D46).
+    /// </summary>
+    [property: JsonPropertyName("role_fact_ids"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? RoleFactIds = null,
+
+    /// <summary>The lesson a <see cref="TelemetryEventKind.LessonFeedback"/> judged, as a handle; absent on every other kind.</summary>
+    [property: JsonPropertyName("fact_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? FactId = null,
+
+    /// <summary>
+    /// A <see cref="TelemetryEventKind.LessonFeedback"/> verdict, <c>applied</c> or
+    /// <c>contradicted</c>: a reflection model's judgement, unreviewed (D106). Absent on every other kind.
+    /// </summary>
+    [property: JsonPropertyName("verdict"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Verdict = null,
+
+    /// <summary>
+    /// <c>mod</c> on a record a hook verb wrote when the bridge mod called it with
+    /// <c>--source mod</c>; absent on a classic hook's record, so no existing record changes (D107).
+    /// </summary>
+    [property: JsonPropertyName("source"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Source = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

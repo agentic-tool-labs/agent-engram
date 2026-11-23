@@ -756,6 +756,64 @@ identify a session in different id spaces (D43, D79), which is why `session` obs
 itself. The tail is a lookup and writes no telemetry; the server's log reader runs only while a tail
 has asked within the last ten seconds (or a webhook is configured).
 
+#### Hook bridge (managed installs)
+
+Where an organization manages Claude Code, the hooks of a plugin you installed yourself are skipped:
+every `hooks.json` entry, and any mod hook on a `classic.*` event. Engram's primers, `memory-guard`,
+`lookup-nudge`, `file-touched` and `tool-observed` run from `hooks.json`, so on such an install none of
+them would run. The `bridge` mod runs the same `engram hook <verb>` commands from mod events, which are
+not on that skip list, with the payload a classic hook would get on stdin, and reads the verb's answer
+back.
+
+| Behaviour | Mod event |
+|---|---|
+| server start | `session.start`, not waited for |
+| session primer | the first prompt of the process, as model-only context |
+| re-prime after `/clear` or a resume | the next prompt after `session.end` with reason `clear` or `resume` |
+| re-prime after a compaction | the next prompt after a main-loop request carries fewer messages than the one before |
+| subagent primer | `agent.spawn`, put ahead of the subagent's prompt; not on a resumed subagent |
+| `memory-guard`, `lookup-nudge` | `tool.call`, before the tool runs; a deny becomes the call's deny |
+| `file-touched`, `tool-observed` | `tool.call`, after the tool ran, not waited for; `file-touched` only when the call was not denied and did not fail |
+
+A slash command does not use up a pending primer: the first one carries it and the first prompt that
+is not a slash command carries it again, since a command such as `/model` may never reach the model.
+So at most two copies of one primer are sent.
+
+The compaction digest is not bridged: its events are skipped on a managed install, and where they are
+not, the classic hooks run it.
+
+**It never doubles up.** The bridge calls every verb with `--source mod`, and a verb called that way
+does nothing when the classic `session-start` hook already ran for the session. So where classic
+hooks run, they win and the bridge stands down. An engram binary older than `--source` prints its usage
+and exits 1 to such a call, which the bridge treats as no answer: on that binary the bridge does
+nothing at all.
+
+**It never blocks.** A missing binary, a timeout (5 s for the primers, 2 s for the guards), a non-zero
+exit or output that is not JSON passes the prompt, the spawn or the tool call through unchanged.
+
+**Limits.**
+
+- A mod cannot see the main session's agent type, so on a managed install a session started with
+  `--agent` gets the role key `main`.
+- A workflow agent whose run keeps its script out of the engine's events starts with the script's own
+  prompt, so it gets no subagent primer.
+- The subagent primer's telemetry record has no `agent_id`, which does not exist before the spawn.
+- A compaction in the middle of a turn is re-primed at the next prompt, not inside the turn.
+- A compaction is detected as a main-loop request carrying fewer messages than the one before, so a
+  rewind reads as one too and costs one extra primer at the next prompt.
+- Under `allowManagedHooksOnly` or `allowManagedModsOnly` nothing runs unless an administrator installs
+  Engram as a managed plugin.
+- None of this has been measured on a managed install.
+
+**Checking it on a managed install.**
+
+1. Start a Claude Code session there.
+2. Send one prompt.
+3. Have the model edit one file.
+4. Run `engram doctor` and read the hook delivery row: it says whether the newest `session-start` came
+   from the classic hooks or from the mod, and warns when the log shows mod or tool activity with no
+   `session-start` at all.
+
 #### Why mods do not use MCP
 
 Mods call `POST /mod/v1/<op>` on the server's loopback port, never the MCP tools. MCP calls are

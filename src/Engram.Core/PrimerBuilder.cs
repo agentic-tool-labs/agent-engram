@@ -55,9 +55,12 @@ public static class PrimerBuilder
         Build(summary, precedence, offerEnrollment, out _);
 
     /// <inheritdoc cref="Build(PrimerSummary, MemoryPrecedence, bool)"/>
-    /// <param name="roleFactCount">Role facts the primer actually delivered (D100).</param>
+    /// <param name="roleFactIds">
+    /// Ids of the role facts the primer actually delivered, in order (D100, D106); its count is
+    /// <c>role_fact_count</c>.
+    /// </param>
     public static string Build(
-        PrimerSummary summary, MemoryPrecedence precedence, bool offerEnrollment, out int roleFactCount)
+        PrimerSummary summary, MemoryPrecedence precedence, bool offerEnrollment, out IReadOnlyList<long> roleFactIds)
     {
         var lines = new List<string>();
         var tokens = 0;
@@ -66,7 +69,7 @@ public static class PrimerBuilder
 
         AppendDirectives(lines, summary.Directives);
 
-        roleFactCount = AppendRoleBlock(lines, ref tokens, summary);
+        roleFactIds = AppendRoleBlock(lines, ref tokens, summary);
 
         if (offerEnrollment)
         {
@@ -98,8 +101,11 @@ public static class PrimerBuilder
         BuildForSubagent(summary, precedence, out _);
 
     /// <inheritdoc cref="BuildForSubagent(PrimerSummary, MemoryPrecedence)"/>
-    /// <param name="roleFactCount">Role facts the primer actually delivered (D100).</param>
-    public static string BuildForSubagent(PrimerSummary summary, MemoryPrecedence precedence, out int roleFactCount)
+    /// <param name="roleFactIds">
+    /// Ids of the role facts the primer actually delivered, in order (D100, D106); its count is
+    /// <c>role_fact_count</c>.
+    /// </param>
+    public static string BuildForSubagent(PrimerSummary summary, MemoryPrecedence precedence, out IReadOnlyList<long> roleFactIds)
     {
         var lines = new List<string> { SubagentInstruction };
         var tokens = TokenEstimator.Estimate(SubagentInstruction);
@@ -108,7 +114,7 @@ public static class PrimerBuilder
 
         AppendDirectives(lines, summary.Directives);
 
-        roleFactCount = AppendRoleBlock(lines, ref tokens, summary);
+        roleFactIds = AppendRoleBlock(lines, ref tokens, summary);
 
         TryAppendLine(lines, ref tokens, CoverageLine(summary.FactCount, summary.TopicCounts));
 
@@ -167,11 +173,11 @@ public static class PrimerBuilder
     /// when the role has no facts or none fits, so such a primer is byte-identical to one built
     /// without a role. The key line names no tool (D15).
     /// </summary>
-    private static int AppendRoleBlock(List<string> lines, ref int tokens, PrimerSummary summary)
+    private static IReadOnlyList<long> AppendRoleBlock(List<string> lines, ref int tokens, PrimerSummary summary)
     {
         if (summary.Role is not { } role)
         {
-            return 0;
+            return [];
         }
 
         // The key line goes out whenever the payload names a role, facts or not: a role that has
@@ -180,16 +186,17 @@ public static class PrimerBuilder
         var keyTokens = TokenEstimator.Estimate(key);
         if (tokens + keyTokens > MaxTokens)
         {
-            return 0;
+            return [];
         }
 
         var header = $"Role memory for {role}:";
         var used = tokens + TokenEstimator.Estimate(header) + keyTokens;
 
         var fitting = new List<string>();
+        var delivered = new List<long>();
         foreach (var fact in (summary.RoleFacts ?? []).Take(RoleNotes.MaxDelivered))
         {
-            var line = $"- {fact}";
+            var line = $"- {fact.Body}";
             var lineTokens = TokenEstimator.Estimate(line);
             if (used + lineTokens > MaxTokens)
             {
@@ -197,6 +204,7 @@ public static class PrimerBuilder
             }
 
             fitting.Add(line);
+            delivered.Add(fact.Id);
             used += lineTokens;
         }
 
@@ -204,14 +212,14 @@ public static class PrimerBuilder
         {
             lines.Add(key);
             tokens += keyTokens;
-            return 0;
+            return [];
         }
 
         lines.Add(header);
         lines.Add(key);
         lines.AddRange(fitting);
         tokens = used;
-        return fitting.Count;
+        return delivered;
     }
 
     private static string? CoverageLine(int factCount, IReadOnlyDictionary<string, int> topicCounts)

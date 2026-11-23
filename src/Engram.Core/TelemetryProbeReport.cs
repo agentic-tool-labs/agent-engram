@@ -23,6 +23,24 @@ public sealed record TelemetryQueryCount(
     [property: JsonPropertyName("query")] string Query,
     [property: JsonPropertyName("count")] int Count);
 
+/// <summary>
+/// Adoption per Claude Code session: of the <c>session-start</c> session ids, the share that also
+/// have a <c>tool-observed</c> record, which carries the same id space (D73). Null in the
+/// report when there are no <c>tool-observed</c> records at all.
+/// </summary>
+/// <param name="Joinable">
+/// False when <c>tool-observed</c> records exist and not one shares a <c>session_id</c> with a
+/// <c>session-start</c>: D73's precondition failed, so no share is computed — a 0% would read as
+/// "nobody used memory" when it means "these cannot be joined".
+/// </param>
+public sealed record TelemetryHookToolUse(
+    [property: JsonPropertyName("tool_observed_records")] int ToolObservedRecords,
+    [property: JsonPropertyName("joinable")] bool Joinable,
+    [property: JsonPropertyName("any_tool")] TelemetryAdoptionStat? AnyTool,
+    [property: JsonPropertyName("recall")] TelemetryAdoptionStat? Recall,
+    [property: JsonPropertyName("remember")] TelemetryAdoptionStat? Remember,
+    [property: JsonPropertyName("other")] TelemetryAdoptionStat? Other);
+
 public sealed record TelemetryCompactionSurvivalStat(
     [property: JsonPropertyName("events")] int Events,
     [property: JsonPropertyName("sessions")] int Sessions,
@@ -45,8 +63,7 @@ public sealed record TelemetryCompactionSurvivalStat(
 /// against a non-zero is the one comparison that survives, because it needs no correspondence
 /// between the spaces. What the hook space *can* now say on its own: <c>tool-observed</c> records
 /// carry the Claude Code session id per Engram tool call, so "which hook sessions called
-/// <c>remember</c>" is answerable there without any join — this report does not compute it yet
-/// (D73).
+/// <c>remember</c>" is answerable there without any join — <see cref="HookToolUse"/> (D73).
 /// </param>
 public sealed record TelemetryProbeReport(
     [property: JsonPropertyName("date_range")] TelemetryDateRange DateRange,
@@ -71,7 +88,8 @@ public sealed record TelemetryProbeReport(
     // Read from the store, not from these records, and null when there is no store to read.
     // It rides along on the probe because this is the command that answers "what is this
     // instance actually doing", and D16 is one of the questions that asks.
-    [property: JsonPropertyName("facts_per_session")] FactsPerSessionStat? FactsPerSession = null);
+    [property: JsonPropertyName("facts_per_session")] FactsPerSessionStat? FactsPerSession = null,
+    [property: JsonPropertyName("hook_tool_use")] TelemetryHookToolUse? HookToolUse = null);
 
 public sealed record TelemetryProbeEmptyReport(
     [property: JsonPropertyName("has_records")] bool HasRecords,
@@ -108,11 +126,11 @@ public static class TelemetrySummarizer
         var mcpSessionSet = new HashSet<string>(mcpSessionIds, StringComparer.Ordinal);
         var mcpSessionCount = mcpSessionIds.Count;
 
-        var hookSessionCount = records
+        var hookSessionSet = records
             .Where(r => r.Kind == TelemetryEventKind.SessionStart)
             .Select(r => r.SessionId)
-            .Distinct(StringComparer.Ordinal)
-            .Count();
+            .ToHashSet(StringComparer.Ordinal);
+        var hookSessionCount = hookSessionSet.Count;
 
         var recalls = records.Where(r => r.Kind == TelemetryEventKind.Recall).ToList();
         var remembers = records.Where(r => r.Kind == TelemetryEventKind.Remember).ToList();
@@ -194,7 +212,33 @@ public static class TelemetrySummarizer
             MeanTokensPerRecall: tokenValues.Count == 0 ? 0 : Math.Round(tokenValues.Average(), 1, MidpointRounding.AwayFromZero),
             MedianTokensPerRecall: Median(tokenValues),
             TopQueries: topQueries,
-            FactsPerSession: factsPerSession);
+            FactsPerSession: factsPerSession,
+            HookToolUse: ComputeHookToolUse(records, hookSessionSet));
+    }
+
+    private static TelemetryHookToolUse? ComputeHookToolUse(IReadOnlyList<TelemetryRecord> records, HashSet<string> hookSessions)
+    {
+        var observed = records.Where(r => r.Kind == TelemetryEventKind.ToolObserved).ToList();
+        if (observed.Count == 0)
+        {
+            return null;
+        }
+
+        if (!observed.Any(r => hookSessions.Contains(r.SessionId)))
+        {
+            return new TelemetryHookToolUse(observed.Count, Joinable: false, null, null, null, null);
+        }
+
+        TelemetryAdoptionStat Share(Func<TelemetryRecord, bool> matches) =>
+            AdoptionStat(observed.Where(matches).ToList(), hookSessions, hookSessions.Count);
+
+        return new TelemetryHookToolUse(
+            observed.Count,
+            Joinable: true,
+            AnyTool: Share(_ => true),
+            Recall: Share(r => r.Tool == "recall"),
+            Remember: Share(r => r.Tool == "remember"),
+            Other: Share(r => r.Tool is not ("recall" or "remember")));
     }
 
     private static TelemetryAdoptionStat AdoptionStat(List<TelemetryRecord> kindRecords, HashSet<string> mcpSessionIds, int mcpSessionCount)

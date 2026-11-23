@@ -7,6 +7,9 @@ import type { PathFact } from '../shared/types'
 import { SENTINEL_SHAPE } from './index'
 
 const BIN = '/fake/bin/engram'
+// The bridge mod runs `engram hook <verb>` on these same tool calls; only the sentinel's own calls count here.
+const notBridge = (calls: { argv: readonly string[] }[]) =>
+  calls.filter((c) => c.argv[1] !== 'hook' && !c.argv[0]!.endsWith('/hooks/resolve-engram.sh'))
 const FILE = '/repo/src/a.ts'
 const running: ProcessResult = { exitCode: 0, stdout: JSON.stringify({ Home: '/h', Server: 'Running', Port: 7433 }) }
 const stopped: ProcessResult = { exitCode: 1, stdout: JSON.stringify({ Home: '/h', Server: 'NotRunning' }) }
@@ -254,7 +257,7 @@ test('Read and Bash are not matched: no API call', async ($, on) => {
   await $.tool.call({ tool: 'Read', file_path: FILE } as never)
   await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
   expect(r.router.fetchCalls.length).toBe(0)
-  expect(r.router.processCalls.length).toBe(0)
+  expect(notBridge(r.router.processCalls).length).toBe(0)
 })
 
 test('NotebookEdit is not matched', async ($, on) => {
@@ -286,7 +289,7 @@ test('off: no API call, no CLI call', { options: { sentinel_mode: 'off' } }, asy
   const r = rig(on, { path: answer(TWO) })
   expect(contextOf(await $.tool.call(edit(FILE)))).toBeUndefined()
   expect(r.router.fetchCalls.length).toBe(0)
-  expect(r.router.processCalls.length).toBe(0)
+  expect(notBridge(r.router.processCalls).length).toBe(0)
 })
 
 test('an unrecognised mode behaves as the default, inform', { options: { sentinel_mode: 'loud' } as never }, async ($, on) => {

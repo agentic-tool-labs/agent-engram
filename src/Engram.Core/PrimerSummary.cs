@@ -38,7 +38,7 @@ namespace Engram.Core;
 /// payload carried none (D100).
 /// </param>
 /// <param name="RoleFacts">
-/// Up to <see cref="RoleNotes.MaxDelivered"/> live role-fact bodies, newest first; empty without a
+/// Up to <see cref="RoleNotes.MaxDelivered"/> live role facts in delivery order; empty without a
 /// role.
 /// </param>
 public sealed record PrimerSummary(
@@ -48,12 +48,16 @@ public sealed record PrimerSummary(
     IReadOnlyList<string> Directives,
     int ReviewDueCount = 0,
     string? Role = null,
-    IReadOnlyList<string>? RoleFacts = null)
+    IReadOnlyList<RoleFact>? RoleFacts = null)
 {
     /// <summary>
     /// Counts a catalog already in memory — the shape every existing caller and test hands over.
     /// </summary>
-    public static PrimerSummary From(IReadOnlyList<CannedFact> facts, string? role = null)
+    /// <param name="judgements">Recorded judgement counts by fact id, for the role block (D106).</param>
+    public static PrimerSummary From(
+        IReadOnlyList<CannedFact> facts,
+        string? role = null,
+        IReadOnlyDictionary<long, (int Confirmations, int AccessCount)>? judgements = null)
     {
         // Role memory reaches only its role's block (D100), as Read's exclusion does.
         var rolePrefix = RoleNotes.Root + "/";
@@ -69,7 +73,7 @@ public sealed record PrimerSummary(
         return new PrimerSummary(
             counted.Count, topicCounts, counted, Directives: [],
             Role: RoleNotes.IsAddressable(role) ? role : null,
-            RoleFacts: RoleNotes.IsAddressable(role) ? RoleNotes.SelectDelivered(facts, role!) : []);
+            RoleFacts: RoleNotes.IsAddressable(role) ? RoleNotes.SelectDelivered(facts, role!, judgements) : []);
     }
 
     /// <summary>

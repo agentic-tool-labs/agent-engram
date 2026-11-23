@@ -28,7 +28,10 @@ public sealed record ModRequest(
     [property: JsonPropertyName("event_after")] long? EventAfter = null,
     [property: JsonPropertyName("scope")] string? Scope = null,
     [property: JsonPropertyName("limit")] int? Limit = null,
-    [property: JsonPropertyName("types")] string[]? Types = null);
+    [property: JsonPropertyName("types")] string[]? Types = null,
+    [property: JsonPropertyName("project_dir")] string? ProjectDir = null,
+    [property: JsonPropertyName("agent")] string? Agent = null,
+    [property: JsonPropertyName("verdict")] string? Verdict = null);
 
 public sealed record ModError(
     [property: JsonPropertyName("error")] string Error,
@@ -89,10 +92,15 @@ public sealed record ModForgetResponse(
     [property: JsonPropertyName("handle")] string Handle,
     [property: JsonPropertyName("retracted")] bool Retracted);
 
+/// <param name="Notice">
+/// Why a scoped write was kept as a session note, in <c>engram_remember</c>'s words; absent when it
+/// landed where it was asked to (D105).
+/// </param>
 public sealed record ModRememberResponse(
     [property: JsonPropertyName("handle")] string Handle,
     [property: JsonPropertyName("id")] long Id,
-    [property: JsonPropertyName("created")] bool Created);
+    [property: JsonPropertyName("created")] bool Created,
+    [property: JsonPropertyName("notice"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Notice = null);
 
 public sealed record ModPromptCaptureResponse(
     [property: JsonPropertyName("context")] string? Context);
@@ -165,7 +173,20 @@ public sealed record ModTailResponse(
     [property: JsonPropertyName("retractions")] ModTailRetractions Retractions,
     [property: JsonPropertyName("events")] ModTailEvents? Events);
 
+public sealed record ModLesson(
+    [property: JsonPropertyName("id")] string Id,
+    [property: JsonPropertyName("text")] string Text);
+
+public sealed record ModLessonsResponse(
+    [property: JsonPropertyName("current")] IReadOnlyList<ModLesson> Current);
+
+public sealed record ModLessonFeedbackResponse(
+    [property: JsonPropertyName("handle")] string Handle,
+    [property: JsonPropertyName("verdict")] string Verdict);
+
 [JsonSerializable(typeof(ModRequest))]
+[JsonSerializable(typeof(ModLessonsResponse))]
+[JsonSerializable(typeof(ModLessonFeedbackResponse))]
 [JsonSerializable(typeof(ModError))]
 [JsonSerializable(typeof(ModRecallResponse))]
 [JsonSerializable(typeof(ModFactResponse))]

@@ -40,9 +40,12 @@ predicate direction is the one that actually distinguishes this from an unrestri
 `UPDATE`.
 
 **Derived state is repairable; authored truth is not.** `compact` and `repair` may only
-touch what can be regenerated — the FTS index, salience, denormalized paths, indexed
-code facts. Neither may ever create, alter, or delete a fact body, predicate, validity
-window, or supersession row (D8). Two FTS facts to know before touching `repair`'s
+touch what can be regenerated — the FTS index, denormalized paths, indexed code facts.
+Neither may ever create, alter, or delete a fact body, predicate, validity window, or
+supersession row (D8). `salience` is **not** regenerable: `lesson-feedback` writes its
+`access_count`, `confirmations` and `last_accessed` as a recorded judgement nothing can
+recompute, and the role block is chosen by them, so `repair` may delete only orphan rows
+(D106). Two FTS facts to know before touching `repair`'s
 detector, both measured: on an external-content table every non-MATCH query — including
 `SELECT rowid FROM fact_fts` — is answered from the *content* table, so the obvious
 index-vs-fact set difference compares `fact` against itself and calls any desync healthy
@@ -779,9 +782,10 @@ because a shared namespace turns a 32-bit collision into a lost write. `Fingerpr
 infer.** `scope:"agent"` takes `agent` = the hook payload's `agent_type` and writes under
 `/agents/<role-slug>/`, three per role per MCP session. The subagent primer (and an `--agent` main
 session's) delivers the newest five after the precedence line. A role with no facts still gets
-its one key line, or it could never learn its key, while a payload with no role stays
-byte-identical and makes no extra read. "Newest" is the highest fact id: the one ordering both
-summary paths can apply (D100).
+its one key line, or it could never learn its key. A plain main session's payload names no role
+and takes the key `main`, so it pays that read too (D104); a subagent payload with no
+`agent_type` stays byte-identical and makes no extra read. "Newest" is the highest fact id: the
+one ordering both summary paths can apply (D100).
 
 **Falsify against a committed tree, and assert the patch landed.** A harness that restores arms with
 `git checkout --` restores to HEAD, so an uncommitted change under test is reverted by its own
@@ -919,14 +923,23 @@ whether the model used memory. Every request needs `Content-Type: application/js
 `X-Engram-Mod` header equal to the body's `mod`, and the middleware that 403s any `Origin` also 403s
 any `Host` that is not loopback, on every route. Deleting any of those three guards leaves the rest
 of the suite green, which is why each has its own falsification row. Lookups (`fact`, `history`,
-`captures`, `path-facts`, `tail`) write nothing, and handlers log nothing from the request (D76).
+`captures`, `path-facts`, `tail`, `lessons`) write nothing, and handlers log nothing from the request (D76).
+
+**The `bridge` mod is the one exception: it runs hook verbs, never `/mod/v1`.** On managed Claude Code
+classic hooks are skipped, so the bridge calls `engram hook <verb> --source mod`. Each verb already is one
+process per call, `file-touched` must work with the server down, and a second implementation would drift.
+Classic `session-start` writes its session id to `classic-hooks.state`, and a `--source mod` call for a
+session in that file exits 0 and writes nothing. That file is its own: shared with `memory-guard.state`, the
+mark would spend memory-guard's one deny. A mod-sourced `session-start` writes no mark, or the bridge would
+stand its own calls down. Without `--source` only classic `session-start` reads the file, to skip a
+duplicate line on resume, `/clear` or compaction; `file-touched`'s classic path is untouched (D107).
 
 **Background work yields to the model, and never for longer than its cap.** The server counts
 foreground work in `ForegroundWork`, entered in exactly two places: a call-tool filter for MCP and
 the `/mod/v1` route for every op that is not a lookup. Never per tool, so a new tool cannot forget
 it; never as endpoint middleware, because the MCP endpoint also carries each session's long-lived
 GET stream, which would count as foreground for the whole session. **Lookups — `tail`, `fact`,
-`history`, `captures`, `path-facts`, `embed-status` — are excluded on purpose**: mods poll them on
+`history`, `captures`, `path-facts`, `embed-status`, `lessons` — are excluded on purpose**: mods poll them on
 timers, and a 2 s tail per open pane would hold the backlog paused for as long as anyone looks at
 memory. The backlog waits while the count is non-zero before each batch, **capped at 10 s per
 batch**, then proceeds anyway. The cap is load-bearing twice: without it an MCP session left

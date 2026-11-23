@@ -7149,3 +7149,197 @@ the cost was accepted there. It is deferred until live `agent`-scope facts excee
 file-timed `subagent-start` attributes more than 5 ms to that arm. The fix then is a guard test that
 every live `agent` and `session` fact sits under its prefix, followed by excluding both scopes from
 the walk.
+
+## D104 — The ordinary main session takes the role key `main`
+
+**What it is.** `session-start` with neither `agent_type` nor `agent_id` in its payload builds the
+primer for the role `main` (`RoleNotes.MainRole`). It renders the role block exactly as any other
+role does (D100): the key line `Your role memory key: main.` always, and the header and delivered
+lessons when `/agents/main/` holds any. Before this, the ordinary main session had no role key, so
+nothing it learned about how to behave had a channel back into the next session's primer; only a
+`--agent` main session and subagents had one.
+
+**What is unchanged.** `session-start` with `agent_type` and no `agent_id` uses that type, as
+before. A `session-start` payload carrying `agent_id` gets no role block. `subagent-start` is
+untouched: a subagent payload with no `agent_type` still gets no role block and stays
+byte-identical.
+
+**What this supersedes.** D100's "a payload with no role stays byte-identical and makes no extra
+read", for `session-start` only. Every plain main session now pays the role read and, with an empty
+role, one key line of 8 tokens (`ceil(27 / 3.6)`). `role_fact_count` is therefore set on
+every `session-start` record, 0 when no lesson was delivered; `fact_count` stays null (D46).
+
+**Accepted.** An agent whose `agent_type` slugs to `main` shares this memory: the address is
+`/agents/<slug>`, and two keys that slug alike share a path (D100). Nothing distinguishes them, and
+nothing is built to.
+
+**Measured.** Published binaries, `session-start` on a `VACUUM INTO` copy of the 621,904-fact store,
+timed through a file, N=30 per arm after 3 warmups, arm order rotated each iteration, with main run
+as two arms for calibration. Machine load average 9–12 on 18 cores during the run.
+
+| arm | p50 ms | p90 ms |
+|---|---|---|
+| main | 259.58 | 558.55 |
+| main again (calibration) | 247.05 | 426.45 |
+| this branch | 255.52 | 539.33 |
+
+The calibration pair differs by 12.5 ms at p50, and the branch sits between the two main arms
+(−4.1 and +8.5 ms). The extra read is not separable from noise at this size: it is the same
+indexed path-range query D100 measured at +0.09 ms, over an empty `/agents/main/` subtree.
+
+## D105 — `/mod/v1/remember` takes a scope, through the routine `engram_remember` uses
+
+**What it is.** The mod API's `remember` accepts `scope` (`session`, `project` or `agent`; default
+`session`), `project_dir` and `agent`. Routing by scope is `ScopedRemember`: `Resolve` finds the
+project before the write lock, `Append` writes a role note (D100), a project note (D98) or a session
+note, and `Notices` says why a write was kept as a session note. `engram_remember` was rewritten onto
+the same three calls, so the branches exist once and a mod's reply uses the MCP tool's words: "no
+project_dir given …", "no usable agent key …", "role memory is for lessons every future <role>
+needs; kept as a session note".
+
+**The reply.** `{handle, id, created}` as before, plus `notice` only when the write was kept as a
+session note; several reasons join with a newline. A remember with no scope therefore answers byte
+for byte what it answered before.
+
+**Defaults.** `agent` scope with no `agent` field uses `main` (D104): a mod speaks for the main
+session unless it names a role. An empty or whitespace `agent` is an absent one and uses `main`
+too; `???` is a key that slugs to nothing and still falls back to a session note with its notice. Outside `agent` scope the `agent` field is not passed on at all, so
+an omitted scope writes exactly the session note it wrote before even if a mod sends a stray
+`agent`. An unknown `scope` is a 400 and writes nothing; the match is exact, so `Agent` and `""` are
+unknown too.
+
+**The cap, accepted.** The role cap stays three live agent-scope writes per session row. MCP writes
+are keyed by `Mcp-Session-Id` and mod writes by Claude Code's session id, and the two cannot be
+joined (D43), so one Claude Code session can write three role notes through each channel, six in
+all. Nothing joins them, and nothing should try: the join is the thing D43 measured as impossible.
+
+## D106 — Delivered lessons are named, and the delivery set is chosen by recorded judgement
+
+**Which lessons a primer delivered.** `session-start` and `subagent-start` records carry
+`role_fact_ids`: the handles of the role facts the role block rendered, in the order rendered. It is
+what was rendered, not what was selected, so a fact skipped for the 300-token budget is not in it.
+The field is absent when no lesson was delivered, not an empty list; `role_fact_count` keeps its
+meaning and `fact_count` stays null on a primer (D46). Handles rather than numeric ids, so a reader
+can pass one straight to `fact`, `history` or `engram_expand`.
+
+**What a role would get now.** The mod op `lessons` takes `{session_id, mod, agent?}` and answers
+`{"current": [{"id": "f42", "text": …}]}`: the role's delivery set chosen by the same function the
+primer uses. `agent` defaults to `main` (D104), and an empty or whitespace one counts as absent; a
+key that slugs to nothing has no role memory and
+answers an empty list, as the primer reads it (D100). It is a lookup: it writes nothing, records no
+telemetry and is not foreground work (D82). It answers for *now*, not for what a session start
+delivered — a lesson written or judged since then changes it — so the field is `current`, and the
+record of what was delivered is `role_fact_ids`.
+
+**Recording a judgement.** The mod op `lesson-feedback` takes `{session_id, mod, fact_id, verdict}`
+with `verdict` `applied` or `contradicted`, and answers `{handle, verdict}`. It is not a lookup, so
+it is foreground work (D82).
+- The fact must be live and `scope='agent'`. A session note, a project note, a closed fact or an
+  unknown id is a 400 and writes nothing, and so is any other verdict.
+- `RoleNotes.RecordJudgement` is one `INSERT … SELECT … ON CONFLICT DO UPDATE` into `salience`
+  inside `BEGIN IMMEDIATE`. The `SELECT` carries the live-and-agent guard, so an ineligible id
+  inserts nothing and there is no C# read-compare-write. Both verdicts add one to `access_count`
+  and stamp `last_accessed`; `applied` also adds one to `confirmations`. `score` is never written.
+- `contradicted` makes the lesson due for review now, through `FactReview.Set(…, keepEarlier:
+  true)`: the upsert's own `WHERE` leaves a review date already at or before now alone, so a
+  judgement never pushes a due date later.
+- The record is its own kind, `lesson-feedback`, with `session_id`, `mod`, `fact_id` (a handle) and
+  `verdict`. It is never `remember` or `judge`, which answer whether the model used memory (D43,
+  D56), and no `mod-call` is written beside it. The new fields are omitted when null, so every
+  other kind's record is unchanged.
+- Nothing here touches a fact body, predicate, validity window or supersession row (D8).
+
+**What the counts are.** A reflection model's judgement, unreviewed. `confirmations` counts
+`applied` verdicts and `access_count` counts verdicts of either kind; neither says the lesson was
+used or helpful, and no code or doc may call them that.
+
+**Selecting the role block.** `RoleNotes.Choose` is the one rule, over `(id, confirmations,
+access_count)`, and both `ReadDelivered` and `SelectDelivered` call it:
+1. *Set aside*: `confirmations = 0` and `access_count >= 2`, judged against twice and never for.
+2. *Proven*: up to three with `confirmations >= 1`, by confirmations descending, then id descending.
+3. *Newest*: fill to five from the rest by id descending; a fourth proven lesson competes here.
+4. If still fewer than five, fill from the set-aside ones by id descending.
+5. Render proven, then newest, then set aside.
+
+`ReadDelivered` therefore reads every live fact of the role with a `LEFT JOIN salience` and no
+`LIMIT`, since which five go out depends on the counts. The role subtree is small: the 621,904-fact
+store holds no live agent-scope fact at all. `SelectDelivered` takes the counts as an optional map
+by fact id, because a `CannedFact` carries none; with no map, every fact has zero of both. With no
+`salience` rows the rule is the five highest ids, which is what D100 delivered. Measured: on a home
+with seven role facts and no `salience` rows, the published binaries of main and this branch emit
+byte-identical `subagent-start` (1,066 bytes) and `--agent` `session-start` (1,015 bytes) output.
+
+A set-aside lesson stays recallable and, once contradicted, appears in `engram review list`; setting
+it aside changes only what the primer delivers.
+
+**No schema change.** `salience` already had every column. It is kept by snapshots, which drop only
+`fact_vec` (D93), and its rows cascade out with their fact. It is not in the journal, so `backup
+replay` returns facts with zero counts and selection falls back to recency for them. CLAUDE.md
+called `salience` regenerable; it no longer is, and `repair` may still delete only orphan rows.
+
+## D107 — On managed Claude Code a bridge mod runs the hook verbs, and stands down where classic hooks run
+
+**The problem.** Where an organization manages Claude Code, a user-installed plugin's classic hooks
+are skipped: every `hooks.json` entry and any mod's `classic.*` event. Mod events such as
+`session.start`, `prompt.submit`, `turn.step`, `tool.call` and `agent.spawn` still run. Only capture
+had moved to a mod (D83), so the primers, `memory-guard`, `lookup-nudge`, `file-touched`,
+`tool-observed` and the compaction digest were absent there. This comes from a read of the Claude
+Code binary and a sister project that runs this way; nothing here has been measured on a managed
+install.
+
+**The design.** One mod, `bridge`, runs the existing verbs as `engram hook <verb> --source mod`,
+with classic-shaped JSON on stdin, and parses the verb's classic-shaped stdout back. No verb is
+rewritten as a `/mod/v1` op. So mods reach Engram through `/mod/v1` (D76) *except* this bridge, for
+three reasons: each verb already is one process per call; `file-touched` must work with the server
+down and may never open the database (D4); and a second implementation of each verb would drift
+from the first, which is the D36 rule. `hooks.json` keeps its classic block, so an install with mods
+off works as before.
+
+**The stand-down is decided by the verb, not the mod.** Classic `session-start` appends its
+`session_id` to `classic-hooks.state` through `SessionNudgeState`, once per session. A verb called
+with `--source mod` for a session in that file exits 0, prints nothing and writes nothing: no
+telemetry, no spool file, no state. Where classic hooks run they win, and nothing fires twice.
+- The mark has its own file rather than sharing `memory-guard.state`. A shared file would make
+  `memory-guard` read the mark as its own once-per-session deny and never deny.
+- A `--source mod` `session-start` leaves no mark, or the bridge would stand its own later calls
+  down.
+- The mark is per session id, so a session the classic hook never saw is not stood down.
+- Without `--source` the stand-down check is never reached, and `file-touched` is today's path.
+  The one classic verb that touches the file is `session-start`, which reads it before appending so
+  that a resume, `/clear` or compaction of the same session adds no second line. `--source mod`
+  `file-touched` reads the state file and still never opens the database.
+- The file grows by one line per classic session, about 37 bytes, and is never pruned, so every
+  bridged call on an install where classic hooks run reads it linearly. That is about 1.8 MB at
+  50,000 sessions. It is unmeasured; if it ever shows in a guard's latency, rotate it by age, since a
+  mark only matters for the life of its session.
+- `--source` may follow the verb. An unknown value is treated as absent; a missing value or any
+  other argument prints usage and exits 1. A binary older than this one answers the flag the same
+  way, so the bridge is inert there.
+
+**Telemetry.** A record written by a verb called with `--source mod` carries `source: "mod"`. The
+field is omitted when null, so every classic record is byte-identical to what it was.
+
+**Doctor's `hook delivery` row** reports whether the newest `session-start` record came from
+`classic` or `mod`. It warns when the newest `mod-call` or `tool-observed` record names a session
+with no `session-start` in the log: hooks may be skipped on this install. A rule keyed on recency
+alone ("activity newer than any session start") would warn on every healthy install, because tool
+calls always follow their session's start. It is never `Broken` (D37), and an empty log is `Ok`. It
+reads the log and writes nothing. It can still warn falsely when that session's `session-start`
+record was lost: `DurableAppend` gives up silently after its 500 ms budget, and a hook that ran
+before `config.toml` existed recorded nothing. A false `Warn` costs a reader a look, which D37
+accepts.
+
+**The compaction digest is not bridged.** `session.compact` is itself skipped on managed installs.
+Where it is not skipped, the classic hooks run and the bridge stands down anyway. The digest mod's
+`turn.complete` reflection is what covers managed installs.
+
+**Known limits, accepted.**
+- A mod cannot see the main session's `agent_type`, so on a managed install an `--agent` main
+  session gets the role key `main` (D104).
+- A workflow agent's prompt rewrite is not applied on a run that keeps its script out of the
+  engine's events, so that agent gets no subagent primer.
+- The bridge's `subagent-start` record has no `agent_id`, which does not exist before the spawn.
+- A mid-turn compaction is re-primed at the next prompt, not inside the turn.
+- A rewind reads as a compaction and costs one extra primer at the next prompt.
+- Under `allowManagedHooksOnly` or `allowManagedModsOnly` nothing runs unless an administrator
+  installs Engram as a managed plugin.
