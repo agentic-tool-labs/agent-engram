@@ -94,6 +94,41 @@ public class HookFileTouchedTests
     }
 
     /// <summary>
+    /// Only session-start reads <c>ENGRAM_PLUGIN_VERSION</c> (D108): with it set, file-touched
+    /// writes the same record and the same spool entry as without it, timestamps aside.
+    /// </summary>
+    [Fact]
+    public void FileTouched_IgnoresThePluginVersion()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        const string payload = """{"session_id":"s1","tool_name":"Edit","tool_input":{"file_path":"/p/src/A.cs"}}""";
+
+        (string Record, string Spool) Touch(string? version)
+        {
+            using var home = new TestHome();
+            var (exitCode, _, _) = EngramProcess.RunWithStdinAndEnvironment(
+                home.Root, payload, new Dictionary<string, string?> { ["ENGRAM_PLUGIN_VERSION"] = version }, "hook", "file-touched");
+            Assert.Equal(0, exitCode);
+
+            var record = File.ReadAllLines(Path.Combine(home.Root, "telemetry.jsonl"))
+                .Single(line => line.Contains("\"kind\":\"file-touched\"", StringComparison.Ordinal));
+            var spool = File.ReadAllLines(Assert.Single(Directory.GetFiles(Path.Combine(home.Root, "queue"))));
+
+            // The timestamps are the only bytes allowed to differ between the two runs.
+            var untimed = System.Text.RegularExpressions.Regex.Replace(record, "\"timestamp\":\"[^\"]*\"", "\"timestamp\":\"\"");
+            return (untimed, string.Join("\n", spool.Skip(1)));
+        }
+
+        var without = Touch(null);
+        var with = Touch("9.8.7");
+
+        Assert.Equal(without.Record, with.Record);
+        Assert.Equal(without.Spool, with.Spool);
+        Assert.Equal("/p/src/A.cs", with.Spool.Trim());
+    }
+
+    /// <summary>
     /// A payload with no <c>file_path</c> still spools, and still exits zero.
     /// </summary>
     /// <remarks>

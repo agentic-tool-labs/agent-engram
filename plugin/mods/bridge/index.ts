@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallInput } from 'claude-code'
-import { SHARED_INITIAL, engramCli } from '../shared/client'
+import { PLUGIN_VERSION, SHARED_INITIAL, engramCli } from '../shared/client'
 import type { ModIo } from '../shared/client'
 import { ANY_PROMPT_SUBMIT, ANY_SESSION_START } from '../shared/events'
 import { once } from '../shared/guard'
@@ -39,9 +39,19 @@ type Json = Record<string, unknown>
 type Payload = { session_id: string; cwd: string; hook_event_name: string } & Json
 
 /** The verb's stdout as JSON, or nothing: no binary, a timeout, a non-zero exit, silence or non-JSON. */
-export async function runVerb(io: ModIo, verb: string, payload: Payload, timeoutMs?: number): Promise<Json | undefined> {
+export async function runVerb(
+  io: ModIo,
+  verb: string,
+  payload: Payload,
+  timeoutMs?: number,
+  env?: Record<string, string>,
+): Promise<Json | undefined> {
   try {
-    const opts = timeoutMs === undefined ? { stdin: JSON.stringify(payload) } : { stdin: JSON.stringify(payload), timeoutMs }
+    const opts = {
+      stdin: JSON.stringify(payload),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      ...(env === undefined ? {} : { env }),
+    }
     const run = await engramCli(io, ['hook', verb, '--source', 'mod'], opts)
     if (run === undefined || run.exitCode !== 0) return undefined
     const out: unknown = JSON.parse(run.stdout)
@@ -120,7 +130,10 @@ export const register: Register = (on) => {
       try {
         const io = bindIo($)
         const payload = { session_id: await io.sessionId(), cwd: await $.session.cwd(), hook_event_name: 'SessionStart' }
-        primer = contextOf(await runVerb(io, 'session-start', payload, PRIMER_TIMEOUT_MS))
+        // As hooks.json does for the classic hook, so doctor can compare the plugin to the binary.
+        primer = contextOf(
+          await runVerb(io, 'session-start', payload, PRIMER_TIMEOUT_MS, { ENGRAM_PLUGIN_VERSION: PLUGIN_VERSION }),
+        )
       } catch {
         primer = undefined
       }

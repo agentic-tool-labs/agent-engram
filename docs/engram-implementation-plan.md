@@ -7343,3 +7343,37 @@ Where it is not skipped, the classic hooks run and the bridge stands down anyway
 - A rewind reads as a compaction and costs one extra primer at the next prompt.
 - Under `allowManagedHooksOnly` or `allowManagedModsOnly` nothing runs unless an administrator
   installs Engram as a managed plugin.
+
+## D108 — The plugin states its version to `session-start`, and doctor compares the recorded one
+
+**The problem.** The binary and the plugin are released as one version, and nothing reported a
+machine where they differed. The obvious source is Claude Code's `installed_plugins.json`. It is
+wrong for this install: the marketplace is a directory source, so Claude Code reads the plugin from
+the repo folder, and the record still named 1.3.15 and a cache path while `claude plugin list`
+showed 1.4.0 read from the folder. That file says what was once cached, not what runs.
+
+**The design.** The plugin reports its own version, and doctor reads what was recorded. That is the
+`metal.json` rule: recorded by whoever loaded, never inferred by whoever asks (D28).
+- The classic `SessionStart` command in `plugin/hooks/hooks.json` puts
+  `ENGRAM_PLUGIN_VERSION=<version>` in front of `hook session-start`. The bridge mod passes the same
+  variable from `PLUGIN_VERSION` in `plugin/mods/shared/client.ts` when it runs that verb (D107).
+- `hook session-start` writes the value as `plugin_version` on its telemetry record. The field is
+  omitted when the variable is unset, empty or whitespace, so no other record changes. No other verb
+  reads the variable; `file-touched` with it set writes the same record and spool entry as without.
+- Doctor's `plugin` row reads the newest `session-start` record. Equal to the binary is `Ok`;
+  different is `Warn`, "plugin <x>, binary <y>", with "update the plugin and the binary to the same
+  release". No record, or a newest record without the field, is `Ok`, "no plugin version recorded
+  yet", even after an older record that had one: only the newest start answers. It is never
+  `Broken` (D37), and it reads the log and writes nothing.
+- A binary older than this ignores the variable, so a newer plugin never breaks it.
+- `engram --version` (or `engram version`, as the first argument only) prints `engram <binary>` and
+  `plugin <version>` or `plugin not recorded`, plus a `versions differ` line when they differ, and
+  exits 0. `Diagnostics.RecordedPluginVersion` is the one reader both it and the row call. It opens
+  no database and writes nothing, so it answers on a home that does not exist.
+
+**The guard.** `VersionAlignmentTests` asserts one version in six places: `EngramVersion.Current`,
+`plugin.json`, both version fields of `marketplace.json`, the newest `CHANGELOG.md` heading,
+`hooks.json`'s variable and the bridge's constant. Each was falsified once.
+
+**Rejected.** Making `install.sh` run `claude plugin update` for an installed plugin. Nothing showed
+the installer leaves a stale plugin; the stale number was the cache record above.

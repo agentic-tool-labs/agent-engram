@@ -130,6 +130,7 @@ public static class Diagnostics
         Try(checks, "sync", list => list.Add(CheckSync(home, connection, config)));
         Try(checks, "edit queue", list => list.Add(CheckQueue(home)));
         Try(checks, "hook delivery", list => list.Add(CheckHookDelivery(home)));
+        Try(checks, "plugin", list => list.Add(CheckPlugin(home)));
         Try(checks, "webhook", list => CheckWebhook(config, list));
         Try(checks, "code analysis", list => list.Add(CheckRoslyn(environment)));
         Try(checks, "tree-sitter", list => list.Add(CheckTreeSitter(environment, home)));
@@ -1084,6 +1085,42 @@ public static class Diagnostics
             name,
             DiagnosisState.Ok,
             $"newest session-start from {(started[^1].Source == "mod" ? "mod" : "classic")}");
+    }
+
+    /// <summary>
+    /// The <c>plugin_version</c> on the newest <c>session-start</c> record, or null when there is no
+    /// such record or it carries none. The one reader for doctor's <c>plugin</c> row and
+    /// <c>engram --version</c> (D108). Reads the log only, and creates nothing when it is absent.
+    /// </summary>
+    public static string? RecordedPluginVersion(EngramHome home) =>
+        TelemetryProbeReader.Read(home, since: null).Records
+            .LastOrDefault(record => record.Kind == TelemetryEventKind.SessionStart)
+            ?.PluginVersion;
+
+    /// <summary>Whether the plugin that last started a session is the binary's release (D108).</summary>
+    /// <remarks>
+    /// Reads the <c>plugin_version</c> the newest <c>session-start</c> recorded, never Claude Code's
+    /// own files: for a directory-sourced marketplace <c>installed_plugins.json</c> names a cached
+    /// version that is not what runs. Only the newest record counts, so a plugin too old to state its
+    /// version reads as unrecorded rather than as whatever an earlier one said. Never <c>Broken</c>
+    /// (D37): a mismatched plugin still serves memory.
+    /// </remarks>
+    private static Diagnosis CheckPlugin(EngramHome home)
+    {
+        const string name = "plugin";
+
+        if (RecordedPluginVersion(home) is not { } plugin)
+        {
+            return new Diagnosis(name, DiagnosisState.Ok, "no plugin version recorded yet");
+        }
+
+        return plugin == EngramVersion.Current
+            ? new Diagnosis(name, DiagnosisState.Ok, $"{plugin}, matches the binary")
+            : new Diagnosis(
+                name,
+                DiagnosisState.Warn,
+                $"plugin {plugin}, binary {EngramVersion.Current}",
+                "update the plugin and the binary to the same release");
     }
 
     private static void CheckIndexingConfig(IndexingSettings settings, List<Diagnosis> checks)

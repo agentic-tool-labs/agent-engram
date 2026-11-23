@@ -284,6 +284,15 @@ internal static class HookCommand
         }
     }
 
+    /// <summary>
+    /// The version the plugin put in front of this verb: hooks.json for the classic hook, the bridge
+    /// mod's constant for a mod call. Only <c>session-start</c> reads it (D108).
+    /// </summary>
+    private static string? PluginVersion() =>
+        Environment.GetEnvironmentVariable("ENGRAM_PLUGIN_VERSION") is { } version && !string.IsNullOrWhiteSpace(version)
+            ? version
+            : null;
+
     private static int RunSessionStart(EngramHome home, TextWriter stdout, HookStdinInput? payload, string? source)
     {
         var sessionId = ResolveSessionId(payload);
@@ -353,6 +362,7 @@ internal static class HookCommand
                     {
                         RoleFactCount = summary.Role is null ? null : roleFactIds.Count,
                         RoleFactIds = RoleFactHandles(roleFactIds),
+                        PluginVersion = PluginVersion(),
                     },
                     source));
         }

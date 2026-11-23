@@ -536,6 +536,7 @@ idempotent, and will never rewrite or close a fact the target store already has.
 
 ```
 engram doctor                          # what is wrong, and what to type about it
+engram --version                       # the binary's version, and the plugin's as session start recorded it
 engram backup list                     # what snapshots exist
 engram backup restore [name] --apply   # put one back, keeping the current store as a new snapshot
 engram backup replay --apply           # read facts.jsonl into the store, adding what it lacks
