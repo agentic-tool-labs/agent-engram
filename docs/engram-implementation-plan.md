@@ -7366,6 +7366,10 @@ showed 1.4.0 read from the folder. That file says what was once cached, not what
   yet", even after an older record that had one: only the newest start answers. It is never
   `Broken` (D37), and it reads the log and writes nothing.
 - A binary older than this ignores the variable, so a newer plugin never breaks it.
+- `engram --version` (or `engram version`, as the first argument only) prints `engram <binary>` and
+  `plugin <version>` or `plugin not recorded`, plus a `versions differ` line when they differ, and
+  exits 0. `Diagnostics.RecordedPluginVersion` is the one reader both it and the row call. It opens
+  no database and writes nothing, so it answers on a home that does not exist.
 
 **The guard.** `VersionAlignmentTests` asserts one version in six places: `EngramVersion.Current`,
 `plugin.json`, both version fields of `marketplace.json`, the newest `CHANGELOG.md` heading,

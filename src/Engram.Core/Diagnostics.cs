@@ -1087,6 +1087,16 @@ public static class Diagnostics
             $"newest session-start from {(started[^1].Source == "mod" ? "mod" : "classic")}");
     }
 
+    /// <summary>
+    /// The <c>plugin_version</c> on the newest <c>session-start</c> record, or null when there is no
+    /// such record or it carries none. The one reader for doctor's <c>plugin</c> row and
+    /// <c>engram --version</c> (D108). Reads the log only, and creates nothing when it is absent.
+    /// </summary>
+    public static string? RecordedPluginVersion(EngramHome home) =>
+        TelemetryProbeReader.Read(home, since: null).Records
+            .LastOrDefault(record => record.Kind == TelemetryEventKind.SessionStart)
+            ?.PluginVersion;
+
     /// <summary>Whether the plugin that last started a session is the binary's release (D108).</summary>
     /// <remarks>
     /// Reads the <c>plugin_version</c> the newest <c>session-start</c> recorded, never Claude Code's
@@ -1098,10 +1108,8 @@ public static class Diagnostics
     private static Diagnosis CheckPlugin(EngramHome home)
     {
         const string name = "plugin";
-        var newest = TelemetryProbeReader.Read(home, since: null).Records
-            .LastOrDefault(record => record.Kind == TelemetryEventKind.SessionStart);
 
-        if (newest?.PluginVersion is not { } plugin)
+        if (RecordedPluginVersion(home) is not { } plugin)
         {
             return new Diagnosis(name, DiagnosisState.Ok, "no plugin version recorded yet");
         }
