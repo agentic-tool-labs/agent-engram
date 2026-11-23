@@ -29,10 +29,15 @@ export type RoutingTable = {
 }
 
 export type Router = {
-  processCalls: { argv: readonly string[]; timeoutMs?: number; stdin?: string }[]
+  processCalls: { argv: readonly string[]; timeoutMs?: number; stdin?: string; env?: Record<string, string> }[]
   fetchCalls: FetchCall[]
   /** Synchronous unless the row answered with a promise. */
-  process(argv: readonly string[], timeoutMs?: number, stdin?: string): Required<ProcessResult> | Promise<Required<ProcessResult>>
+  process(
+    argv: readonly string[],
+    timeoutMs?: number,
+    stdin?: string,
+    env?: Record<string, string>,
+  ): Required<ProcessResult> | Promise<Required<ProcessResult>>
   fetch(url: string, init: { headers?: Record<string, string>; body?: string }): Promise<{ status: number; ok: boolean; text: string }>
   sessionId(): string
 }
@@ -41,8 +46,13 @@ export function createRouter(table: RoutingTable): Router {
   const router: Router = {
     processCalls: [],
     fetchCalls: [],
-    process(argv, timeoutMs, stdin) {
-      router.processCalls.push(stdin === undefined ? { argv, timeoutMs } : { argv, timeoutMs, stdin })
+    process(argv, timeoutMs, stdin, env) {
+      router.processCalls.push({
+        argv,
+        timeoutMs,
+        ...(stdin === undefined ? {} : { stdin }),
+        ...(env === undefined ? {} : { env }),
+      })
       if (argv.length === 1 && argv[0]!.endsWith('/hooks/resolve-engram.sh')) {
         return { exitCode: 0, stdout: table.binary ? table.binary + '\n' : '', stderr: '' }
       }
@@ -91,7 +101,7 @@ export function installFakeEngine(on: On, table: RoutingTable = {}): Router {
   const router = createRouter(table)
   on('process.run', (_$, e) => {
     const done = (r: Required<ProcessResult>) => ({ value: { ...r, isStdoutTruncated: false, isStderrTruncated: false } })
-    const r = router.process(e.argv, e.init?.timeoutMs, e.init?.stdin)
+    const r = router.process(e.argv, e.init?.timeoutMs, e.init?.stdin, e.init?.env)
     return r instanceof Promise ? r.then(done) : done(r)
   })
   on('http.fetch', async (_$, e) => {
@@ -150,7 +160,7 @@ export function fakeModIo(table: RoutingTable, options: { pluginRoot?: string; s
 
   const io: ModIo = {
     run: async (argv, opts) => {
-      const r = await router.process(argv, opts?.timeoutMs, opts?.stdin)
+      const r = await router.process(argv, opts?.timeoutMs, opts?.stdin, opts?.env)
       return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }
     },
     fetch: (url, init) => router.fetch(url, init),

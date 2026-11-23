@@ -6,8 +6,18 @@ import type { ApiFailure, ApiResult, ModOp, ModOps } from './types'
  * hook's own file, so each hooks file builds one of these from its `$` and hands it to the
  * client; the binding must be pure forwards (see binding.template.ts).
  */
+/**
+ * This plugin's release, which `hook session-start` records so `engram doctor` can compare it to
+ * the binary's. hooks.json states the same version for the classic hook; a repo test holds the two
+ * to the binary's version.
+ */
+export const PLUGIN_VERSION = '1.4.0'
+
 export type ModIo = {
-  run(argv: readonly string[], opts?: { timeoutMs?: number; stdin?: string }): Promise<{ exitCode: number; stdout: string; stderr: string }>
+  run(
+    argv: readonly string[],
+    opts?: { timeoutMs?: number; stdin?: string; env?: Record<string, string> },
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }>
   fetch(
     url: string,
     init: { method: string; headers: Record<string, string>; body: string },
@@ -61,13 +71,17 @@ export async function engramBinary(io: ModIo): Promise<string | undefined> {
 export async function engramCli(
   io: ModIo,
   args: readonly string[],
-  opts: { timeoutMs?: number; stdin?: string } = {},
+  opts: { timeoutMs?: number; stdin?: string; env?: Record<string, string> } = {},
 ): Promise<{ exitCode: number; stdout: string; stderr: string } | undefined> {
   try {
     const binary = await engramBinary(io)
     if (binary === undefined) return undefined
     const timeoutMs = opts.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS
-    const run = await io.run([binary, ...args], opts.stdin === undefined ? { timeoutMs } : { timeoutMs, stdin: opts.stdin })
+    const run = await io.run([binary, ...args], {
+      timeoutMs,
+      ...(opts.stdin === undefined ? {} : { stdin: opts.stdin }),
+      ...(opts.env === undefined ? {} : { env: opts.env }),
+    })
     return { exitCode: run.exitCode, stdout: run.stdout, stderr: run.stderr }
   } catch {
     return undefined

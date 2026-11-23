@@ -259,6 +259,44 @@ public class HookSessionStartTests
         Assert.Equal(JsonValueKind.Null, record.GetProperty("fact_count").ValueKind);
     }
 
+    /// <summary>
+    /// The plugin states its release in <c>ENGRAM_PLUGIN_VERSION</c>, and session-start records it
+    /// for doctor to compare against the binary (D108).
+    /// </summary>
+    [Fact]
+    public void SessionStart_RecordsThePluginVersionThePluginStated()
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+
+        var (exitCode, _, _) = EngramProcess.RunWithStdinAndEnvironment(
+            home.Root, null, new Dictionary<string, string?> { ["ENGRAM_PLUGIN_VERSION"] = "9.8.7" }, "hook", "session-start");
+
+        Assert.Equal(0, exitCode);
+        var record = Assert.Single(SessionStartRecords(home));
+        Assert.Equal("9.8.7", record.GetProperty("plugin_version").GetString());
+    }
+
+    // The nearest inputs that must not record a version: no variable, and one that says nothing.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void SessionStart_WithNoPluginVersionStated_RecordsNone(string? stated)
+    {
+        Assert.SkipUnless(EndToEndBinary.Path is not null, EndToEndBinary.SkipReason);
+
+        using var home = new TestHome();
+
+        var (exitCode, _, _) = EngramProcess.RunWithStdinAndEnvironment(
+            home.Root, null, new Dictionary<string, string?> { ["ENGRAM_PLUGIN_VERSION"] = stated }, "hook", "session-start");
+
+        Assert.Equal(0, exitCode);
+        var record = Assert.Single(SessionStartRecords(home));
+        Assert.False(record.TryGetProperty("plugin_version", out _), "a blank or unset variable must leave the field absent");
+    }
+
     // §6.13's cwd fallback (payload?.Cwd ?? Directory.GetCurrentDirectory()) only matters when
     // the two disagree, so this drives the real binary with a process working directory that is
     // deliberately not a checkout — the primer can only find one by reading the stdin payload.

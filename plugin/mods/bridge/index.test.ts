@@ -3,6 +3,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On, PromptSubmitInput } from 'claude-code'
 import { installFakeEngine } from '../shared/testing'
 import type { ProcessResult, RoutingTable } from '../shared/testing'
+import { PLUGIN_VERSION } from '../shared/client'
 import { GUARD_TIMEOUT_MS, PRIMER_TIMEOUT_MS } from './index'
 
 const BIN = '/fake/bin/engram'
@@ -110,6 +111,8 @@ test('the first prompt carries the session-start primer after what was attached;
   expect(call!.argv).toEqual([BIN, 'hook', 'session-start', '--source', 'mod'])
   expect(call!.timeoutMs).toBe(PRIMER_TIMEOUT_MS)
   expect(JSON.parse(call!.stdin!)).toEqual({ session_id: SESSION, cwd: CWD, hook_event_name: 'SessionStart' })
+  // The plugin's release rides on session-start only, as hooks.json sets it for the classic hook.
+  expect(call!.env).toEqual({ ENGRAM_PLUGIN_VERSION: PLUGIN_VERSION })
 })
 
 test('the primer: once per process, once after each /clear, once after each compaction, never otherwise', async ($, on) => {
@@ -224,6 +227,7 @@ test('a spawn gets the subagent primer and a blank line before its prompt, typed
     hook_event_name: 'SubagentStart',
     agent_type: 'Explore',
   })
+  expect(call!.env).toBeUndefined()
 })
 
 test('a resumed spawn runs no verb and its prompt passes as given', async ($, on) => {
@@ -325,6 +329,7 @@ test('an edit that ran is reported to file-touched with a PostToolUse payload', 
     tool_name: tool,
     tool_input: input,
   })
+  expect(call!.env).toBeUndefined()
 })
 
 test("a call the bridge's own guard denied triggers no file-touched", async ($, on) => {

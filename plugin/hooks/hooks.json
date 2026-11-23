@@ -11,7 +11,7 @@
           },
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/engram-exec.sh\" hook session-start"
+            "command": "ENGRAM_PLUGIN_VERSION=1.4.0 \"${CLAUDE_PLUGIN_ROOT}/hooks/engram-exec.sh\" hook session-start"
           }
         ]
       }

@@ -16,8 +16,21 @@ internal static class EngramProcess
         string home, string workingDirectory, string? stdin, params string[] args) =>
         Execute(EndToEndBinary.Path!, home, stdin, args, workingDirectory);
 
+    /// <summary>
+    /// <see cref="RunWithStdin"/> with variables layered over the inherited environment; a null
+    /// value removes the variable, so "unset" does not depend on the shell that ran the suite.
+    /// </summary>
+    public static (int ExitCode, string Stdout, string Stderr) RunWithStdinAndEnvironment(
+        string home, string? stdin, IReadOnlyDictionary<string, string?> environment, params string[] args) =>
+        Execute(EndToEndBinary.Path!, home, stdin, args, environment: environment);
+
     internal static (int ExitCode, string Stdout, string Stderr) Execute(
-        string binary, string home, string? stdin, string[] args, string? workingDirectory = null)
+        string binary,
+        string home,
+        string? stdin,
+        string[] args,
+        string? workingDirectory = null,
+        IReadOnlyDictionary<string, string?>? environment = null)
     {
         var startInfo = new ProcessStartInfo(binary)
         {
@@ -38,6 +51,18 @@ internal static class EngramProcess
         }
 
         startInfo.Environment["ENGRAM_HOME"] = home;
+
+        foreach (var (key, value) in environment ?? new Dictionary<string, string?>())
+        {
+            if (value is null)
+            {
+                startInfo.Environment.Remove(key);
+            }
+            else
+            {
+                startInfo.Environment[key] = value;
+            }
+        }
 
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start engram process.");
 

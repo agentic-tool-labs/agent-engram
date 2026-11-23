@@ -20,7 +20,7 @@ namespace Engram.EndToEnd.Tests;
 public class DoctorCommandTests
 {
     private static readonly string[] ExpectedChecks =
-        ["home", "store", "server", "claude code", "embedding", "vector index", "backups", "edit queue", "code analysis", "tree-sitter"];
+        ["home", "store", "server", "claude code", "embedding", "vector index", "backups", "edit queue", "code analysis", "tree-sitter", "plugin"];
 
     [Fact]
     public void Doctor_OnAnInitialisedHome_ExitsZeroAndReportsEveryCheck()
@@ -119,11 +119,18 @@ public class DoctorCommandTests
             }
         }
 
+        // A plugin from another release, so the plugin row (D108) reads the log and warns inside the
+        // snapshot, and a warning still exits 0.
+        File.AppendAllText(
+            Path.Combine(home.Root, "telemetry.jsonl"),
+            $$"""{"timestamp":"{{DateTime.UtcNow:o}}","session_id":"s","kind":"session-start","plugin_version":"0.0.1"}""" + "\n");
+
         var before = Snapshot(home.Root);
         var (exitCode, doctorOut, _) = EngramProcess.Run(home.Root, "doctor", "--offline", "--no-repo");
         var after = Snapshot(home.Root);
 
         Assert.Equal(0, exitCode);
+        Assert.Contains("plugin 0.0.1, binary", doctorOut, StringComparison.Ordinal);
 
         if (hasNeglectedRepo)
         {
