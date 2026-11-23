@@ -73,7 +73,7 @@
       "type": "number",
       "title": "Automatic digest interval (turns)",
       "description": "Run a memory digest after every N completed turns of the main conversation, or sooner (from the second turn on) after a turn that edited files; 0 disables it.",
-      "default": 0
+      "default": 10
     },
     "tail_auto_open": {
       "type": "boolean",
@@ -92,7 +92,7 @@
       "type": "boolean",
       "title": "Save digest memories without review",
       "description": "Save what the automatic digest proposes straight away and show it in a toast, instead of waiting for you to tick and press Save. Saved facts are marked as unreviewed.",
-      "default": false
+      "default": true
     }
   }
 }

@@ -89,14 +89,10 @@ public class HookDeliveryDoctorTests
         using var sandbox = new SandboxHome();
         Record(sandbox, TelemetryEventKind.SessionStart, "a");
         Record(sandbox, TelemetryEventKind.ModCall, "b");
-        var before = Snapshot(sandbox);
+        var before = HomeSnapshot.Take(sandbox.Home.Root);
 
         HookDelivery(sandbox);
 
-        Assert.Equal(before, Snapshot(sandbox));
+        Assert.Equal(before, HomeSnapshot.Take(sandbox.Home.Root));
     }
-
-    private static Dictionary<string, (long Length, DateTime Written)> Snapshot(SandboxHome sandbox) =>
-        Directory.EnumerateFiles(sandbox.Home.Root, "*", SearchOption.AllDirectories)
-            .ToDictionary(file => file, file => (new FileInfo(file).Length, File.GetLastWriteTimeUtc(file)));
 }

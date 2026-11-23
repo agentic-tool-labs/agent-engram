@@ -19,6 +19,14 @@ Leave out anything a fresh agent can read off the code or git history in a few s
 anything true only inside this conversation ("we are about to run the tests"), and
 restatements of the task you were given.
 
+**Where each one goes** — pick the scope by what the fact is about:
+
+- a lesson about how you should behave next time: `scope: "agent"`, with `agent` set to the
+  role memory key the primer gave you (never an instance name)
+- a fact about this codebase that holds beyond this session: `scope: "project"`, with
+  `project_dir` set to your current working directory, absolute
+- anything else worth keeping: leave `scope` out, and it is saved as a session note
+
 Each fact must stand alone. "That approach doesn't work" is worthless out of context;
 "a deferred SQLite transaction that upgrades to a writer raises SQLITE_BUSY_SNAPSHOT,
 which busy_timeout cannot wait out" is the same fact made portable.
