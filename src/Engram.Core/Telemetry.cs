@@ -427,7 +427,16 @@ public sealed record TelemetryRecord(
     /// <c>--source mod</c>; absent on a classic hook's record, so no existing record changes (D107).
     /// </summary>
     [property: JsonPropertyName("source"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? Source = null);
+    string? Source = null,
+
+    /// <summary>
+    /// The plugin version that ran this <c>session-start</c>, as the plugin stated it in
+    /// <c>ENGRAM_PLUGIN_VERSION</c>; absent when the variable is unset or blank, and on every other
+    /// kind. Recorded by the process the plugin launched, never inferred from Claude Code's files:
+    /// the <c>metal.json</c> rule (D108).
+    /// </summary>
+    [property: JsonPropertyName("plugin_version"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? PluginVersion = null);
 
 [JsonSerializable(typeof(TelemetryRecord))]
 internal sealed partial class TelemetryJsonContext : JsonSerializerContext;

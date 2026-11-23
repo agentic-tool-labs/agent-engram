@@ -70,8 +70,27 @@ public static class CliApp
             "invariant" => InvariantCommand.Run(homePath, rest, stdout, stderr),
             "profile" => ProfileCommand.Run(homePath, rest, stdout, stderr),
             "report" => ReportCommand.Run(homePath, rest, stdout, stderr),
+            "version" or "--version" => Version(homePath, stdout),
             _ => Usage(stderr),
         };
+    }
+
+    /// <summary>
+    /// The binary's version and the plugin's, as the newest session start recorded it (D108). Opens no
+    /// database and writes nothing, so it answers on a home that does not exist yet.
+    /// </summary>
+    private static int Version(string? homePath, TextWriter stdout)
+    {
+        var plugin = Diagnostics.RecordedPluginVersion(EngramHome.ResolveFromProcess(homePath));
+
+        stdout.WriteLine($"engram {EngramVersion.Current}");
+        stdout.WriteLine(plugin is null ? "plugin not recorded" : $"plugin {plugin}");
+        if (plugin is not null && plugin != EngramVersion.Current)
+        {
+            stdout.WriteLine("versions differ: update the plugin and the binary to the same release");
+        }
+
+        return 0;
     }
 
     private static int Usage(TextWriter stderr)
@@ -86,6 +105,7 @@ public static class CliApp
         writer.WriteLine();
         writer.WriteLine("commands:");
         writer.WriteLine("  home                              print resolved Engram home paths");
+        writer.WriteLine("  version, --version                 the binary's version and the plugin's, as session start recorded it");
         writer.WriteLine("  init [--with-embeddings]          create the Engram home directory structure and default config");
         writer.WriteLine("  serve [--port <n>]                 run the MCP server over HTTP in the foreground");
         writer.WriteLine("  start [--port <n>]                 start the MCP server as a detached daemon");
