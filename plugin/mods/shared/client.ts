@@ -11,7 +11,7 @@ import type { ApiFailure, ApiResult, ModOp, ModOps } from './types'
  * the binary's. hooks.json states the same version for the classic hook; a repo test holds the two
  * to the binary's version.
  */
-export const PLUGIN_VERSION = '1.4.0'
+export const PLUGIN_VERSION = '1.4.1'
 
 export type ModIo = {
   run(

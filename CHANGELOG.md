@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.4.1 — 2026-11-23
+
+Everything merged since 1.4.0 (PRs #30 and #31), and one version for the binary and the plugin.
+
+### Upgrade notes
+
+- No schema change.
+- Restart the server after installing (`engram stop`, then `engram start`), and run
+  `/reload-plugins` in a running Claude Code session, so both run 1.4.1.
+- The digest now runs by default: `digest_every_n_turns` defaults to 10 and `digest_auto_save` to
+  true, so its memories are saved without review. Set `digest_every_n_turns` to 0 to turn it off.
+
+### Versions
+
+- The binary and the plugin are released as one version. `hook session-start` records the
+  plugin's version, and `engram doctor` has a `plugin` row that warns when it differs from the
+  binary's (D108).
+- `engram --version` (or `engram version`) prints the binary's version and the plugin's, and a third
+  line when they differ. It reads the same record as the doctor row and writes nothing.
+- One test asserts the version is the same in every place that states it.
+
+### Model learning
+
+- Each role's memory now holds lessons. The primer names the lessons it delivered, and the
+  `lessons` mod lookup reads them back. A recorded judgement of whether a lesson held chooses which ones
+  the role block delivers (D106).
+- The digest mod derives lessons from the user's own prompts only, files them, and judges the ones
+  it was given. `/engram:digest` says where a lesson and a project fact go.
+- An ordinary main session takes the role key `main`, so it has a lesson channel too (D104).
+- `/mod/v1/remember` takes a scope, through the same routing as `engram_remember` (D105).
+- `engram probe` reports memory adoption per Claude Code session, from `tool-observed`.
+
+### Managed installs
+
+- Where an organization manages Claude Code and classic hooks are skipped, the `bridge` mod runs
+  Engram's hook verbs from mod events. Where classic hooks run, the verbs stand down, so nothing
+  fires twice. Doctor's `hook delivery` row says which channel delivered the newest session start
+  (D107).
+
+### Tests
+
+- Two plugin test files match Claude Code 2.1.330's types, so the plugin typecheck passes.
+- The file-snapshot guards release the connection pool before an in-process home snapshot, so they
+  see writes rather than pool state.
+
 ## 1.4.0 — 2026-11-21
 
 Everything merged since 1.3.18 (PRs #8–#28).
